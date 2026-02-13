@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TreeKB - Knowledge Graph System</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <h1>🌳 TreeKB</h1>
+        <span class="subtitle">Knowledge Graph</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-btn active" data-tab="ask">
+          <span class="icon">💬</span> Ask
+        </button>
+        <button class="nav-btn" data-tab="tree">
+          <span class="icon">🗂️</span> Tree
+        </button>
+        <button class="nav-btn" data-tab="upload">
+          <span class="icon">📤</span> Upload
+        </button>
+        <button class="nav-btn" data-tab="documents">
+          <span class="icon">📄</span> Documents
+        </button>
+        <button class="nav-btn" data-tab="conflicts">
+          <span class="icon">⚠️</span> Conflicts
+        </button>
+        <button class="nav-btn" data-tab="stats">
+          <span class="icon">📊</span> Stats
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="theme-switch">
+          <button class="theme-btn" id="theme-toggle" title="Toggle theme">
+            <span class="theme-icon light">☀️</span>
+            <span class="theme-icon dark">🌙</span>
+          </button>
+        </div>
+        <div class="lang-switch">
+          <button class="lang-btn active" data-lang="en">EN</button>
+          <button class="lang-btn" data-lang="zh">中文</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- Ask Tab -->
+      <section class="tab-content active" id="tab-ask">
+        <div class="tab-header">
+          <h2 data-i18n="ask_title">Ask a Question</h2>
+          <p data-i18n="ask_subtitle">Query the knowledge base with natural language</p>
+        </div>
+
+        <div class="ask-container">
+          <div class="ask-input-wrapper">
+            <textarea
+              id="query-input"
+              class="ask-input"
+              placeholder="Ask anything... (e.g., 'Compare Product A and B', '销售流程是什么？')"
+              rows="3"
+            ></textarea>
+            <div class="ask-options">
+              <label class="checkbox-label" title="Automatically classifies your query type (comparison, recommendation, reasoning, etc.) and routes to the best handler">
+                <input type="checkbox" id="use-classification" checked>
+                <span data-i18n="smart_routing">Smart Routing</span>
+                <span class="tooltip-icon" data-i18n-title="smart_routing_tooltip">?</span>
+              </label>
+              <label class="checkbox-label" title="Combines BM25 keyword matching with semantic vector search for better relevance">
+                <input type="checkbox" id="use-hybrid" checked>
+                <span data-i18n="hybrid_search">Hybrid Search</span>
+                <span class="tooltip-icon" data-i18n-title="hybrid_search_tooltip">?</span>
+              </label>
+              <label class="checkbox-label" title="Show step-by-step trace of how your query was processed">
+                <input type="checkbox" id="show-trace">
+                <span data-i18n="show_trace">Show Trace</span>
+                <span class="tooltip-icon" data-i18n-title="show_trace_tooltip">?</span>
+              </label>
+              <button type="button" class="btn btn-small btn-text" id="toggle-advanced-options">
+                <span data-i18n="advanced_options">Advanced Options</span> <span id="advanced-toggle-icon">+</span>
+              </button>
+            </div>
+
+            <div class="advanced-options hidden" id="advanced-options">
+              <div class="options-grid">
+                <div class="option-group option-group-wide">
+                  <div class="option-label-row">
+                    <label for="opt-query-type" data-i18n="query_type">Query Type</label>
+                    <span class="option-help" data-i18n-title="query_type_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="query_type_desc">Auto-detect or manually select how to process your query</p>
+                  <select id="opt-query-type" class="option-select">
+                    <option value="auto" data-i18n="query_type_auto">Auto (Recommended)</option>
+                    <option value="simple_lookup" data-i18n="query_type_simple">Simple Lookup - Direct fact retrieval</option>
+                    <option value="comparison" data-i18n="query_type_comparison">Comparison - Compare entities</option>
+                    <option value="recommendation" data-i18n="query_type_recommendation">Recommendation - Suggest options</option>
+                    <option value="reasoning" data-i18n="query_type_reasoning">Reasoning - Multi-hop analysis</option>
+                    <option value="aggregation" data-i18n="query_type_aggregation">Aggregation - Summarize content</option>
+                  </select>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-show-confidence" data-i18n="show_confidence">Show Confidence</label>
+                    <span class="option-help" data-i18n-title="show_confidence_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="show_confidence_desc">Display confidence score in results</p>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="opt-show-confidence" checked>
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-min-answer-confidence" data-i18n="min_answer_confidence">Min Answer Confidence</label>
+                    <span class="option-help" data-i18n-title="min_answer_confidence_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="min_answer_confidence_desc">Warn if answer confidence is below this</p>
+                  <input type="range" id="opt-min-answer-confidence" min="0" max="1" value="0.3" step="0.05">
+                  <span class="option-value" id="opt-min-answer-confidence-value">0.30</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-top-k" data-i18n="top_k">Top K Nodes</label>
+                    <span class="option-help" data-i18n-title="top_k_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="top_k_desc">Number of candidate nodes to retrieve</p>
+                  <input type="range" id="opt-top-k" min="5" max="50" value="30" step="5">
+                  <span class="option-value" id="opt-top-k-value">30</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-max-chunks" data-i18n="max_chunks">Max Chunks</label>
+                    <span class="option-help" data-i18n-title="max_chunks_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="max_chunks_desc">Maximum text chunks to include in context</p>
+                  <input type="range" id="opt-max-chunks" min="5" max="50" value="20" step="5">
+                  <span class="option-value" id="opt-max-chunks-value">20</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-min-confidence" data-i18n="min_confidence">Min Confidence</label>
+                    <span class="option-help" data-i18n-title="min_confidence_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="min_confidence_desc">Minimum similarity score for vector search</p>
+                  <input type="range" id="opt-min-confidence" min="0" max="1" value="0" step="0.05">
+                  <span class="option-value" id="opt-min-confidence-value">0.00</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-hybrid-alpha" data-i18n="hybrid_alpha">Hybrid Alpha</label>
+                    <span class="option-help" data-i18n-title="hybrid_alpha_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="hybrid_alpha_desc">Balance: 0=keyword, 1=semantic</p>
+                  <input type="range" id="opt-hybrid-alpha" min="0" max="1" value="0.5" step="0.1">
+                  <span class="option-value" id="opt-hybrid-alpha-value">0.5</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-reranker-threshold" data-i18n="reranker_threshold">Reranker Threshold</label>
+                    <span class="option-help" data-i18n-title="reranker_threshold_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="reranker_threshold_desc">Min score to keep after LLM re-ranking</p>
+                  <input type="range" id="opt-reranker-threshold" min="0" max="1" value="0.3" step="0.05">
+                  <span class="option-value" id="opt-reranker-threshold-value">0.30</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-context-window" data-i18n="context_window">Context Window</label>
+                    <span class="option-help" data-i18n-title="context_window_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="context_window_desc">Adjacent chunks to include for context</p>
+                  <input type="range" id="opt-context-window" min="0" max="5" value="1" step="1">
+                  <span class="option-value" id="opt-context-window-value">1</span>
+                </div>
+                <div class="option-group">
+                  <div class="option-label-row">
+                    <label for="opt-temperature" data-i18n="temperature">Temperature</label>
+                    <span class="option-help" data-i18n-title="temperature_help">?</span>
+                  </div>
+                  <p class="option-desc" data-i18n="temperature_desc">LLM creativity: 0=precise, 1=creative</p>
+                  <input type="range" id="opt-temperature" min="0" max="1" value="0.3" step="0.1">
+                  <span class="option-value" id="opt-temperature-value">0.3</span>
+                </div>
+              </div>
+            </div>
+            <button id="ask-btn" class="btn btn-primary">
+              <span data-i18n="ask_btn">Ask</span>
+              <span class="loading-spinner hidden"></span>
+            </button>
+          </div>
+
+          <div id="ask-result" class="ask-result hidden">
+            <div class="result-header">
+              <span class="query-type-badge" id="query-type-badge"></span>
+              <span class="confidence-badge" id="confidence-badge"></span>
+              <div class="feedback-buttons" id="feedback-buttons">
+                <button class="feedback-btn" data-rating="up" title="Helpful">👍</button>
+                <button class="feedback-btn" data-rating="down" title="Not helpful">👎</button>
+              </div>
+            </div>
+            <div class="result-trace hidden" id="result-trace"></div>
+            <div class="result-content" id="result-content"></div>
+            <div class="result-citations hidden" id="result-citations"></div>
+            <div class="result-sources" id="result-sources"></div>
+            <div class="related-questions hidden" id="related-questions">
+              <h4 data-i18n="related_questions">Related Questions</h4>
+              <div class="related-questions-list" id="related-questions-list"></div>
+            </div>
+          </div>
+
+          <div class="suggestions-container hidden" id="suggestions-container">
+            <ul class="suggestions-list" id="suggestions-list"></ul>
+          </div>
+
+          <!-- Query History -->
+          <div class="query-history" id="query-history">
+            <div class="history-header">
+              <h4 data-i18n="query_history">Recent Queries</h4>
+              <button class="btn btn-small btn-text" id="clear-history-btn" data-i18n="clear">Clear</button>
+            </div>
+            <div class="history-list" id="history-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tree Tab -->
+      <section class="tab-content" id="tab-tree">
+        <div class="tab-header">
+          <h2 data-i18n="tree_title">Knowledge Tree</h2>
+          <div class="header-actions">
+            <div class="view-toggle">
+              <button class="view-btn active" data-view="list" title="List View">
+                <span>📋</span>
+              </button>
+              <button class="view-btn" data-view="graph" title="Graph View">
+                <span>🕸️</span>
+              </button>
+            </div>
+            <button id="empty-tree-btn" class="btn btn-danger" title="Delete all nodes and data">
+              <span data-i18n="empty_tree">Empty Tree</span>
+            </button>
+            <button id="refresh-tree-btn" class="btn btn-secondary">
+              <span data-i18n="refresh">Refresh</span>
+            </button>
+            <button id="add-node-btn" class="btn btn-primary">
+              <span data-i18n="add_node">+ Add Node</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="tree-container">
+          <div class="tree-view" id="tree-view">
+            <!-- Skeleton loader -->
+            <div class="skeleton-tree" id="skeleton-tree">
+              <div class="skeleton-node"><div class="skeleton-line w-40"></div></div>
+              <div class="skeleton-node indent-1"><div class="skeleton-line w-60"></div></div>
+              <div class="skeleton-node indent-1"><div class="skeleton-line w-50"></div></div>
+              <div class="skeleton-node indent-2"><div class="skeleton-line w-70"></div></div>
+              <div class="skeleton-node indent-2"><div class="skeleton-line w-45"></div></div>
+              <div class="skeleton-node indent-1"><div class="skeleton-line w-55"></div></div>
+            </div>
+          </div>
+          <div class="graph-view hidden" id="graph-view">
+            <div class="graph-controls">
+              <button class="btn btn-small" id="graph-zoom-in" title="Zoom In">+</button>
+              <button class="btn btn-small" id="graph-zoom-out" title="Zoom Out">-</button>
+              <button class="btn btn-small" id="graph-reset" title="Reset View">⟲</button>
+            </div>
+            <svg id="graph-svg"></svg>
+          </div>
+          <div class="node-detail hidden" id="node-detail">
+            <div class="node-detail-header">
+              <h3 id="node-detail-name"></h3>
+              <button class="close-btn" id="close-node-detail">&times;</button>
+            </div>
+            <div class="node-detail-content" id="node-detail-content"></div>
+          </div>
+        </div>
+
+        <!-- Add Node Modal -->
+        <div class="modal hidden" id="add-node-modal">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3 data-i18n="add_node">Add New Node</h3>
+              <button class="close-btn" id="close-add-node-modal">&times;</button>
+            </div>
+            <form id="add-node-form">
+              <div class="form-group">
+                <label for="new-node-id" data-i18n="node_id">Node ID</label>
+                <input type="text" id="new-node-id" required placeholder="e.g., product.new-item">
+              </div>
+              <div class="form-group">
+                <label for="new-node-name" data-i18n="node_name">Name</label>
+                <input type="text" id="new-node-name" required placeholder="Display name">
+              </div>
+              <div class="form-group">
+                <label for="new-node-parent" data-i18n="parent_node">Parent Node (optional)</label>
+                <select id="new-node-parent">
+                  <option value="">-- No Parent (Root) --</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="new-node-summary" data-i18n="summary">Summary</label>
+                <textarea id="new-node-summary" rows="3" placeholder="Brief description"></textarea>
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-add-node" data-i18n="cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" data-i18n="create">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Upload Tab -->
+      <section class="tab-content" id="tab-upload">
+        <div class="tab-header">
+          <h2 data-i18n="upload_title">Upload Documents</h2>
+          <p data-i18n="upload_subtitle">Add documents to the knowledge base</p>
+        </div>
+
+        <div class="upload-container">
+          <div class="upload-zone" id="upload-zone">
+            <div class="upload-icon">📁</div>
+            <p data-i18n="drop_files">Drop files here or click to browse</p>
+            <p class="upload-hint" data-i18n="supported_formats">Supported: PDF, DOCX, XLSX, HTML, TXT, MD, CSV, JSON</p>
+            <input type="file" id="file-input" multiple accept=".pdf,.docx,.xlsx,.xls,.html,.htm,.txt,.md,.csv,.json" hidden>
+          </div>
+
+          <div class="upload-options">
+            <div class="form-group">
+              <label for="target-node" data-i18n="target_node">Target Node (optional)</label>
+              <select id="target-node">
+                <option value="">-- Auto-detect --</option>
+              </select>
+            </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="upload-use-llm" checked>
+              <span data-i18n="use_llm_extraction">Use LLM for metadata extraction</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="upload-detect-conflicts" checked>
+              <span data-i18n="detect_conflicts">Detect conflicts</span>
+            </label>
+          </div>
+
+          <div class="file-list hidden" id="file-list">
+            <h4 data-i18n="selected_files">Selected Files</h4>
+            <ul id="file-list-items"></ul>
+            <button id="upload-btn" class="btn btn-primary">
+              <span data-i18n="upload_btn">Upload & Process</span>
+              <span class="loading-spinner hidden"></span>
+            </button>
+          </div>
+
+          <div class="upload-result hidden" id="upload-result"></div>
+        </div>
+      </section>
+
+      <!-- Documents Tab -->
+      <section class="tab-content" id="tab-documents">
+        <div class="tab-header">
+          <h2 data-i18n="documents_title">Documents</h2>
+          <div class="header-actions">
+            <select id="doc-status-filter" class="filter-select">
+              <option value="">All Status</option>
+              <option value="processing">Processing</option>
+              <option value="processed">Processed</option>
+              <option value="pending">Pending</option>
+              <option value="failed">Failed</option>
+            </select>
+            <button id="refresh-docs-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
+          </div>
+        </div>
+
+        <div class="documents-container">
+          <table class="data-table" id="documents-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th data-i18n="filename">Filename</th>
+                <th data-i18n="type">Type</th>
+                <th data-i18n="status">Status</th>
+                <th data-i18n="processing_step">Current Step</th>
+                <th data-i18n="chunks">Chunks</th>
+                <th data-i18n="uploaded">Uploaded</th>
+                <th data-i18n="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="documents-tbody">
+              <!-- Skeleton rows -->
+              <tr class="skeleton-row">
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-70"></div></td>
+                <td><div class="skeleton-line w-30"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+                <td><div class="skeleton-line w-50"></div></td>
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-60"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+              </tr>
+              <tr class="skeleton-row">
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-60"></div></td>
+                <td><div class="skeleton-line w-30"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+                <td><div class="skeleton-line w-45"></div></td>
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-55"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+              </tr>
+              <tr class="skeleton-row">
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-80"></div></td>
+                <td><div class="skeleton-line w-30"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+                <td><div class="skeleton-line w-35"></div></td>
+                <td><div class="skeleton-line w-20"></div></td>
+                <td><div class="skeleton-line w-50"></div></td>
+                <td><div class="skeleton-line w-40"></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Conflicts Tab -->
+      <section class="tab-content" id="tab-conflicts">
+        <div class="tab-header">
+          <h2 data-i18n="conflicts_title">Conflicts</h2>
+          <button id="refresh-conflicts-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
+        </div>
+
+        <div class="conflicts-container">
+          <div class="conflict-stats" id="conflict-stats"></div>
+          <div class="conflict-list" id="conflict-list">
+            <!-- Skeleton conflicts -->
+            <div class="skeleton-conflict">
+              <div class="skeleton-line w-80"></div>
+              <div class="skeleton-line w-100"></div>
+              <div class="skeleton-line w-60"></div>
+            </div>
+            <div class="skeleton-conflict">
+              <div class="skeleton-line w-70"></div>
+              <div class="skeleton-line w-90"></div>
+              <div class="skeleton-line w-50"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stats Tab -->
+      <section class="tab-content" id="tab-stats">
+        <div class="tab-header">
+          <h2 data-i18n="stats_title">System Statistics</h2>
+          <div class="header-actions">
+            <button id="sync-aliases-btn" class="btn btn-secondary" title="Generate search aliases for nodes without them">
+              <span data-i18n="sync_aliases">Sync Aliases</span>
+              <span class="loading-spinner hidden"></span>
+            </button>
+            <button id="sync-embeddings-btn" class="btn btn-secondary">
+              <span data-i18n="sync_embeddings">Sync Embeddings</span>
+              <span class="loading-spinner hidden"></span>
+            </button>
+            <button id="extract-entities-btn" class="btn btn-secondary" title="Extract entities and facts from documents">
+              <span data-i18n="extract_entities">Extract Entities</span>
+              <span class="loading-spinner hidden"></span>
+            </button>
+            <button id="refresh-stats-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
+          </div>
+        </div>
+
+        <div class="stats-container" id="stats-container">
+          <!-- Skeleton stats -->
+          <div class="skeleton-stats">
+            <div class="skeleton-stat-card">
+              <div class="skeleton-circle"></div>
+              <div class="skeleton-line w-60"></div>
+              <div class="skeleton-line w-40"></div>
+            </div>
+            <div class="skeleton-stat-card">
+              <div class="skeleton-circle"></div>
+              <div class="skeleton-line w-50"></div>
+              <div class="skeleton-line w-45"></div>
+            </div>
+            <div class="skeleton-stat-card">
+              <div class="skeleton-circle"></div>
+              <div class="skeleton-line w-70"></div>
+              <div class="skeleton-line w-35"></div>
+            </div>
+            <div class="skeleton-stat-card">
+              <div class="skeleton-circle"></div>
+              <div class="skeleton-line w-55"></div>
+              <div class="skeleton-line w-50"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast hidden" id="toast">
+    <span class="toast-message" id="toast-message"></span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
