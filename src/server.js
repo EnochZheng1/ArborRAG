@@ -18,6 +18,16 @@ import {
   getSupportedExtensions
 } from "./ingest/index.js";
 import {
+  startIngestionQueue,
+  enqueueIngestionJob,
+  enqueueIngestionJobs,
+  getIngestionJob,
+  listIngestionJobs,
+  retryIngestionJob,
+  cancelIngestionJob,
+  getIngestionQueueStats
+} from "./ingest/jobQueue.js";
+import {
   getFullTree,
   getNode,
   getChildren,
@@ -61,6 +71,7 @@ initDb();
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(requestLogger);
+startIngestionQueue();
 
 // Serve static files from public directory
 const publicDir = path.join(__dirname, "../public");
@@ -145,15 +156,29 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const { targetNodeId, useLLM = true, detectConflicts = true } = req.body || {};
-
-    const result = await processDocument(req.file.path, {
+    const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+    const processOptions = {
       targetNodeId,
       useLLM: useLLM === "true" || useLLM === true,
       detectConflicts: detectConflicts === "true" || detectConflicts === true
+    };
+
+    if (sync === "true" || sync === true) {
+      const result = await processDocument(req.file.path, processOptions);
+      return res.json(result);
+    }
+
+    const job = enqueueIngestionJob(req.file.path, {
+      originalName: req.file.originalname,
+      fileSize: req.file.size,
+      processOptions
     });
 
-    res.json(result);
+    res.status(202).json({
+      queued: true,
+      message: "File queued for background processing",
+      job
+    });
   } catch (err) {
     apiLogger.error("Upload error:", err.message);
     res.status(500).json({ error: err.message });
@@ -167,17 +192,87 @@ app.post("/upload/batch", upload.array("files", 20), async (req, res) => {
       return res.status(400).json({ error: "No files uploaded" });
     }
 
-    const { targetNodeId, useLLM = true } = req.body || {};
-    const filePaths = req.files.map(f => f.path);
-
-    const result = await processDocumentBatch(filePaths, {
+    const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+    const processOptions = {
       targetNodeId,
-      useLLM: useLLM === "true" || useLLM === true
-    });
+      useLLM: useLLM === "true" || useLLM === true,
+      detectConflicts: detectConflicts === "true" || detectConflicts === true
+    };
 
-    res.json(result);
+    if (sync === "true" || sync === true) {
+      const filePaths = req.files.map(f => f.path);
+      const result = await processDocumentBatch(filePaths, processOptions);
+      return res.json(result);
+    }
+
+    const jobs = enqueueIngestionJobs(req.files, { processOptions });
+    res.status(202).json({
+      queued: true,
+      message: `${jobs.length} files queued for background processing`,
+      jobs,
+      count: jobs.length
+    });
   } catch (err) {
     apiLogger.error("Batch upload error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== INGESTION JOB ENDPOINTS ====================
+
+app.get("/ingest/jobs", (req, res) => {
+  try {
+    const { status, limit = 50, offset = 0 } = req.query;
+    const jobs = listIngestionJobs({
+      status,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+    res.json({ jobs, count: jobs.length });
+  } catch (err) {
+    apiLogger.error("List ingestion jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/ingest/jobs/:id", (req, res) => {
+  try {
+    const job = getIngestionJob(parseInt(req.params.id));
+    if (!job) {
+      return res.status(404).json({ error: "Ingestion job not found" });
+    }
+    res.json(job);
+  } catch (err) {
+    apiLogger.error("Get ingestion job error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/ingest/jobs/:id/retry", (req, res) => {
+  try {
+    const job = retryIngestionJob(parseInt(req.params.id));
+    res.json({ success: true, job });
+  } catch (err) {
+    apiLogger.error("Retry ingestion job error:", err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/ingest/jobs/:id/cancel", (req, res) => {
+  try {
+    const job = cancelIngestionJob(parseInt(req.params.id));
+    res.json({ success: true, job });
+  } catch (err) {
+    apiLogger.error("Cancel ingestion job error:", err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/ingest/queue/stats", (req, res) => {
+  try {
+    res.json(getIngestionQueueStats());
+  } catch (err) {
+    apiLogger.error("Get ingestion queue stats error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -520,6 +615,7 @@ app.get("/stats", (req, res) => {
     const treeStats = getTreeStats();
     const embeddingCoverage = getEmbeddingCoverage();
     const conflictStats = getConflictStats();
+    const queueStats = getIngestionQueueStats();
 
     const docStats = db.prepare(`
       SELECT
@@ -560,7 +656,8 @@ app.get("/stats", (req, res) => {
       chunks: { active: chunkStats.total },
       embeddings: embeddingCoverage,
       conflicts: conflictStats,
-      extraction: extractionStats
+      extraction: extractionStats,
+      queue: queueStats
     });
   } catch (err) {
     apiLogger.error("Get stats error:", err.message);

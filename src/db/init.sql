@@ -50,6 +50,28 @@ CREATE TABLE IF NOT EXISTS documents (
   processed_at TEXT
 );
 
+-- ingestion_jobs: background processing queue for uploads
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_path TEXT NOT NULL,
+  original_name TEXT,
+  file_size INTEGER,
+  status TEXT DEFAULT 'queued', -- queued | processing | completed | failed | cancelled
+  options_json TEXT DEFAULT '{}',
+  attempt_count INTEGER DEFAULT 0,
+  max_attempts INTEGER DEFAULT 3,
+  error_message TEXT,
+  document_id INTEGER,
+  result_json TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  queued_at TEXT DEFAULT (datetime('now')),
+  available_at TEXT DEFAULT (datetime('now')),
+  started_at TEXT,
+  finished_at TEXT,
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
 -- embeddings：向量存储
 CREATE TABLE IF NOT EXISTS embeddings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

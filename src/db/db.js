@@ -79,6 +79,24 @@ function runMigrations() {
   ensureColumn("documents", "uploaded_at", "uploaded_at TEXT");
   ensureColumn("documents", "processed_at", "processed_at TEXT");
 
+  // Ingestion jobs table columns
+  ensureColumn("ingestion_jobs", "file_path", "file_path TEXT");
+  ensureColumn("ingestion_jobs", "original_name", "original_name TEXT");
+  ensureColumn("ingestion_jobs", "file_size", "file_size INTEGER");
+  ensureColumn("ingestion_jobs", "status", "status TEXT DEFAULT 'queued'");
+  ensureColumn("ingestion_jobs", "options_json", "options_json TEXT DEFAULT '{}'");
+  ensureColumn("ingestion_jobs", "attempt_count", "attempt_count INTEGER DEFAULT 0");
+  ensureColumn("ingestion_jobs", "max_attempts", "max_attempts INTEGER DEFAULT 3");
+  ensureColumn("ingestion_jobs", "error_message", "error_message TEXT");
+  ensureColumn("ingestion_jobs", "document_id", "document_id INTEGER");
+  ensureColumn("ingestion_jobs", "result_json", "result_json TEXT");
+  ensureColumn("ingestion_jobs", "created_at", "created_at TEXT");
+  ensureColumn("ingestion_jobs", "queued_at", "queued_at TEXT");
+  ensureColumn("ingestion_jobs", "available_at", "available_at TEXT");
+  ensureColumn("ingestion_jobs", "started_at", "started_at TEXT");
+  ensureColumn("ingestion_jobs", "finished_at", "finished_at TEXT");
+  ensureColumn("ingestion_jobs", "updated_at", "updated_at TEXT");
+
   // Embeddings table columns
   ensureColumn("embeddings", "ref_type", "ref_type TEXT");
   ensureColumn("embeddings", "ref_id", "ref_id TEXT");
@@ -130,6 +148,14 @@ function ensureIndexes() {
     {
       name: "idx_documents_status",
       sql: "CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)"
+    },
+    {
+      name: "idx_ingestion_jobs_status",
+      sql: "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status ON ingestion_jobs(status, available_at, queued_at)"
+    },
+    {
+      name: "idx_ingestion_jobs_created",
+      sql: "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_created ON ingestion_jobs(created_at)"
     },
     {
       name: "idx_conflicts_node",

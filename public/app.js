@@ -1473,21 +1473,39 @@ async function handleUpload() {
 
       const response = await fetch('/upload', { method: 'POST', body: formData });
       const result = await response.json();
-      displayUploadResult([result]);
+      if (result.queued) {
+        displayUploadResult([{
+          queued: true,
+          filename: selectedFiles[0].name,
+          job: result.job
+        }]);
+      } else {
+        displayUploadResult([result]);
+      }
     } else {
       selectedFiles.forEach(f => formData.append('files', f));
       if (targetNodeId) formData.append('targetNodeId', targetNodeId);
       formData.append('useLLM', useLLM);
+      formData.append('detectConflicts', detectConflicts);
 
       const response = await fetch('/upload/batch', { method: 'POST', body: formData });
       const result = await response.json();
-      displayUploadResult(result.documents || [result]);
+      if (result.queued && Array.isArray(result.jobs)) {
+        displayUploadResult(result.jobs.map(j => ({
+          queued: true,
+          filename: j.original_name || j.file_path || 'Uploaded file',
+          job: j
+        })));
+      } else {
+        displayUploadResult(result.documents || [result]);
+      }
     }
 
     showToast(t('success'), 'success');
     selectedFiles = [];
     document.getElementById('file-list').classList.add('hidden');
     document.getElementById('file-input').value = '';
+    loadDocuments();
   } catch (error) {
     showToast(error.message, 'error');
   } finally {
@@ -1502,13 +1520,26 @@ function displayUploadResult(results) {
   let html = '<h4>Upload Results</h4>';
 
   results.forEach(r => {
-    const status = r.success ? 'success' : 'failed';
+    const job = r.job || null;
+    const jobStatus = job?.status || r.status;
+    const isQueued = r.queued || jobStatus === 'queued' || jobStatus === 'processing';
+    const isSuccess = r.success === true || jobStatus === 'completed';
+    const isFailed = r.success === false || jobStatus === 'failed';
+    const statusText = isQueued ? jobStatus || 'queued' : (isSuccess ? 'processed' : 'failed');
+    const statusClass = isQueued
+      ? (jobStatus === 'processing' ? 'processing' : 'pending')
+      : (isSuccess ? 'processed' : 'failed');
+
     html += `
       <div style="padding: 12px; background: var(--bg-main); border-radius: 8px; margin-top: 12px;">
-        <strong>${r.filename}</strong>
-        <span class="status-badge status-${r.success ? 'processed' : 'failed'}">${status}</span>
+        <strong>${r.filename || job?.original_name || 'Uploaded file'}</strong>
+        <span class="status-badge status-${statusClass}">${statusText}</span>
+        ${job?.id ? `<p style="margin-top: 8px; color: var(--text-secondary);">Job #${job.id}</p>` : ''}
+        ${isQueued ? `<p style="margin-top: 8px; color: var(--text-secondary);">Queued for background processing</p>` : ''}
         ${r.stats?.chunkCount ? `<p style="margin-top: 8px; color: var(--text-secondary);">${r.stats.chunkCount} chunks created</p>` : ''}
+        ${job?.document_id ? `<p style="margin-top: 8px; color: var(--text-secondary);">Document #${job.document_id}</p>` : ''}
         ${r.errors?.length ? `<p style="color: var(--danger);">${r.errors.join(', ')}</p>` : ''}
+        ${job?.error_message ? `<p style="color: var(--danger);">${job.error_message}</p>` : ''}
       </div>
     `;
   });
