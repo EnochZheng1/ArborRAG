@@ -118,7 +118,8 @@ export async function generateEmbedding(text, options = {}) {
     // Use ai.models.embedContent with the model name
     const result = await ai.models.embedContent({
       model: EMBEDDING_MODEL,
-      contents: [{ parts: [{ text: normalizedText }] }]
+      contents: [{ parts: [{ text: normalizedText }] }],
+      config: { taskType }
     });
 
     // Track token usage (embeddings count tokens differently)
@@ -208,7 +209,8 @@ export async function generateEmbeddingBatch(texts, options = {}) {
         await rateLimitWait();
         const result = await ai.models.embedContent({
           model: EMBEDDING_MODEL,
-          contents: [{ parts: [{ text: item.text }] }]
+          contents: [{ parts: [{ text: item.text }] }],
+          config: { taskType }
         });
         const embedding = result?.embedding?.values || result?.embeddings?.[0]?.values;
 

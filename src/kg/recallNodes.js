@@ -9,6 +9,78 @@ import { getNode, getAncestors, getChildren, getSiblings } from "./graphTraversa
 const queryExpansionCache = new Map();
 const EXPANSION_CACHE_MAX = 500;
 
+const CJK_CHAR_REGEX = /[\u3400-\u4dbf\u4e00-\u9fff]/;
+const CJK_SEQUENCE_REGEX = /[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+
+function extractCjkNgrams(sequence, minN = 2, maxN = 3, maxTerms = 24) {
+  if (!sequence) return [];
+  const chars = [...sequence].filter(ch => CJK_CHAR_REGEX.test(ch));
+  if (chars.length === 0) return [];
+
+  const terms = [];
+  if (chars.length >= 2) {
+    terms.push(chars.join(""));
+  }
+
+  const upper = Math.min(maxN, chars.length);
+  for (let n = minN; n <= upper; n++) {
+    for (let i = 0; i <= chars.length - n; i++) {
+      terms.push(chars.slice(i, i + n).join(""));
+      if (terms.length >= maxTerms) return terms;
+    }
+  }
+
+  return terms;
+}
+
+function extractSearchTerms(query, options = {}) {
+  const {
+    maxTerms = 32,
+    includeSingleCjk = false
+  } = options;
+
+  if (!query || typeof query !== "string") return [];
+  const normalized = query.toLowerCase().trim();
+  if (!normalized) return [];
+
+  const terms = [];
+  const seen = new Set();
+  const addTerm = (term) => {
+    const value = String(term || "").trim();
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    terms.push(value);
+    return terms.length < maxTerms;
+  };
+
+  const latinTokens = normalized.match(/[a-z0-9]{2,}/g) || [];
+  for (const token of latinTokens) {
+    if (!addTerm(token)) return terms;
+  }
+
+  const spaceTokens = normalized.split(/\s+/).map(t => t.trim()).filter(Boolean);
+  for (const token of spaceTokens) {
+    if (CJK_CHAR_REGEX.test(token)) continue;
+    if (/[a-z0-9]/.test(token)) continue;
+    if (token.length >= 2 && !addTerm(token)) return terms;
+  }
+
+  const cjkSequences = normalized.match(CJK_SEQUENCE_REGEX) || [];
+  for (const sequence of cjkSequences) {
+    const grams = extractCjkNgrams(sequence, 2, 3, maxTerms);
+    for (const gram of grams) {
+      if (!addTerm(gram)) return terms;
+    }
+    if (includeSingleCjk && sequence.length <= 8) {
+      for (const ch of sequence) {
+        if (!addTerm(ch)) return terms;
+      }
+    }
+  }
+
+  return terms;
+}
+
 // Alias cache to avoid full DB scans per query
 const aliasCache = {
   loadedAt: 0,
@@ -73,7 +145,7 @@ function refreshAliasCache(force = false) {
       }
       exactMap.get(aliasLower).push(entry);
 
-      const tokens = aliasLower.split(/[\s\-_\\/.,;:()]+/).filter(t => t.length >= 2);
+      const tokens = extractSearchTerms(aliasLower, { maxTerms: 20 });
       for (const token of tokens) {
         if (!tokenIndex.has(token)) tokenIndex.set(token, []);
         tokenIndex.get(token).push(entry);
@@ -97,11 +169,8 @@ function normalizeByMax(value, max) {
 
 // Escape FTS5 special characters for safe querying
 function escapeFtsQuery(query) {
-  // FTS5 special chars: " * - ^ : ( )
-  // For simple queries, wrap terms in double quotes
-  const terms = query.trim().split(/\s+/).filter(Boolean);
+  const terms = extractSearchTerms(query, { maxTerms: 24 });
   if (terms.length === 0) return '""';
-  // Use OR for multiple terms to increase recall
   return terms.map(t => `"${t.replace(/"/g, '""')}"`).join(" OR ");
 }
 
@@ -234,8 +303,7 @@ export function bm25RecallChunks(query, limit = 50) {
 // Simple content search using LIKE (fallback when FTS fails or returns nothing)
 export function simpleContentSearch(query, limit = 30) {
   try {
-    // Split query into terms and search for any match
-    const terms = query.split(/\s+/).filter(t => t.length >= 2);
+    const terms = extractSearchTerms(query, { maxTerms: 32 });
     if (terms.length === 0) return [];
 
     // Build OR conditions for each term
@@ -253,7 +321,12 @@ export function simpleContentSearch(query, limit = 30) {
 
     logger.debug(`Simple content search for "${query}" found ${rows.length} chunks`);
 
-    return rows.map(r => ({
+    return rows.map(r => {
+      const contentLower = (r.content_clean || "").toLowerCase();
+      const matchedTerms = terms.filter(t => contentLower.includes(t)).length;
+      const score = Math.max(0.1, Math.min(1, matchedTerms / Math.min(terms.length, 8)));
+
+      return {
       chunk: {
         id: r.id,
         doc_title: r.doc_title,
@@ -266,8 +339,9 @@ export function simpleContentSearch(query, limit = 30) {
         node_id: r.node_id,
         uploaded_at: r.uploaded_at
       },
-      score: 0.5
-    }));
+      score
+    };
+    });
   } catch (err) {
     logger.error("Simple content search error:", err.message);
     return [];
@@ -598,7 +672,7 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
 
   // Stage 5: Name/alias matching (exact and partial)
   try {
-    const queryTerms = query.split(/\s+/).filter(t => t.length >= 2);
+    const queryTerms = extractSearchTerms(query, { maxTerms: 16 });
     for (const term of queryTerms) {
       const nameMatches = searchNodesByName(term, 5);
       for (const node of nameMatches) {
@@ -802,6 +876,7 @@ export { expandQuery };
 export function searchByAliases(query, limit = 10) {
   const queryLower = query.toLowerCase().trim();
   if (!queryLower) return [];
+  const queryTokens = extractSearchTerms(queryLower, { maxTerms: 20 });
 
   refreshAliasCache();
 
@@ -818,7 +893,6 @@ export function searchByAliases(query, limit = 10) {
   }
 
   // Partial match fallback (in-memory scan)
-  const queryTokens = queryLower.split(/\s+/).filter(t => t.length >= 2);
   const candidateSet = new Set();
   const maxCandidates = Math.max(limit * 20, 100);
   for (const token of queryTokens) {
@@ -841,6 +915,25 @@ export function searchByAliases(query, limit = 10) {
         matchedAlias: entry.alias,
         score: 0.6
       });
+      continue;
+    }
+
+    if (queryTokens.length > 0) {
+      let overlap = 0;
+      for (const token of queryTokens) {
+        if (token.length < 2) continue;
+        if (entry.aliasLower.includes(token) || token.includes(entry.aliasLower)) {
+          overlap++;
+        }
+      }
+      if (overlap > 0) {
+        const score = Math.min(0.75, 0.45 + overlap * 0.1);
+        matches.push({
+          node: entry.node,
+          matchedAlias: entry.alias,
+          score
+        });
+      }
     }
   }
 

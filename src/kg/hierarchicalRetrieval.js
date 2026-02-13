@@ -22,8 +22,8 @@ import {
 function calculateSimilarity(text1, text2) {
   if (!text1 || !text2) return 0;
 
-  const terms1 = new Set(text1.toLowerCase().split(/\s+/).filter(t => t.length > 2));
-  const terms2 = new Set(text2.toLowerCase().split(/\s+/).filter(t => t.length > 2));
+  const terms1 = new Set(extractQueryTerms(text1));
+  const terms2 = new Set(extractQueryTerms(text2));
 
   if (terms1.size === 0 || terms2.size === 0) return 0;
 
@@ -36,34 +36,44 @@ function calculateSimilarity(text1, text2) {
 }
 
 function extractQueryTerms(query) {
-  const rawTerms = query.split(/\s+/).filter(Boolean);
+  const normalized = String(query || "").toLowerCase().trim();
+  if (!normalized) return [];
+
   const terms = [];
-  for (const term of rawTerms) {
-    const trimmed = term.trim();
-    if (!trimmed) continue;
+  const seen = new Set();
+  const add = (value) => {
+    const token = String(value || "").trim();
+    if (!token || seen.has(token)) return;
+    seen.add(token);
+    terms.push(token);
+  };
 
-    if (/[\u4e00-\u9fff]/.test(trimmed)) {
-      if (trimmed.length >= 2) {
-        terms.push(trimmed.toLowerCase());
-      }
-      continue;
+  const latin = normalized.match(/[a-z0-9]{2,}/g) || [];
+  for (const token of latin) {
+    add(token);
+  }
+
+  const cjkSequences = normalized.match(/[\u3400-\u4dbf\u4e00-\u9fff]+/g) || [];
+  for (const sequence of cjkSequences) {
+    const chars = [...sequence];
+    if (chars.length >= 2) {
+      add(sequence);
     }
 
-    const cleaned = trimmed.replace(/[^A-Za-z0-9]/g, "");
-    if (!cleaned) continue;
-    if (cleaned.length > 2) {
-      terms.push(cleaned.toLowerCase());
-      continue;
-    }
-    if (cleaned.length === 2) {
-      const isAllCaps = cleaned === cleaned.toUpperCase();
-      if (isAllCaps) {
-        terms.push(cleaned.toLowerCase());
+    const maxN = Math.min(3, chars.length);
+    for (let n = 2; n <= maxN; n++) {
+      for (let i = 0; i <= chars.length - n; i++) {
+        add(chars.slice(i, i + n).join(""));
       }
     }
   }
 
-  return terms;
+  const otherTokens = normalized.split(/\s+/).filter(t => t.length >= 2);
+  for (const token of otherTokens) {
+    add(token);
+  }
+
+  return terms.slice(0, 36);
 }
 
 /**
@@ -401,7 +411,7 @@ export function applyHierarchicalScoring(chunks, relevantNodes, query) {
     nodeScores.set(node.node_id, node.relevance_score || 0);
   }
 
-  const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  const queryTerms = extractQueryTerms(query);
 
   return chunks.map(chunk => {
     let score = chunk.relevance_score || 0;

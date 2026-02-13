@@ -14,6 +14,45 @@ import { generateQueryEmbedding } from "../embedding/embedder.js";
 import { cosineSimilarity } from "../embedding/embedder.js";
 import { getNode, getAncestors, getChildren, getSiblings } from "./graphTraversal.js";
 
+function extractQueryTerms(query, maxTerms = 28) {
+  const normalized = String(query || "").toLowerCase().trim();
+  if (!normalized) return [];
+
+  const terms = [];
+  const seen = new Set();
+  const add = (token) => {
+    const value = String(token || "").trim();
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    terms.push(value);
+    return terms.length < maxTerms;
+  };
+
+  const latin = normalized.match(/[a-z0-9]{2,}/g) || [];
+  for (const token of latin) {
+    if (!add(token)) return terms;
+  }
+
+  const cjkSequences = normalized.match(/[\u3400-\u4dbf\u4e00-\u9fff]+/g) || [];
+  for (const sequence of cjkSequences) {
+    const chars = [...sequence];
+    if (chars.length >= 2 && !add(sequence)) return terms;
+    const upper = Math.min(3, chars.length);
+    for (let n = 2; n <= upper; n++) {
+      for (let i = 0; i <= chars.length - n; i++) {
+        if (!add(chars.slice(i, i + n).join(""))) return terms;
+      }
+    }
+  }
+
+  const other = normalized.split(/\s+/).filter(t => t.length >= 2);
+  for (const token of other) {
+    if (!add(token)) return terms;
+  }
+
+  return terms;
+}
+
 /**
  * Extract potential entity mentions from a query
  * @param {string} query - User query
@@ -177,8 +216,8 @@ export function retrieveChunksByEntities(entityIds, options = {}) {
 export function searchFacts(query, options = {}) {
   const { limit = 10, minConfidence = 0.5 } = options;
 
-  // Search facts by content similarity (BM25-like)
-  const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+  // Search facts by lexical overlap (including CJK n-grams)
+  const queryTerms = extractQueryTerms(query, 24);
 
   if (!queryTerms.length) return [];
 
