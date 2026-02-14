@@ -76,6 +76,63 @@ function extractQueryTerms(query) {
   return terms.slice(0, 36);
 }
 
+function normalizeQueryVariants(query, queryVariants = null, maxVariants = 6) {
+  const variantList = [];
+  const seen = new Set();
+
+  const addVariant = (rawText, rawWeight = 1) => {
+    const text = String(rawText || "").replace(/\s+/g, " ").trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    variantList.push({
+      text,
+      weight: Math.max(0.3, Math.min(1, Number.isFinite(rawWeight) ? rawWeight : 1))
+    });
+  };
+
+  if (Array.isArray(queryVariants) && queryVariants.length > 0) {
+    for (const variant of queryVariants) {
+      if (typeof variant === "string") {
+        addVariant(variant, 1);
+      } else {
+        addVariant(variant?.text, variant?.weight);
+      }
+    }
+  }
+
+  addVariant(query, 1);
+  variantList.sort((a, b) => b.weight - a.weight);
+  return variantList.slice(0, Math.max(1, maxVariants));
+}
+
+function buildWeightedQuery(variants) {
+  const terms = [];
+  for (const variant of variants) {
+    terms.push(variant.text);
+    if ((variant.weight || 0) >= 0.95) {
+      // Reinforce the primary query while still allowing cross-lingual terms.
+      terms.push(variant.text);
+    }
+  }
+  return terms.join(" ").trim();
+}
+
+function computeTreeDistance(pathA, pathB) {
+  if (!Array.isArray(pathA) || !Array.isArray(pathB) || pathA.length === 0 || pathB.length === 0) {
+    return null;
+  }
+
+  const maxPrefix = Math.min(pathA.length, pathB.length);
+  let commonPrefix = 0;
+  while (commonPrefix < maxPrefix && pathA[commonPrefix] === pathB[commonPrefix]) {
+    commonPrefix++;
+  }
+
+  return (pathA.length - commonPrefix) + (pathB.length - commonPrefix);
+}
+
 /**
  * Score a node's relevance to a query based on name, summary, and aliases
  */
@@ -217,7 +274,8 @@ export function navigateTreeTopDown(query, options = {}) {
   const {
     beamWidth = 3,      // How many branches to explore at each level
     maxDepth = 5,       // Maximum tree depth to explore
-    minNodeScore = 0.1  // Minimum relevance score to continue exploring
+    minNodeScore = 0.1,  // Minimum relevance score to continue exploring
+    depthDecay = 0.96
   } = options;
 
   const queryTerms = extractQueryTerms(query);
@@ -261,8 +319,8 @@ export function navigateTreeTopDown(query, options = {}) {
         if (visitedNodes.has(child.node_id)) continue;
 
         const childScore = scoreNodeRelevance(child, query, queryTerms);
-        // Inherit some score from parent (relevant parent = likely relevant children)
-        const combinedScore = childScore * 0.7 + current.score * 0.3;
+        // Inherit from parent and apply depth decay to avoid drifting too deep.
+        const combinedScore = (childScore * 0.72 + current.score * 0.28) * Math.pow(depthDecay, depth);
 
         if (combinedScore >= minNodeScore) {
           nextLevel.push({
@@ -307,7 +365,8 @@ export function navigateTreeTopDown(query, options = {}) {
 export function enrichWithAncestorContext(chunks, options = {}) {
   const {
     maxAncestors = 2,
-    ancestorChunksPerLevel = 2
+    ancestorChunksPerLevel = 2,
+    ancestorDecay = 0.82
   } = options;
 
   const enrichedChunks = [...chunks];
@@ -345,6 +404,9 @@ export function enrichWithAncestorContext(chunks, options = {}) {
             node_name: ac.node_name,
             authority_level: ac.authority_level,
             source: 'ancestor_context',
+            hierarchy_relation: 'ancestor',
+            hierarchy_hops: i + 1,
+            relation_decay: Math.pow(ancestorDecay, i + 1),
             ancestor_level: i + 1,
             original_chunk_id: chunk.id
           });
@@ -359,18 +421,26 @@ export function enrichWithAncestorContext(chunks, options = {}) {
 /**
  * Sibling expansion - find related content in sibling nodes
  */
-export function expandWithSiblings(nodeIds, query, options = {}) {
+export function expandWithSiblings(seedNodes, query, options = {}) {
   const {
     maxSiblings = 3,
     chunksPerSibling = 3,
-    minSiblingScore = 0.15
+    minSiblingScore = 0.15,
+    siblingDecay = 0.78
   } = options;
 
   const queryTerms = extractQueryTerms(query);
   const siblingChunks = [];
-  const processedSiblings = new Set(nodeIds);
+  const initialNodeIds = (seedNodes || []).map(seed => (
+    typeof seed === "string" ? seed : seed?.node_id
+  )).filter(Boolean);
+  const processedSiblings = new Set(initialNodeIds);
 
-  for (const nodeId of nodeIds) {
+  for (const seed of seedNodes || []) {
+    const nodeId = typeof seed === "string" ? seed : seed?.node_id;
+    if (!nodeId) continue;
+    const seedScore = typeof seed === "string" ? 0 : (seed.relevance_score || seed.score || 0);
+
     const siblings = getSiblings(nodeId, false);
 
     // Score siblings by relevance
@@ -386,14 +456,19 @@ export function expandWithSiblings(nodeIds, query, options = {}) {
 
     for (const sibling of scoredSiblings) {
       processedSiblings.add(sibling.node_id);
+      const combinedSiblingScore = sibling.score * 0.75 + seedScore * 0.25;
 
       const chunks = getNodeChunks(sibling.node_id, query, chunksPerSibling);
       for (const chunk of chunks) {
         siblingChunks.push({
           ...chunk,
           source: 'sibling_expansion',
+          hierarchy_relation: 'sibling',
+          hierarchy_hops: 2,
+          relation_decay: Math.pow(siblingDecay, 2),
           sibling_of: nodeId,
-          sibling_score: sibling.score
+          sibling_score: combinedSiblingScore,
+          relevance_score: Math.max(chunk.relevance_score || 0, combinedSiblingScore * 0.35)
         });
       }
     }
@@ -405,33 +480,81 @@ export function expandWithSiblings(nodeIds, query, options = {}) {
 /**
  * Hierarchical scoring - score chunks based on tree position
  */
-export function applyHierarchicalScoring(chunks, relevantNodes, query) {
+export function applyHierarchicalScoring(chunks, relevantNodes, query, options = {}) {
+  const {
+    structuralDecayBase = 0.88,
+    proximityBoost = 0.22
+  } = options;
+
   const nodeScores = new Map();
   for (const node of relevantNodes) {
     nodeScores.set(node.node_id, node.relevance_score || 0);
   }
 
   const queryTerms = extractQueryTerms(query);
+  const pathCache = new Map();
+  const getPathIds = (nodeId) => {
+    if (!nodeId) return [];
+    if (!pathCache.has(nodeId)) {
+      const path = getPathToNode(nodeId).map(n => n.node_id);
+      pathCache.set(nodeId, path);
+    }
+    return pathCache.get(nodeId);
+  };
+
+  const referenceNodes = relevantNodes
+    .slice(0, 5)
+    .map(node => ({
+      node_id: node.node_id,
+      score: node.relevance_score || 0,
+      path: getPathIds(node.node_id)
+    }))
+    .filter(node => node.path.length > 0);
 
   return chunks.map(chunk => {
     let score = chunk.relevance_score || 0;
 
     // Add node-level score
     if (chunk.node_id && nodeScores.has(chunk.node_id)) {
-      score += nodeScores.get(chunk.node_id) * 0.5;
+      score += nodeScores.get(chunk.node_id) * 0.45;
     }
 
     // Boost based on source type
     const sourceBoosts = {
       'direct': 1.0,
-      'ancestor_context': 0.7,
-      'sibling_expansion': 0.6,
-      'child_context': 0.8,
+      'ancestor_context': 0.72,
+      'sibling_expansion': 0.66,
+      'child_context': 0.82,
       'doc_title': 0.9,
       'bm25_content': 0.85,
       'simple_content': 0.75
     };
-    score *= sourceBoosts[chunk.source] || 0.8;
+    score *= sourceBoosts[chunk.source] || 0.82;
+
+    const relation = chunk.hierarchy_relation || (chunk.source === 'direct' ? 'direct' : 'related');
+    const inferredHops = relation === 'direct'
+      ? 0
+      : relation === 'child'
+        ? 1
+        : relation === 'ancestor'
+          ? 1
+          : relation === 'sibling'
+            ? 2
+            : 1;
+    const hops = Number.isFinite(chunk.hierarchy_hops) ? chunk.hierarchy_hops : inferredHops;
+    const relationBoosts = {
+      direct: 1.16,
+      child: 1.0,
+      ancestor: 0.93,
+      sibling: 0.88,
+      related: 0.9
+    };
+    score *= relationBoosts[relation] || 0.9;
+    score *= Math.pow(structuralDecayBase, Math.max(0, hops));
+
+    if (Number.isFinite(chunk.relation_decay)) {
+      score *= chunk.relation_decay;
+    }
 
     // Depth penalty (deeper = slightly less authoritative for general queries)
     const depth = chunk.node_level || chunk.depth || 0;
@@ -443,15 +566,45 @@ export function applyHierarchicalScoring(chunks, relevantNodes, query) {
 
     // Content relevance boost
     const contentLower = (chunk.content || '').toLowerCase();
+    let lexicalHits = 0;
     for (const term of queryTerms) {
       if (contentLower.includes(term)) {
-        score += 0.1;
+        lexicalHits++;
+      }
+    }
+    score += Math.min(0.28, lexicalHits * 0.08);
+
+    let treeDistance = null;
+    if (chunk.node_id && referenceNodes.length > 0) {
+      const chunkPath = getPathIds(chunk.node_id);
+      if (chunkPath.length > 0) {
+        let bestDistance = Infinity;
+        let bestRefScore = 0;
+
+        for (const ref of referenceNodes) {
+          const distance = computeTreeDistance(chunkPath, ref.path);
+          if (distance === null) continue;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestRefScore = ref.score || 0;
+          } else if (distance === bestDistance) {
+            bestRefScore = Math.max(bestRefScore, ref.score || 0);
+          }
+        }
+
+        if (bestDistance !== Infinity) {
+          treeDistance = bestDistance;
+          const proximity = Math.pow(0.9, bestDistance);
+          score *= 1 + (proximity * proximityBoost) + Math.min(0.08, bestRefScore * 0.05);
+        }
       }
     }
 
     return {
       ...chunk,
-      hierarchical_score: score
+      hierarchical_score: score,
+      tree_distance: treeDistance,
+      structural_hops: hops
     };
   });
 }
@@ -467,6 +620,12 @@ export async function hierarchicalRetrieve(query, options = {}) {
     includeAncestors = true,
     includeSiblings = true,
     includeDescendants = true,
+    queryVariants = null,
+    ancestorLevels = 2,
+    siblingNodesPerSeed = 3,
+    descendantDepth = 2,
+    descendantNodesPerSeed = 5,
+    descendantScoreDecay = 0.82,
     onStep = null
   } = options;
 
@@ -495,7 +654,10 @@ export async function hierarchicalRetrieve(query, options = {}) {
     }
   }
 
-  logger.info(`Hierarchical retrieval for: "${query.slice(0, 50)}..."`);
+  const normalizedVariants = normalizeQueryVariants(query, queryVariants, 6);
+  const retrievalQuery = buildWeightedQuery(normalizedVariants);
+
+  logger.info(`Hierarchical retrieval for: "${query.slice(0, 50)}..." (${normalizedVariants.length} query variants)`);
 
   const results = {
     chunks: [],
@@ -512,12 +674,16 @@ export async function hierarchicalRetrieve(query, options = {}) {
       max_chunks: maxChunks,
       include_ancestors: includeAncestors,
       include_siblings: includeSiblings,
-      include_descendants: includeDescendants
+      include_descendants: includeDescendants,
+      query_variants: normalizedVariants.map(v => ({
+        text: v.text,
+        weight: Number((v.weight || 1).toFixed(2))
+      }))
     }
   );
 
   // Step 1: Top-down navigation to find relevant branches
-  const relevantNodes = navigateTreeTopDown(query, { beamWidth, maxDepth });
+  const relevantNodes = navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96 });
   results.nodes = relevantNodes;
   results.sources.add('tree_navigation');
 
@@ -549,7 +715,7 @@ export async function hierarchicalRetrieve(query, options = {}) {
   const nodeChunkStats = [];
 
   for (const node of relevantNodes.slice(0, 10)) {
-    const nodeChunks = getNodeChunks(node.node_id, query, 5);
+    const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, 5);
     let added = 0;
 
     for (const chunk of nodeChunks) {
@@ -558,7 +724,9 @@ export async function hierarchicalRetrieve(query, options = {}) {
         results.chunks.push({
           ...chunk,
           source: 'direct',
-          node_relevance: node.relevance_score
+          node_relevance: node.relevance_score,
+          hierarchy_relation: 'direct',
+          hierarchy_hops: 0
         });
         added++;
       }
@@ -584,7 +752,11 @@ export async function hierarchicalRetrieve(query, options = {}) {
 
   // Step 3: Bottom-up enrichment (add ancestor context)
   if (includeAncestors && results.chunks.length > 0) {
-    const enriched = enrichWithAncestorContext(results.chunks);
+    const enriched = enrichWithAncestorContext(results.chunks, {
+      maxAncestors: ancestorLevels,
+      ancestorChunksPerLevel: 2,
+      ancestorDecay: 0.82
+    });
     const newChunks = enriched.filter(c => !seenChunkIds.has(c.id));
 
     for (const chunk of newChunks) {
@@ -609,8 +781,13 @@ export async function hierarchicalRetrieve(query, options = {}) {
 
   // Step 4: Sibling expansion
   if (includeSiblings && relevantNodes.length > 0) {
-    const nodeIds = relevantNodes.slice(0, 5).map(n => n.node_id);
-    const siblingChunks = expandWithSiblings(nodeIds, query);
+    const seedNodes = relevantNodes.slice(0, 5);
+    const siblingChunks = expandWithSiblings(seedNodes, retrievalQuery, {
+      maxSiblings: siblingNodesPerSeed,
+      chunksPerSibling: 3,
+      minSiblingScore: 0.15,
+      siblingDecay: 0.78
+    });
 
     for (const chunk of siblingChunks) {
       if (!seenChunkIds.has(chunk.id)) {
@@ -626,7 +803,7 @@ export async function hierarchicalRetrieve(query, options = {}) {
     emitStep(
       "Hierarchy: Sibling Expansion",
       `Added ${siblingChunks.length} sibling chunks`,
-      { considered_nodes: nodeIds }
+      { considered_nodes: seedNodes.map(n => n.node_id) }
     );
   } else if (!includeSiblings) {
     emitStep("Hierarchy: Sibling Expansion", "Skipped (disabled)", null, "skipped");
@@ -641,19 +818,25 @@ export async function hierarchicalRetrieve(query, options = {}) {
     let descendantChunksAdded = 0;
 
     for (const node of topNodes) {
-      const descendants = getDescendants(node.node_id, 2);
+      const descendants = getDescendants(node.node_id, descendantDepth);
       descendantNodes += descendants.length;
 
-      for (const desc of descendants.slice(0, 5)) {
-        const descChunks = getNodeChunks(desc.node_id, query, 2);
+      for (const desc of descendants.slice(0, descendantNodesPerSeed)) {
+        const descChunks = getNodeChunks(desc.node_id, retrievalQuery, 2);
 
         for (const chunk of descChunks) {
-          if (!seenChunkIds.has(chunk.id) && chunk.relevance_score > 0.1) {
+          const descDepth = Math.max(1, desc.depth || 1);
+          const depthAdjustedScore = (chunk.relevance_score || 0) * Math.pow(descendantScoreDecay, descDepth);
+
+          if (!seenChunkIds.has(chunk.id) && depthAdjustedScore > 0.08) {
             seenChunkIds.add(chunk.id);
             results.chunks.push({
               ...chunk,
+              relevance_score: depthAdjustedScore,
               source: 'child_context',
-              parent_node: node.node_id
+              parent_node: node.node_id,
+              hierarchy_relation: 'child',
+              hierarchy_hops: descDepth
             });
             descendantChunksAdded++;
           }
@@ -674,7 +857,10 @@ export async function hierarchicalRetrieve(query, options = {}) {
   }
 
   // Step 6: Apply hierarchical scoring
-  results.chunks = applyHierarchicalScoring(results.chunks, relevantNodes, query);
+  results.chunks = applyHierarchicalScoring(results.chunks, relevantNodes, retrievalQuery, {
+    structuralDecayBase: 0.88,
+    proximityBoost: 0.22
+  });
 
   // Sort by hierarchical score and limit
   results.chunks.sort((a, b) => b.hierarchical_score - a.hierarchical_score);

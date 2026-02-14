@@ -121,7 +121,25 @@ const i18n = {
     list_view: 'List View',
     graph_view: 'Graph View',
     theme_light: 'Light Mode',
-    theme_dark: 'Dark Mode'
+    theme_dark: 'Dark Mode',
+    conflict_explainer_title: 'What is a conflict?',
+    conflict_explainer_body: 'A conflict means two chunks under the same node contain incompatible facts or requirements. Review both chunks and keep the one you trust.',
+    conflict_reason: 'Why this is flagged',
+    conflict_recommendation: 'Recommendation',
+    conflict_type_numeric_contradiction: 'Numeric contradiction',
+    conflict_type_statement_contradiction: 'Statement contradiction',
+    conflict_type_semantic_conflict: 'Semantic conflict',
+    conflict_type_factual_conflict: 'Factual conflict',
+    total_conflicts: 'Total Conflicts',
+    unresolved: 'Unresolved',
+    resolved: 'Resolved',
+    no_unresolved_conflicts: 'No unresolved conflicts',
+    conflict_node_label: 'Node',
+    conflict_chunk_a: 'Chunk A',
+    conflict_chunk_b: 'Chunk B',
+    unknown: 'Unknown',
+    no_content: 'No content',
+    conflict_reason_default: 'Potentially incompatible information detected between these two chunks.'
   },
   zh: {
     ask_title: '提问',
@@ -240,7 +258,25 @@ const i18n = {
     list_view: '列表视图',
     graph_view: '图形视图',
     theme_light: '浅色模式',
-    theme_dark: '深色模式'
+    theme_dark: '深色模式',
+    conflict_explainer_title: '什么是冲突？',
+    conflict_explainer_body: '冲突意味着同一节点下的两段内容存在事实或要求不一致。请对比两段内容，保留你信任的版本。',
+    conflict_reason: '标记原因',
+    conflict_recommendation: '处理建议',
+    conflict_type_numeric_contradiction: '数值冲突',
+    conflict_type_statement_contradiction: '陈述冲突',
+    conflict_type_semantic_conflict: '语义冲突',
+    conflict_type_factual_conflict: '事实冲突',
+    total_conflicts: '总冲突数',
+    unresolved: '未解决',
+    resolved: '已解决',
+    no_unresolved_conflicts: '当前没有未解决的冲突',
+    conflict_node_label: '节点',
+    conflict_chunk_a: '分块 A',
+    conflict_chunk_b: '分块 B',
+    unknown: '未知',
+    no_content: '无内容',
+    conflict_reason_default: '系统检测到这两段内容可能互相不一致。'
   }
 };
 
@@ -1626,6 +1662,52 @@ function initConflicts() {
   document.getElementById('refresh-conflicts-btn').addEventListener('click', loadConflicts);
 }
 
+function getConflictTypeLabel(conflictType) {
+  if (!conflictType) return t('unknown');
+
+  const normalized = String(conflictType).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  const key = `conflict_type_${normalized}`;
+  return i18n[currentLang][key] || conflictType;
+}
+
+function formatConflictReason(conflict) {
+  const reason = conflict?.reason || {};
+  const recommendation = typeof reason.recommendation === 'string'
+    ? reason.recommendation.trim()
+    : '';
+
+  if (typeof reason.explanation === 'string' && reason.explanation.trim()) {
+    return {
+      explanation: reason.explanation.trim(),
+      recommendation
+    };
+  }
+
+  if (conflict?.conflict_type === 'numeric_contradiction') {
+    const contextA = reason.chunk_a_context || t('conflict_chunk_a');
+    const contextB = reason.chunk_b_context || t('conflict_chunk_b');
+    const valueA = reason.chunk_a_value ?? '?';
+    const valueB = reason.chunk_b_value ?? '?';
+
+    return {
+      explanation: `${t('conflict_type_numeric_contradiction')}: ${contextA} (${valueA}) vs ${contextB} (${valueB})`,
+      recommendation
+    };
+  }
+
+  if (conflict?.conflict_type === 'statement_contradiction' && reason.pattern_found) {
+    return {
+      explanation: reason.pattern_found,
+      recommendation
+    };
+  }
+
+  return {
+    explanation: t('conflict_reason_default'),
+    recommendation
+  };
+}
+
 async function loadConflicts() {
   const statsDiv = document.getElementById('conflict-stats');
   const listDiv = document.getElementById('conflict-list');
@@ -1639,48 +1721,67 @@ async function loadConflicts() {
     statsDiv.innerHTML = `
       <div class="stat-card">
         <div class="stat-value">${data.stats?.total || 0}</div>
-        <div class="stat-label">Total Conflicts</div>
+        <div class="stat-label">${t('total_conflicts')}</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">${data.stats?.unresolved || 0}</div>
-        <div class="stat-label">Unresolved</div>
+        <div class="stat-label">${t('unresolved')}</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">${data.stats?.resolved || 0}</div>
-        <div class="stat-label">Resolved</div>
+        <div class="stat-label">${t('resolved')}</div>
       </div>
     `;
 
     // List
     if (!data.conflicts || data.conflicts.length === 0) {
-      listDiv.innerHTML = '<p class="loading-text">No unresolved conflicts</p>';
+      listDiv.innerHTML = `<p class="loading-text">${escapeHtml(t('no_unresolved_conflicts'))}</p>`;
       return;
     }
 
-    listDiv.innerHTML = data.conflicts.map(c => `
-      <div class="conflict-card">
-        <div class="conflict-header">
-          <span class="conflict-type">${c.conflict_type || 'Unknown'}</span>
-          <span>Node: ${c.node_name}</span>
+    listDiv.innerHTML = data.conflicts.map(c => {
+      const reason = formatConflictReason(c);
+      const typeLabel = escapeHtml(getConflictTypeLabel(c.conflict_type));
+      const nodeName = escapeHtml(c.node_name || t('unknown'));
+      const chunkAContent = escapeHtml(c.chunk_a?.content || t('no_content'));
+      const chunkBContent = escapeHtml(c.chunk_b?.content || t('no_content'));
+      const reasonText = escapeHtml(reason.explanation || t('conflict_reason_default'));
+      const recommendationText = reason.recommendation ? escapeHtml(reason.recommendation) : '';
+      const chunkAId = c.chunk_a?.id ?? '-';
+      const chunkBId = c.chunk_b?.id ?? '-';
+      const keepAId = c.chunk_a?.id ?? 'null';
+      const keepBId = c.chunk_b?.id ?? 'null';
+
+      return `
+        <div class="conflict-card">
+          <div class="conflict-header">
+            <span class="conflict-type">${typeLabel}</span>
+            <span>${t('conflict_node_label')}: ${nodeName}</span>
+          </div>
+          <div class="conflict-body">
+            <div class="conflict-reason">
+              <h5>${t('conflict_reason')}</h5>
+              <p>${reasonText}</p>
+              ${recommendationText ? `<p class="conflict-recommendation"><strong>${t('conflict_recommendation')}:</strong> ${recommendationText}</p>` : ''}
+            </div>
+            <div class="conflict-chunk">
+              <h5>${t('conflict_chunk_a')} (ID: ${chunkAId})</h5>
+              <p>${chunkAContent}</p>
+            </div>
+            <div class="conflict-chunk">
+              <h5>${t('conflict_chunk_b')} (ID: ${chunkBId})</h5>
+              <p>${chunkBContent}</p>
+            </div>
+            <div class="conflict-actions">
+              <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepAId}, ${keepBId})">${t('keep_a')}</button>
+              <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepBId}, ${keepAId})">${t('keep_b')}</button>
+            </div>
+          </div>
         </div>
-        <div class="conflict-body">
-          <div class="conflict-chunk">
-            <h5>Chunk A (ID: ${c.chunk_a?.id})</h5>
-            <p>${c.chunk_a?.content || 'No content'}</p>
-          </div>
-          <div class="conflict-chunk">
-            <h5>Chunk B (ID: ${c.chunk_b?.id})</h5>
-            <p>${c.chunk_b?.content || 'No content'}</p>
-          </div>
-          <div class="conflict-actions">
-            <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${c.chunk_a?.id}, ${c.chunk_b?.id})">${t('keep_a')}</button>
-            <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${c.chunk_b?.id}, ${c.chunk_a?.id})">${t('keep_b')}</button>
-          </div>
-        </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
   } catch (error) {
-    listDiv.innerHTML = `<p class="loading-text error">${error.message}</p>`;
+    listDiv.innerHTML = `<p class="loading-text error">${escapeHtml(error.message)}</p>`;
   }
 }
 

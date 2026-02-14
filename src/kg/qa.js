@@ -1,6 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { db, safeJson } from "../db/db.js";
-import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch } from "./recallNodes.js";
+import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
 import { generateSnippet, generateSnippetsForChunks, extractKeySentences } from "../utils/snippetGenerator.js";
 import { rankNodes, decideNode } from "./nodeScoring.js";
 import { classifyQuery, QUERY_TYPES } from "../query/classifier.js";
@@ -760,74 +760,101 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     temperature = 0.3
   } = retrievalOptions;
 
+  let retrievalQueryVariants = [{ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] }];
+  try {
+    const variants = await buildRetrievalQueryVariants(query, {
+      maxVariants: 6,
+      useExpansion: true,
+      useAliasPivot: true
+    });
+    if (variants.length > 0) {
+      retrievalQueryVariants = variants;
+    }
+  } catch (err) {
+    logger.warn("Failed to build retrieval query variants:", err.message);
+  }
+
+  trace?.addStep("Retrieval Query Variants", `Using ${retrievalQueryVariants.length} query variants`, {
+    variants: retrievalQueryVariants.map(v => ({
+      text: v.text,
+      weight: Number((v.weight || 1).toFixed(2)),
+      lang: v.lang,
+      sources: v.sources
+    }))
+  });
+
   // STEP 0: Direct chunk retrieval (do this FIRST, before node-based search)
   // This ensures we find document content even if node matching fails
   let directChunks = [];
   try {
     trace?.addStep('Direct Chunk Search', 'Searching chunks directly by content');
 
-    // Search by document title
-    const docTitleChunks = searchChunksByDocTitle(query, maxChunks);
-    const seenIds = new Set();
-    for (const r of docTitleChunks) {
-      if (!seenIds.has(r.chunk.id)) {
-        directChunks.push({
-          id: r.chunk.id,
-          content: r.chunk.content,
-          content_clean: r.chunk.content,
-          doc_title: r.chunk.doc_title,
-          node_id: r.chunk.node_id,
-          node_name: r.chunk.doc_title || 'Document',
-          authority_level: r.chunk.authority_level,
-          source: 'doc_title',
-          relevance_score: r.score
-        });
-        seenIds.add(r.chunk.id);
+    const directChunkMap = new Map();
+    const variantQueries = retrievalQueryVariants.slice(0, 5);
+    const sourceStats = { doc_title: 0, bm25: 0, simple: 0 };
+
+    const upsertDirectChunk = (chunk, source, score, variant) => {
+      if (!chunk?.id) return;
+
+      const weightedScore = Math.max(0, (score || 0) * (variant.weight || 1));
+      const existing = directChunkMap.get(chunk.id);
+      if (existing) {
+        existing.relevance_score = Math.max(existing.relevance_score || 0, weightedScore);
+        if (!existing.sources.includes(source)) existing.sources.push(source);
+        if (!existing.query_variants.includes(variant.text)) existing.query_variants.push(variant.text);
+        return;
+      }
+
+      directChunkMap.set(chunk.id, {
+        id: chunk.id,
+        content: chunk.content,
+        content_clean: chunk.content,
+        doc_title: chunk.doc_title,
+        node_id: chunk.node_id,
+        node_name: chunk.doc_title || 'Document',
+        authority_level: chunk.authority_level,
+        source,
+        sources: [source],
+        query_variants: [variant.text],
+        relevance_score: weightedScore
+      });
+    };
+
+    for (const variant of variantQueries) {
+      const perVariantLimit = Math.max(8, Math.ceil(maxChunks / Math.min(variantQueries.length, 3)));
+
+      // Search by document title
+      const docTitleChunks = searchChunksByDocTitle(variant.text, perVariantLimit);
+      sourceStats.doc_title += docTitleChunks.length;
+      for (const r of docTitleChunks) {
+        upsertDirectChunk(r.chunk, 'doc_title', Math.max(0, Math.min(1, r.score || 0)), variant);
+      }
+
+      // BM25 FTS search on chunk content
+      const bm25Chunks = bm25RecallChunks(variant.text, perVariantLimit);
+      sourceStats.bm25 += bm25Chunks.length;
+      const maxBm25 = bm25Chunks.reduce((max, r) => Math.max(max, r.bm25 || 0), 0);
+      for (const r of bm25Chunks) {
+        const normalizedBm25 = maxBm25 > 0 ? (r.bm25 || 0) / maxBm25 : 0;
+        upsertDirectChunk(r.chunk, 'bm25_content', normalizedBm25, variant);
+      }
+
+      // Simple LIKE-based content search (most reliable fallback)
+      const simpleChunks = simpleContentSearch(variant.text, perVariantLimit);
+      sourceStats.simple += simpleChunks.length;
+      for (const r of simpleChunks) {
+        upsertDirectChunk(r.chunk, 'simple_content', r.score || 0, variant);
       }
     }
 
-    // BM25 FTS search on chunk content
-    const bm25Chunks = bm25RecallChunks(query, maxChunks);
-    for (const r of bm25Chunks) {
-      if (!seenIds.has(r.chunk.id)) {
-        directChunks.push({
-          id: r.chunk.id,
-          content: r.chunk.content,
-          content_clean: r.chunk.content,
-          doc_title: r.chunk.doc_title,
-          node_id: r.chunk.node_id,
-          node_name: r.chunk.doc_title || 'Document',
-          authority_level: r.chunk.authority_level,
-          source: 'bm25_content',
-          relevance_score: r.bm25
-        });
-        seenIds.add(r.chunk.id);
-      }
-    }
-
-    // Simple LIKE-based content search (most reliable)
-    const simpleChunks = simpleContentSearch(query, maxChunks);
-    for (const r of simpleChunks) {
-      if (!seenIds.has(r.chunk.id)) {
-        directChunks.push({
-          id: r.chunk.id,
-          content: r.chunk.content,
-          content_clean: r.chunk.content,
-          doc_title: r.chunk.doc_title,
-          node_id: r.chunk.node_id,
-          node_name: r.chunk.doc_title || 'Document',
-          authority_level: r.chunk.authority_level,
-          source: 'simple_content',
-          relevance_score: r.score
-        });
-        seenIds.add(r.chunk.id);
-      }
-    }
+    directChunks = [...directChunkMap.values()];
+    directChunks.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
 
     trace?.addStep('Direct Chunk Search Complete', `Found ${directChunks.length} chunks directly`, {
-      doc_title: docTitleChunks.length,
-      bm25: bm25Chunks.length,
-      simple: simpleChunks.length
+      variants_used: variantQueries.length,
+      doc_title: sourceStats.doc_title,
+      bm25: sourceStats.bm25,
+      simple: sourceStats.simple
     });
   } catch (err) {
     logger.warn("Direct chunk search failed:", err.message);
@@ -853,6 +880,11 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       includeAncestors: true,
       includeSiblings: true,
       includeDescendants: true,
+      queryVariants: retrievalQueryVariants,
+      ancestorLevels: 2,
+      siblingNodesPerSeed: 3,
+      descendantDepth: 2,
+      descendantNodesPerSeed: 5,
       onStep: hierarchyStepHandler
     });
 

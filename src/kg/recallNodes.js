@@ -2,6 +2,7 @@ import { db, safeJson } from "../db/db.js";
 import { generateQueryEmbedding } from "../embedding/embedder.js";
 import { searchNodesBySimilarity, searchChunksBySimilarity } from "../embedding/vectorStore.js";
 import { queryLogger as logger } from "../utils/logger.js";
+import { detectLanguage } from "../utils/langDetect.js";
 import { GoogleGenAI } from "@google/genai";
 import { getNode, getAncestors, getChildren, getSiblings } from "./graphTraversal.js";
 
@@ -227,6 +228,117 @@ Return ONLY a JSON array of strings, no explanation:
     logger.warn("Query expansion failed:", err.message);
     return [query];
   }
+}
+
+function normalizeVariantText(text) {
+  return String(text || "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function addQueryVariant(list, seen, text, weight, source) {
+  const normalized = normalizeVariantText(text);
+  if (!normalized) return;
+
+  const dedupeKey = normalized.toLowerCase();
+  if (seen.has(dedupeKey)) {
+    const existing = list.find(v => v.key === dedupeKey);
+    if (existing) {
+      existing.weight = Math.max(existing.weight, weight);
+      if (!existing.sources.includes(source)) {
+        existing.sources.push(source);
+      }
+    }
+    return;
+  }
+
+  seen.add(dedupeKey);
+  list.push({
+    key: dedupeKey,
+    text: normalized,
+    weight: Math.max(0.3, Math.min(1.0, weight)),
+    lang: detectLanguage(normalized),
+    sources: [source]
+  });
+}
+
+/**
+ * Build multilingual retrieval query variants.
+ *
+ * Variants can come from:
+ * - LLM query expansion (synonyms/translations)
+ * - Alias matches to pivot into node names/aliases in another language
+ *
+ * @param {string} query - Original user query
+ * @param {object} options - Variant options
+ * @returns {Promise<Array<{text: string, weight: number, lang: string, sources: string[]}>>}
+ */
+export async function buildRetrievalQueryVariants(query, options = {}) {
+  const {
+    maxVariants = 6,
+    useExpansion = true,
+    useAliasPivot = true,
+    expansionTerms = 4,
+    aliasLimit = 8
+  } = options;
+
+  const baseQuery = normalizeVariantText(query);
+  if (!baseQuery) return [];
+
+  const variants = [];
+  const seen = new Set();
+  const baseLang = detectLanguage(baseQuery);
+
+  addQueryVariant(variants, seen, baseQuery, 1.0, "original");
+
+  const punctuationStripped = baseQuery.replace(/[“”‘’"'`]/g, "").trim();
+  if (punctuationStripped && punctuationStripped !== baseQuery) {
+    addQueryVariant(variants, seen, punctuationStripped, 0.97, "normalized");
+  }
+
+  if (useExpansion) {
+    try {
+      const expanded = await expandQuery(baseQuery);
+      for (const term of expanded.slice(0, expansionTerms + 1)) {
+        const cleaned = normalizeVariantText(term);
+        if (!cleaned || cleaned.toLowerCase() === baseQuery.toLowerCase()) continue;
+        const variantLang = detectLanguage(cleaned);
+        const isCrossLang = variantLang !== baseLang;
+        addQueryVariant(variants, seen, cleaned, isCrossLang ? 0.92 : 0.82, isCrossLang ? "translation" : "expansion");
+      }
+    } catch (err) {
+      logger.warn("Failed to build LLM query variants:", err.message);
+    }
+  }
+
+  if (useAliasPivot) {
+    try {
+      const aliasMatches = searchByAliases(baseQuery, aliasLimit);
+
+      for (const match of aliasMatches) {
+        addQueryVariant(variants, seen, match.matchedAlias, Math.min(0.92, (match.score || 0.6) + 0.1), "alias_match");
+        addQueryVariant(variants, seen, match.node?.name, detectLanguage(match.node?.name || "") !== baseLang ? 0.9 : 0.82, "node_name");
+
+        const fullNode = match.node?.node_id ? getNode(match.node.node_id) : null;
+        const aliases = Array.isArray(fullNode?.aliases) ? fullNode.aliases : [];
+        for (const alias of aliases.slice(0, 3)) {
+          const aliasLang = detectLanguage(alias);
+          addQueryVariant(variants, seen, alias, aliasLang !== baseLang ? 0.88 : 0.78, "node_alias");
+        }
+      }
+    } catch (err) {
+      logger.warn("Alias pivot for query variants failed:", err.message);
+    }
+  }
+
+  variants.sort((a, b) => b.weight - a.weight || a.text.length - b.text.length);
+  return variants.slice(0, maxVariants).map(v => ({
+    text: v.text,
+    weight: v.weight,
+    lang: v.lang,
+    sources: v.sources
+  }));
 }
 
 // BM25 recall for nodes - returns [{ node, bm25 }]
@@ -551,51 +663,105 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
     vectorWeight = 0.6,  // Increased vector weight for semantic matching
     vectorThreshold = 0.25,  // Lowered threshold for better coverage
     useRRF = true,
-    includeChunkSearch = true  // Also search chunks and map to nodes
+    includeChunkSearch = true,  // Also search chunks and map to nodes
+    useMultilingualVariants = true,
+    queryVariants = null,
+    maxQueryVariants = 4,
+    maxVectorVariants = 2,
+    useExpansion = true
   } = options;
 
+  const preparedVariants = Array.isArray(queryVariants) && queryVariants.length > 0
+    ? queryVariants
+    : (useMultilingualVariants
+        ? await buildRetrievalQueryVariants(query, {
+          maxVariants: maxQueryVariants,
+          useExpansion,
+          useAliasPivot: true
+        })
+        : [{ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] }]);
+
+  const normalizedVariants = preparedVariants
+    .map(v => {
+      if (typeof v === "string") {
+        return { text: normalizeVariantText(v), weight: 1, lang: detectLanguage(v), sources: ["external"] };
+      }
+      return {
+        text: normalizeVariantText(v?.text),
+        weight: Number.isFinite(v?.weight) ? v.weight : 1,
+        lang: v?.lang || detectLanguage(v?.text || ""),
+        sources: Array.isArray(v?.sources) ? v.sources : ["external"]
+      };
+    })
+    .filter(v => v.text);
+
+  if (normalizedVariants.length === 0) {
+    normalizedVariants.push({ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] });
+  }
+
+  normalizedVariants.sort((a, b) => b.weight - a.weight);
+  const lexicalVariants = normalizedVariants.slice(0, Math.max(1, maxQueryVariants));
+  const vectorVariants = lexicalVariants.slice(0, Math.max(1, Math.min(maxVectorVariants, lexicalVariants.length)));
+
   const nodeMap = new Map();
-  const addToNodeMap = (node, source, score) => {
+  const addToNodeMap = (node, source, score, matchedQuery = null) => {
+    if (!node?.node_id || !Number.isFinite(score) || score <= 0) return;
+
     if (!nodeMap.has(node.node_id)) {
-      nodeMap.set(node.node_id, { node, sources: [], scores: {} });
+      nodeMap.set(node.node_id, { node, sources: [], scores: {}, variantMatches: new Set() });
     }
     const entry = nodeMap.get(node.node_id);
     if (!entry.sources.includes(source)) {
       entry.sources.push(source);
     }
     entry.scores[source] = Math.max(entry.scores[source] || 0, score);
+    if (matchedQuery) {
+      entry.variantMatches.add(matchedQuery);
+    }
   };
 
   // Stage 1: BM25 on nodes
-  const bm25Results = bm25RecallNodes(query, limit * 2);
-  for (const r of bm25Results) {
-    addToNodeMap(r.node, "bm25_node", r.bm25);
+  let bm25Count = 0;
+  for (const variant of lexicalVariants) {
+    const bm25Results = bm25RecallNodes(variant.text, limit * 2);
+    bm25Count += bm25Results.length;
+    for (const r of bm25Results) {
+      addToNodeMap(r.node, "bm25_node", (r.bm25 || 0) * variant.weight, variant.text);
+    }
   }
-  logger.debug(`BM25 node recall: ${bm25Results.length} results`);
+  logger.debug(`BM25 node recall (${lexicalVariants.length} variants): ${bm25Count} results`);
 
   // Stage 2: Vector search on nodes
-  let vectorResults = [];
-  try {
-    vectorResults = await vectorRecallNodes(query, limit * 2, vectorThreshold);
-    for (const r of vectorResults) {
-      addToNodeMap(r.node, "vector_node", r.similarity);
+  let vectorCount = 0;
+  for (const variant of vectorVariants) {
+    try {
+      const vectorResults = await vectorRecallNodes(variant.text, limit * 2, vectorThreshold);
+      vectorCount += vectorResults.length;
+      for (const r of vectorResults) {
+        addToNodeMap(r.node, "vector_node", (r.similarity || 0) * variant.weight, variant.text);
+      }
+    } catch (err) {
+      logger.warn(`Vector node search failed for variant "${variant.text}":`, err.message);
     }
-    logger.debug(`Vector node recall: ${vectorResults.length} results`);
-  } catch (err) {
-    logger.warn("Vector node search failed:", err.message);
   }
+  logger.debug(`Vector node recall (${vectorVariants.length} variants): ${vectorCount} results`);
 
   // Stage 3: Search chunks and map back to nodes (finds content BM25 missed)
   if (includeChunkSearch) {
     try {
-      const chunkBm25 = bm25RecallChunks(query, limit);
+      const chunkBm25 = [];
+      for (const variant of lexicalVariants) {
+        const results = bm25RecallChunks(variant.text, limit).map(r => ({ ...r, _variantWeight: variant.weight, _variantText: variant.text }));
+        chunkBm25.push(...results);
+      }
+
       const chunkNodeIds = new Set();
       const maxBm25 = chunkBm25.reduce((max, r) => Math.max(max, r.bm25 || 0), 0);
       const nodeScoreMap = new Map();
       for (const r of chunkBm25) {
         if (r.chunk.node_id) {
           chunkNodeIds.add(r.chunk.node_id);
-          const score = normalizeByMax(r.bm25 || 0, maxBm25);
+          const score = normalizeByMax(r.bm25 || 0, maxBm25) * (r._variantWeight || 1);
           const prev = nodeScoreMap.get(r.chunk.node_id) || 0;
           if (score > prev) nodeScoreMap.set(r.chunk.node_id, score);
         }
@@ -616,13 +782,18 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
 
     // Stage 3b: Search by document title (handles "What's in document X?" queries)
     try {
-      const docTitleResults = searchChunksByDocTitle(query, limit);
+      const docTitleResults = [];
+      for (const variant of lexicalVariants) {
+        const results = searchChunksByDocTitle(variant.text, limit).map(r => ({ ...r, _variantWeight: variant.weight }));
+        docTitleResults.push(...results);
+      }
+
       const docNodeIds = new Set();
       const nodeScoreMap = new Map();
       for (const r of docTitleResults) {
         if (r.chunk.node_id) {
           docNodeIds.add(r.chunk.node_id);
-          const score = Math.max(0, Math.min(1, r.score || 0));
+          const score = Math.max(0, Math.min(1, r.score || 0)) * (r._variantWeight || 1);
           const prev = nodeScoreMap.get(r.chunk.node_id) || 0;
           if (score > prev) nodeScoreMap.set(r.chunk.node_id, score);
         }
@@ -643,14 +814,19 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
 
     // Stage 4: Vector search on chunks and map back to nodes
     try {
-      const chunkVector = await vectorRecallChunks(query, limit, vectorThreshold);
+      const chunkVector = [];
+      for (const variant of vectorVariants) {
+        const results = await vectorRecallChunks(variant.text, limit, vectorThreshold);
+        chunkVector.push(...results.map(r => ({ ...r, _variantWeight: variant.weight, _variantText: variant.text })));
+      }
+
       const chunkNodeIds = new Set();
       const maxSim = chunkVector.reduce((max, r) => Math.max(max, r.similarity || 0), 0);
       const nodeScoreMap = new Map();
       for (const r of chunkVector) {
         if (r.chunk.node_id) {
           chunkNodeIds.add(r.chunk.node_id);
-          const score = normalizeByMax(r.similarity || 0, maxSim);
+          const score = normalizeByMax(r.similarity || 0, maxSim) * (r._variantWeight || 1);
           const prev = nodeScoreMap.get(r.chunk.node_id) || 0;
           if (score > prev) nodeScoreMap.set(r.chunk.node_id, score);
         }
@@ -672,11 +848,18 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
 
   // Stage 5: Name/alias matching (exact and partial)
   try {
-    const queryTerms = extractSearchTerms(query, { maxTerms: 16 });
-    for (const term of queryTerms) {
-      const nameMatches = searchNodesByName(term, 5);
-      for (const node of nameMatches) {
-        addToNodeMap(node, "name_match", 0.9);  // High score for name match
+    for (const variant of lexicalVariants) {
+      const queryTerms = extractSearchTerms(variant.text, { maxTerms: 16 });
+      for (const term of queryTerms) {
+        const nameMatches = searchNodesByName(term, 5);
+        for (const node of nameMatches) {
+          addToNodeMap(node, "name_match", 0.9 * variant.weight, variant.text);  // High score for name match
+        }
+      }
+
+      const aliasMatches = searchByAliases(variant.text, 8);
+      for (const match of aliasMatches) {
+        addToNodeMap(match.node, "alias_match", (match.score || 0.6) * variant.weight, variant.text);
       }
     }
   } catch (err) {
@@ -716,7 +899,8 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
         score: fusedScores.get(nodeId) || 0,
         sources: data.sources,
         bm25Score: data.scores.bm25_node,
-        vectorScore: data.scores.vector_node
+        vectorScore: data.scores.vector_node,
+        matched_queries: [...data.variantMatches]
       });
     }
 
@@ -735,11 +919,14 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
       if (scores.bm25_chunk) finalScore += 0.3 * scores.bm25_chunk;
       if (scores.vector_chunk) finalScore += 0.4 * scores.vector_chunk;
       if (scores.name_match) finalScore += 0.5 * scores.name_match;
+      if (scores.alias_match) finalScore += 0.45 * scores.alias_match;
+      if (scores.doc_title) finalScore += 0.35 * scores.doc_title;
 
       results.push({
         node: data.node,
         score: finalScore,
-        sources: data.sources
+        sources: data.sources,
+        matched_queries: [...data.variantMatches]
       });
     }
 
@@ -1058,26 +1245,48 @@ export async function hierarchicalRecallNodes(query, limit = 30, options = {}) {
   const {
     useHierarchy = true,
     useAliases = true,
+    useMultilingualVariants = true,
+    maxQueryVariants = 4,
+    useExpansion = true,
     ...hybridOptions
   } = options;
 
+  const variantQueries = useMultilingualVariants
+    ? await buildRetrievalQueryVariants(query, {
+      maxVariants: maxQueryVariants,
+      useExpansion,
+      useAliasPivot: useAliases
+    })
+    : [{ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] }];
+
   // Start with standard hybrid recall
-  const baseResults = await hybridRecallNodes(query, limit, hybridOptions);
+  const baseResults = await hybridRecallNodes(query, limit, {
+    ...hybridOptions,
+    useMultilingualVariants,
+    queryVariants: variantQueries,
+    maxQueryVariants,
+    useExpansion
+  });
 
   // Also search by aliases
   if (useAliases) {
-    const aliasMatches = searchByAliases(query, 10);
-    for (const match of aliasMatches) {
-      const existing = baseResults.find(r => r.node.node_id === match.node.node_id);
-      if (existing) {
-        existing.score *= 1.2;  // Boost if also matched by alias
-        existing.sources = [...new Set([...(existing.sources || []), 'alias'])];
-      } else {
-        baseResults.push({
-          node: match.node,
-          score: match.score * 0.7,  // Alias-only matches get moderate score
-          sources: ['alias']
-        });
+    const aliasVariants = variantQueries.length > 0 ? variantQueries : [{ text: query, weight: 1 }];
+    for (const variant of aliasVariants.slice(0, maxQueryVariants)) {
+      const aliasMatches = searchByAliases(variant.text, 10);
+      for (const match of aliasMatches) {
+        const weightedAliasScore = (match.score || 0.6) * (variant.weight || 1);
+        const existing = baseResults.find(r => r.node.node_id === match.node.node_id);
+        if (existing) {
+          existing.score = Math.max(existing.score, existing.score * (1 + weightedAliasScore * 0.25));
+          existing.sources = [...new Set([...(existing.sources || []), 'alias'])];
+        } else {
+          baseResults.push({
+            node: match.node,
+            score: weightedAliasScore * 0.75,  // Alias-only matches get moderate score
+            sources: ['alias'],
+            matched_queries: [variant.text]
+          });
+        }
       }
     }
   }
@@ -1087,9 +1296,10 @@ export async function hierarchicalRecallNodes(query, limit = 30, options = {}) {
     const enriched = enrichWithHierarchy(baseResults, {
       includeAncestors: true,
       includeChildren: true,
-      includeSiblings: false,
+      includeSiblings: true,
       ancestorBoost: 0.25,
-      childBoost: 0.4
+      childBoost: 0.4,
+      siblingBoost: 0.2
     });
 
     // Re-sort and limit
