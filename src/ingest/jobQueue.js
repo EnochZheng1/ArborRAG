@@ -2,6 +2,8 @@ import fs from "fs";
 import { db, safeJson } from "../db/db.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { processDocument } from "./index.js";
+import { getAllConnections } from "../db/datasetManager.js";
+import { runWithDb } from "../db/activeDb.js";
 
 const DEFAULT_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_CONCURRENCY || "2", 10) || 2);
 const DEFAULT_MAX_ATTEMPTS = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_MAX_ATTEMPTS || "3", 10) || 3);
@@ -54,10 +56,14 @@ function schedulePump(delayMs = 0) {
   }, Math.max(0, delayMs));
 }
 
-function claimNextQueuedJob() {
-  db.exec("BEGIN IMMEDIATE");
+// Internal pump functions use `conn` directly instead of the db Proxy,
+// because the job pump runs outside HTTP request context and the long
+// await inside processDocument can cause AsyncLocalStorage context loss.
+
+function claimNextQueuedJob(conn) {
+  conn.exec("BEGIN IMMEDIATE");
   try {
-    const row = db.prepare(`
+    const row = conn.prepare(`
       SELECT *
       FROM ingestion_jobs
       WHERE status = ?
@@ -67,11 +73,11 @@ function claimNextQueuedJob() {
     `).get(JOB_STATUS.QUEUED);
 
     if (!row) {
-      db.exec("COMMIT");
+      conn.exec("COMMIT");
       return null;
     }
 
-    db.prepare(`
+    conn.prepare(`
       UPDATE ingestion_jobs
       SET status = ?,
           started_at = datetime('now'),
@@ -81,22 +87,22 @@ function claimNextQueuedJob() {
       WHERE id = ?
     `).run(JOB_STATUS.PROCESSING, row.id);
 
-    const claimed = db.prepare(`
+    const claimed = conn.prepare(`
       SELECT *
       FROM ingestion_jobs
       WHERE id = ?
     `).get(row.id);
 
-    db.exec("COMMIT");
+    conn.exec("COMMIT");
     return normalizeJobRow(claimed);
   } catch (err) {
-    db.exec("ROLLBACK");
+    conn.exec("ROLLBACK");
     throw err;
   }
 }
 
-function completeJob(jobId, result, documentId = null) {
-  db.prepare(`
+function completeJob(conn, jobId, result, documentId = null) {
+  conn.prepare(`
     UPDATE ingestion_jobs
     SET status = ?,
         document_id = ?,
@@ -107,12 +113,12 @@ function completeJob(jobId, result, documentId = null) {
   `).run(JOB_STATUS.COMPLETED, documentId, JSON.stringify(result || null), jobId);
 }
 
-function failJob(job, errorMessage, result = null) {
+function failJob(conn, job, errorMessage, result = null) {
   const retryable = job.attempt_count < job.max_attempts;
   const retrySeconds = Math.max(1, Math.ceil(DEFAULT_RETRY_DELAY_MS / 1000));
 
   if (retryable) {
-    db.prepare(`
+    conn.prepare(`
       UPDATE ingestion_jobs
       SET status = ?,
           error_message = ?,
@@ -127,7 +133,7 @@ function failJob(job, errorMessage, result = null) {
     return;
   }
 
-  db.prepare(`
+  conn.prepare(`
     UPDATE ingestion_jobs
     SET status = ?,
         error_message = ?,
@@ -156,63 +162,70 @@ function maybeCleanupUploadedFile(filePath, reason = "completed") {
   }
 }
 
-async function processClaimedJob(job) {
+async function processClaimedJob(job, conn) {
   logger.info(`[ingest-job:${job.id}] start processing file: ${job.original_name || job.file_path}`);
 
   let result = null;
   try {
-    result = await processDocument(job.file_path, job.options || {});
+    // runWithDb ensures all db calls inside processDocument route to this dataset.
+    // Pass original_name so the document record shows the human-readable filename.
+    result = await runWithDb(conn, () => processDocument(job.file_path, {
+      ...job.options,
+      originalName: job.original_name || null
+    }));
     const duplicate = isDuplicateResult(result);
 
     if (!result?.success && !duplicate) {
       const reason = Array.isArray(result?.errors) && result.errors.length > 0
         ? result.errors.join("; ")
         : "Document processing failed";
-      failJob(job, reason, result);
+      failJob(conn, job, reason, result);
       return;
     }
 
-    completeJob(job.id, result, result?.documentId || null);
+    completeJob(conn, job.id, result, result?.documentId || null);
     maybeCleanupUploadedFile(job.file_path, duplicate ? "duplicate" : "completed");
     logger.info(`[ingest-job:${job.id}] completed`);
   } catch (err) {
-    failJob(job, err.message, result);
+    failJob(conn, job, err.message, result);
   }
 }
 
 async function runPump() {
   if (!queueStarted) return;
 
-  while (runningWorkers < configuredConcurrency) {
-    const job = claimNextQueuedJob();
-    if (!job) break;
+  // Process jobs from all dataset connections
+  for (const { connection } of getAllConnections()) {
+    while (runningWorkers < configuredConcurrency) {
+      const job = claimNextQueuedJob(connection);
+      if (!job) break;
 
-    runningWorkers += 1;
-    processClaimedJob(job)
-      .catch(err => {
-        logger.error(`[ingest-job:${job.id}] unexpected worker error: ${err.message}`);
-      })
-      .finally(() => {
-        runningWorkers = Math.max(0, runningWorkers - 1);
-        schedulePump();
-      });
+      runningWorkers += 1;
+      processClaimedJob(job, connection)
+        .catch(err => {
+          logger.error(`[ingest-job:${job.id}] unexpected worker error: ${err.message}`);
+        })
+        .finally(() => {
+          runningWorkers = Math.max(0, runningWorkers - 1);
+          schedulePump();
+        });
+    }
   }
 }
 
-function requeueRecoverableJobs() {
-  const recovered = db.prepare(`
-    UPDATE ingestion_jobs
-    SET status = ?,
-        started_at = NULL,
-        updated_at = datetime('now'),
-        error_message = CASE
-          WHEN error_message IS NULL OR error_message = '' THEN 'Recovered after process restart'
-          ELSE error_message
-        END
-    WHERE status = ?
-      AND attempt_count < max_attempts
-  `).run(JOB_STATUS.QUEUED, JOB_STATUS.PROCESSING);
-
+function requeueRecoverableJobsForConn(conn) {
+  const recovered = conn.prepare(`
+      UPDATE ingestion_jobs
+      SET status = ?,
+          started_at = NULL,
+          updated_at = datetime('now'),
+          error_message = CASE
+            WHEN error_message IS NULL OR error_message = '' THEN 'Recovered after process restart'
+            ELSE error_message
+          END
+      WHERE status = ?
+        AND attempt_count < max_attempts
+    `).run(JOB_STATUS.QUEUED, JOB_STATUS.PROCESSING);
   if (recovered.changes > 0) {
     logger.warn(`Recovered ${recovered.changes} in-flight ingestion jobs after restart`);
   }
@@ -223,7 +236,9 @@ export function startIngestionQueue(options = {}) {
   configuredConcurrency = Math.max(1, Number.parseInt(options.concurrency, 10) || DEFAULT_CONCURRENCY);
   queueStarted = true;
 
-  requeueRecoverableJobs();
+  for (const { connection } of getAllConnections()) {
+    requeueRecoverableJobsForConn(connection);
+  }
   logger.info(`Ingestion queue started (concurrency=${configuredConcurrency}, retries=${DEFAULT_MAX_ATTEMPTS})`);
   schedulePump();
 }

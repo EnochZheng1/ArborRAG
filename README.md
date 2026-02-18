@@ -12,7 +12,7 @@ A hierarchical knowledge management system that processes documents into a tree 
 ## Features
 
 - **Hierarchical Knowledge Organization**: Documents are organized into a tree structure for intuitive navigation and context-aware retrieval
-- **Multi-Format Document Ingestion**: Support for PDF, DOCX, XLSX, HTML, TXT, Markdown, CSV, and JSON files
+- **Multi-Format Document Ingestion**: Support for PDF, DOCX, XLSX, HTML, TXT, Markdown, and CSV files
 - **Hybrid Search**: Combines BM25 lexical search with vector semantic search using Reciprocal Rank Fusion (RRF)
 - **Intelligent Query Routing**: Automatically classifies queries and routes them to specialized handlers
 - **Complex Query Support**:
@@ -20,8 +20,10 @@ A hierarchical knowledge management system that processes documents into a tree 
   - Entity comparisons
   - Criteria-based recommendations
   - Multi-hop reasoning across the knowledge tree
-- **Conflict Detection**: Identifies contradictions between knowledge chunks with LLM-powered analysis
+- **Conflict Detection**: Identifies contradictions between knowledge chunks with LLM-powered analysis; resolve by keeping one, both, or archiving
 - **Bilingual Support**: Automatic Chinese/English detection and response generation
+- **Background Ingestion Queue**: Documents are processed asynchronously with automatic retries and job status tracking
+- **Multiple Datasets**: Create isolated knowledge bases; switch with the sidebar dropdown; import/export as `.db` files
 - **Incremental Updates**: Add new documents without rebuilding the entire knowledge base
 - **Web UI**: Built-in web interface for managing the knowledge base
 
@@ -39,6 +41,7 @@ TreeKB includes a built-in web UI accessible at `http://localhost:3000` after st
 | **Documents** | Document listing and management |
 | **Conflicts** | Review and resolve content conflicts |
 | **Stats** | System statistics and embedding sync |
+| **Datasets** | Create, rename, duplicate, export, and delete datasets |
 
 ### Screenshots
 
@@ -251,6 +254,52 @@ Health check endpoint.
 #### GET /stats
 Get system statistics.
 
+### Dataset Management
+
+#### GET /datasets
+List all datasets. `db_path` is omitted from the response.
+
+#### POST /datasets
+Create a new dataset.
+
+**Request:**
+```json
+{ "name": "My Dataset", "description": "Optional description" }
+```
+
+#### PUT /datasets/:id
+Rename a dataset and/or update its description.
+
+#### DELETE /datasets/:id?confirm=yes
+Delete a dataset. Requires `?confirm=yes`. Refuses if it is the only remaining dataset.
+
+#### POST /datasets/:id/duplicate
+Duplicate a dataset (online backup — safe while the source is in use).
+
+**Request:** `{ "name": "Optional new name" }` (defaults to `"<source> (copy)"`)
+
+#### GET /datasets/:id/export
+Download the dataset as a portable `.db` file.
+
+#### GET /datasets/:id/stats
+Node, document, chunk, and embedding counts for a specific dataset.
+
+### Ingestion Job Queue
+
+#### GET /jobs
+List ingestion jobs. Supports `?status=queued|processing|completed|failed|cancelled&limit=50&offset=0`.
+
+#### GET /jobs/:id
+Get a specific ingestion job.
+
+#### POST /jobs/:id/retry
+Retry a failed or cancelled job (the upload file must still exist on disk).
+
+#### DELETE /jobs/:id
+Cancel a queued job.
+
+> **Dataset targeting**: All data-plane endpoints accept an `X-Dataset-ID` header to target a specific dataset. Defaults to the default dataset.
+
 ## Query Types
 
 | Type | Description | Example |
@@ -276,35 +325,57 @@ Get system statistics.
 ## Project Structure
 
 ```
-src/
-├── server.js              # Express API server
-├── db/
-│   ├── db.js              # Database connection & utilities
-│   └── init.sql           # Schema definition
-├── kg/
-│   ├── qa.js              # Main Q&A orchestration
-│   ├── recallNodes.js     # Search (BM25, vector, hybrid)
-│   ├── nodeScoring.js     # Multi-factor ranking
-│   ├── graphTraversal.js  # Tree navigation
-│   └── seedNodes.js       # Initial data seeding
-├── ingest/
-│   ├── index.js           # Pipeline entry point
-│   ├── fileParser.js      # Multi-format file parsing
-│   ├── chunker.js         # Text chunking
-│   ├── metadataExtractor.js # Keyword/entity extraction
-│   ├── nodeMapper.js      # Chunk-to-node assignment
-│   └── conflictDetector.js # Conflict detection
-├── embedding/
-│   ├── embedder.js        # Gemini embedding generation
-│   ├── vectorStore.js     # Vector storage & search
-│   └── chunkEmbeddings.js # Embedding management
-└── query/
-    ├── classifier.js      # Query classification
-    ├── queryPlanner.js    # Complex query decomposition
-    ├── multiNodeRetriever.js # Multi-entity retrieval
-    ├── comparator.js      # Comparison handler
-    ├── recommender.js     # Recommendation handler
-    └── reasoner.js        # Multi-hop reasoning
+kg-mvp/
+├── data/
+│   ├── registry.db          ← master dataset registry
+│   ├── datasets/
+│   │   ├── default.db       ← default knowledge base (migrated from kg.db on first run)
+│   │   └── <uuid>.db        ← additional datasets
+│   └── uploads/             ← temporary upload staging area
+├── public/
+│   ├── index.html
+│   ├── app.js               ← single-page frontend
+│   └── styles.css
+└── src/
+    ├── server.js              # Express API server
+    ├── db/
+    │   ├── db.js              # Proxy-based active-DB router
+    │   ├── activeDb.js        # AsyncLocalStorage request context
+    │   ├── initDatasetDb.js   # Per-dataset schema initialisation
+    │   ├── registry.js        # Dataset registry CRUD
+    │   ├── datasetManager.js  # Connection pool + dataset lifecycle
+    │   └── init.sql           # Schema definition
+    ├── kg/
+    │   ├── qa.js              # Main Q&A orchestration
+    │   ├── recallNodes.js     # Search (BM25, vector, hybrid)
+    │   ├── nodeScoring.js     # Multi-factor ranking
+    │   ├── graphTraversal.js  # Tree navigation
+    │   └── seedNodes.js       # Initial data seeding
+    ├── ingest/
+    │   ├── index.js           # Pipeline entry point
+    │   ├── jobQueue.js        # Background ingestion queue
+    │   ├── fileParser.js      # Multi-format file parsing
+    │   ├── chunker.js         # Text chunking
+    │   ├── metadataExtractor.js # Keyword/entity extraction
+    │   ├── nodeMapper.js      # Chunk-to-node assignment
+    │   └── conflictDetector.js # Conflict detection
+    ├── embedding/
+    │   ├── embedder.js        # Gemini embedding generation
+    │   ├── vectorStore.js     # Vector storage & search
+    │   └── chunkEmbeddings.js # Embedding management
+    ├── extraction/
+    │   └── entityFactExtractor.js # Entity & fact extraction
+    ├── query/
+    │   ├── classifier.js      # Query classification
+    │   ├── queryPlanner.js    # Complex query decomposition
+    │   ├── multiNodeRetriever.js # Multi-entity retrieval
+    │   ├── comparator.js      # Comparison handler
+    │   ├── recommender.js     # Recommendation handler
+    │   ├── reasoner.js        # Multi-hop reasoning
+    │   └── feedback.js        # Thumbs-up/down feedback logging
+    └── utils/
+        ├── logger.js
+        └── tokenTracker.js
 ```
 
 ## Usage Examples
@@ -339,10 +410,73 @@ curl -X POST http://localhost:3000/embeddings/sync
 
 | Issue | Solution |
 |-------|----------|
-| "GEMINI_API_KEY not set" | Add valid API key to `.env` file |
+| API key error on startup | Add valid API key to `.env` file |
 | "No matching nodes found" | Run `npm run seed` and upload documents |
 | Slow queries | Run `POST /embeddings/sync` |
-| File upload failures | Check file size (<50MB) and type |
+| File upload failures | Check file size (<50MB) and supported type |
+| Job stuck in `processing` after restart | Server auto-recovers in-flight jobs on startup |
+
+---
+
+## Changelog
+
+### v2.1.0 — 2026-02-18
+
+**Multi-dataset support**
+- Create, rename, delete, duplicate, and export independent knowledge bases, each stored as a separate SQLite file
+- Sidebar dropdown to switch the active dataset; all API calls are scoped to the selected dataset via `X-Dataset-ID` header
+- Full Datasets management tab — CRUD UI with active badge, inline rename, export, duplicate, and delete
+- On first startup, existing `data/kg.db` is automatically migrated to `data/datasets/default.db`; the original file is preserved
+
+**Conflict resolution**
+- New **Keep Both** option — accept both conflicting chunks without archiving either
+
+**Bug fixes**
+- Chinese filenames now display correctly in the Documents tab (fixed latin1→UTF-8 decoding through multer and the ingestion pipeline)
+- Uploads now correctly target the selected dataset (fixed `AsyncLocalStorage` context loss through multer's async stream processing)
+- Ingestion job status now correctly transitions to `completed` / `failed` after processing (fixed context loss in background job pump)
+- Fixed `GET /` returning 404 when the dataset middleware was active (static files now served before dataset middleware)
+
+---
+
+### v2.0.0 — Background Ingestion Queue
+
+- Asynchronous document ingestion queue with configurable concurrency and automatic retries
+- Job status API (`/jobs`) — list, get, retry, and cancel ingestion jobs
+- Queue statistics included in `/stats` response
+- In-flight jobs from a crashed/restarted process are automatically re-queued on startup
+
+---
+
+### v1.3.0 — Multilingual Retrieval Improvements
+
+- Improved BM25, hierarchy scoring, and retrieval for Chinese queries
+- Conflict explanation UI improvements
+- Hierarchy-aware scoring for non-English content
+
+---
+
+### v1.2.0 — Chinese Query Retrieval
+
+- Improved tokenisation and BM25 matching for Chinese text
+- Fact-based retrieval enhancements for CJK content
+
+---
+
+### v1.1.0 — Retrieval Improvements
+
+- Multi-strategy retrieval pipeline (BM25 + vector + hierarchy + facts)
+- Entity and fact extraction via Gemini
+- Token usage tracking
+
+---
+
+### v1.0.0 — Initial Release
+
+- Tree-based knowledge graph with document ingestion
+- Semantic search with Gemini embeddings
+- Chunk conflict detection and resolution UI
+- English / Chinese UI localisation
 
 ---
 

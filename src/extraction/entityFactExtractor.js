@@ -92,8 +92,7 @@ export function initEntityFactTables() {
   `);
 }
 
-// Initialize on module load
-initEntityFactTables();
+// Note: initEntityFactTables() is called by initDatasetDb() for each dataset connection.
 
 /**
  * Extract entities and facts from a chunk

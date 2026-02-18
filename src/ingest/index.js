@@ -245,7 +245,8 @@ export async function processDocument(filePath, options = {}) {
     detectConflicts = true,  // Check for conflicts
     createNewNodes = true,   // Allow creating new nodes (default: true)
     extractEntities = true,  // Extract entities and facts from chunks
-    chunkConfig = {}         // Chunking configuration
+    chunkConfig = {},        // Chunking configuration
+    originalName = null      // Human-readable original filename (e.g. Chinese name)
   } = options;
 
   const startTime = Date.now();
@@ -285,7 +286,7 @@ export async function processDocument(filePath, options = {}) {
     const fileHash = calculateFileHash(filePath);
     const docResult = registerDocument({
       filename: path.basename(filePath),
-      originalName: metadata.filename,
+      originalName: originalName || metadata.filename,
       fileType: metadata.fileType,
       fileSize: metadata.fileSize,
       fileHash,

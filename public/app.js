@@ -44,6 +44,7 @@ const i18n = {
     resolve: 'Resolve',
     keep_a: 'Keep Chunk A',
     keep_b: 'Keep Chunk B',
+    keep_both: 'Keep Both',
     no_results: 'No results found',
     error: 'An error occurred',
     success: 'Operation successful',
@@ -118,6 +119,7 @@ const i18n = {
     query_history: 'Recent Queries',
     clear: 'Clear',
     no_history: 'No recent queries',
+    filter_nodes: 'Filter nodes...',
     list_view: 'List View',
     graph_view: 'Graph View',
     theme_light: 'Light Mode',
@@ -139,7 +141,29 @@ const i18n = {
     conflict_chunk_b: 'Chunk B',
     unknown: 'Unknown',
     no_content: 'No content',
-    conflict_reason_default: 'Potentially incompatible information detected between these two chunks.'
+    conflict_reason_default: 'Potentially incompatible information detected between these two chunks.',
+    datasets_title: 'Datasets',
+    new_dataset: '+ New Dataset',
+    dataset_active: 'Active',
+    dataset_switch: 'Switch',
+    dataset_rename: 'Rename',
+    dataset_duplicate: 'Duplicate',
+    dataset_export: 'Export',
+    dataset_delete: 'Delete',
+    dataset_name_label: 'Name',
+    dataset_desc_label: 'Description',
+    dataset_name_placeholder: 'Dataset name',
+    dataset_desc_placeholder: 'Description (optional)',
+    confirm_delete_dataset: 'Delete this dataset and all its data? This cannot be undone. Type DELETE to confirm:',
+    no_datasets: 'No datasets found',
+    dataset_created: 'Dataset created',
+    dataset_renamed: 'Dataset renamed',
+    dataset_deleted: 'Dataset deleted',
+    dataset_duplicated: 'Dataset duplicated',
+    dataset_nodes: 'nodes',
+    dataset_docs: 'docs',
+    save: 'Save',
+    dataset_switcher_label: 'Dataset'
   },
   zh: {
     ask_title: '提问',
@@ -181,6 +205,7 @@ const i18n = {
     resolve: '解决',
     keep_a: '保留分块 A',
     keep_b: '保留分块 B',
+    keep_both: '保留两者',
     no_results: '未找到结果',
     error: '发生错误',
     success: '操作成功',
@@ -255,6 +280,7 @@ const i18n = {
     query_history: '最近查询',
     clear: '清除',
     no_history: '暂无查询记录',
+    filter_nodes: '筛选节点...',
     list_view: '列表视图',
     graph_view: '图形视图',
     theme_light: '浅色模式',
@@ -276,7 +302,29 @@ const i18n = {
     conflict_chunk_b: '分块 B',
     unknown: '未知',
     no_content: '无内容',
-    conflict_reason_default: '系统检测到这两段内容可能互相不一致。'
+    conflict_reason_default: '系统检测到这两段内容可能互相不一致。',
+    datasets_title: '数据集',
+    new_dataset: '+ 新建数据集',
+    dataset_active: '当前',
+    dataset_switch: '切换',
+    dataset_rename: '重命名',
+    dataset_duplicate: '复制',
+    dataset_export: '导出',
+    dataset_delete: '删除',
+    dataset_name_label: '名称',
+    dataset_desc_label: '描述',
+    dataset_name_placeholder: '数据集名称',
+    dataset_desc_placeholder: '描述（可选）',
+    confirm_delete_dataset: '删除此数据集及其所有数据？此操作无法撤销。输入 DELETE 确认：',
+    no_datasets: '未找到数据集',
+    dataset_created: '数据集已创建',
+    dataset_renamed: '数据集已重命名',
+    dataset_deleted: '数据集已删除',
+    dataset_duplicated: '数据集已复制',
+    dataset_nodes: '个节点',
+    dataset_docs: '个文档',
+    save: '保存',
+    dataset_switcher_label: '数据集'
   }
 };
 
@@ -287,6 +335,12 @@ let currentQueryResult = null; // Store current result for feedback
 let suggestionTimeout = null;
 let graphSimulation = null; // D3 force simulation
 let currentGraphView = 'list'; // 'list' or 'graph'
+
+// Dataset state
+let currentDatasetId = 'default';
+let currentDatasetName = 'Default';
+let allDatasets = [];
+const DATASET_KEY = 'treekb_dataset_id';
 
 // Query History Management
 const HISTORY_KEY = 'treekb_query_history';
@@ -364,9 +418,53 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Auto-resize textarea
+function autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  const maxHeight = 180;
+  el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px';
+}
+
+// Simple markdown rendering for answers
+function renderMarkdown(text) {
+  if (!text) return '';
+  // If text already contains HTML tags, return as-is
+  if (/<[a-z][\s\S]*>/i.test(text)) return text;
+
+  let html = escapeHtml(text);
+
+  // Code blocks (```...```)
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Unordered lists
+  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+  // Ordered lists
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Headings
+  html = html.replace(/^### (.+)$/gm, '<h5>$1</h5>');
+  html = html.replace(/^## (.+)$/gm, '<h4>$1</h4>');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+  // Clean up extra <br> inside elements
+  html = html.replace(/<\/li><br>/g, '</li>');
+  html = html.replace(/<\/ul><br>/g, '</ul>');
+  html = html.replace(/<\/pre><br>/g, '</pre>');
+  html = html.replace(/<\/h4><br>/g, '</h4>');
+  html = html.replace(/<\/h5><br>/g, '</h5>');
+
+  return html;
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  initDatasets();
   initTabs();
   initLanguage();
   initAsk();
@@ -377,6 +475,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initStats();
   initQueryHistory();
   initGraphView();
+  initMobileSidebar();
+  initTreeSearch();
 });
 
 // Theme Management
@@ -424,11 +524,15 @@ function initTabs() {
       document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
       document.getElementById(`tab-${tabId}`).classList.add('active');
 
+      // Close mobile sidebar
+      closeMobileSidebar();
+
       // Load data for specific tabs
       if (tabId === 'tree') loadTree();
       if (tabId === 'documents') loadDocuments();
       if (tabId === 'conflicts') loadConflicts();
       if (tabId === 'stats') loadStats();
+      if (tabId === 'datasets') loadDatasets();
     });
   });
 }
@@ -464,6 +568,14 @@ function updateTranslations() {
       el.title = i18n[currentLang][key];
     }
   });
+
+  // Translate placeholder attributes
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.dataset.i18nPlaceholder;
+    if (i18n[currentLang][key]) {
+      el.placeholder = i18n[currentLang][key];
+    }
+  });
 }
 
 function t(key) {
@@ -471,9 +583,12 @@ function t(key) {
 }
 
 // Toast Notifications
+let toastTimer = null;
 function showToast(message, type = 'info') {
   const toast = document.getElementById('toast');
   const toastMessage = document.getElementById('toast-message');
+
+  if (toastTimer) clearTimeout(toastTimer);
 
   toast.className = 'toast';
   if (type === 'error') toast.classList.add('error');
@@ -481,9 +596,14 @@ function showToast(message, type = 'info') {
 
   toastMessage.textContent = message;
   toast.classList.remove('hidden');
+  toast.classList.remove('hiding');
 
-  setTimeout(() => {
-    toast.classList.add('hidden');
+  toastTimer = setTimeout(() => {
+    toast.classList.add('hiding');
+    setTimeout(() => {
+      toast.classList.add('hidden');
+      toast.classList.remove('hiding');
+    }, 250);
   }, 3000);
 }
 
@@ -493,6 +613,7 @@ async function api(endpoint, options = {}) {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       headers: {
         'Content-Type': 'application/json',
+        'X-Dataset-ID': currentDatasetId,
         ...options.headers
       },
       ...options
@@ -518,7 +639,9 @@ function initAsk() {
 
   askBtn.addEventListener('click', handleAsk);
   queryInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.ctrlKey) {
+    // Enter to send, Shift+Enter for newline
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
       handleAsk();
     }
     // Hide suggestions on Escape
@@ -527,8 +650,14 @@ function initAsk() {
     }
   });
 
-  // Suggestions on input
-  queryInput.addEventListener('input', handleQueryInput);
+  // Auto-resize textarea
+  queryInput.addEventListener('input', (e) => {
+    autoResizeTextarea(queryInput);
+    handleQueryInput(e);
+  });
+
+  // Focus input on load
+  setTimeout(() => queryInput.focus(), 100);
   queryInput.addEventListener('focus', () => {
     if (queryInput.value.length >= 1) {
       fetchSuggestions(queryInput.value);
@@ -537,7 +666,7 @@ function initAsk() {
 
   // Hide suggestions on click outside
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('.ask-input-wrapper')) {
+    if (!e.target.closest('.chat-input-wrapper')) {
       hideSuggestions();
     }
   });
@@ -567,14 +696,19 @@ function initAsk() {
     }
   });
 
-  // Advanced options toggle
+  // Advanced options toggle (gear icon)
   const toggleAdvancedBtn = document.getElementById('toggle-advanced-options');
   const advancedOptions = document.getElementById('advanced-options');
-  const toggleIcon = document.getElementById('advanced-toggle-icon');
+  const closeAdvancedBtn = document.getElementById('close-advanced-options');
 
   toggleAdvancedBtn?.addEventListener('click', () => {
-    const isHidden = advancedOptions.classList.toggle('hidden');
-    toggleIcon.textContent = isHidden ? '+' : '-';
+    advancedOptions.classList.toggle('hidden');
+    toggleAdvancedBtn.classList.toggle('active', !advancedOptions.classList.contains('hidden'));
+  });
+
+  closeAdvancedBtn?.addEventListener('click', () => {
+    advancedOptions.classList.add('hidden');
+    toggleAdvancedBtn?.classList.remove('active');
   });
 
   // Slider value updates
@@ -691,17 +825,25 @@ async function handleAsk() {
   askBtn.disabled = true;
   spinner.classList.remove('hidden');
 
-  // Show skeleton result while loading
+  // Hide welcome screen
+  const chatWelcome = document.getElementById('chat-welcome');
+  if (chatWelcome) chatWelcome.style.display = 'none';
+
+  // Show user query bubble and typing indicator
   resultDiv.classList.remove('hidden');
   resultDiv.innerHTML = `
-    <div class="skeleton-result">
-      <div class="skeleton-line w-30"></div>
-      <div class="skeleton-line w-100"></div>
-      <div class="skeleton-line w-90"></div>
-      <div class="skeleton-line w-80"></div>
-      <div class="skeleton-line w-60"></div>
+    <div class="user-query-bubble">
+      <div class="bubble">${escapeHtml(query)}</div>
+    </div>
+    <div class="typing-indicator">
+      <div class="typing-dots"><span></span><span></span><span></span></div>
+      <span>${t('loading')}</span>
     </div>
   `;
+
+  // Scroll chat to bottom
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
 
   try {
     const useClassification = document.getElementById('use-classification').checked;
@@ -743,10 +885,109 @@ async function handleAsk() {
     displayAskResult(result, showTrace);
   } catch (error) {
     showToast(error.message, 'error');
+    resultDiv.classList.add('hidden');
   } finally {
     askBtn.disabled = false;
     spinner.classList.add('hidden');
+    // Focus back to input for next question
+    document.getElementById('query-input')?.focus();
   }
+}
+
+function formatQueryTypeLabel(queryType) {
+  const queryTypeMap = {
+    simple_lookup: 'query_type_simple',
+    comparison: 'query_type_comparison',
+    recommendation: 'query_type_recommendation',
+    reasoning: 'query_type_reasoning',
+    aggregation: 'query_type_aggregation'
+  };
+
+  const fallback = String(queryType || 'simple_lookup')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+
+  const key = queryTypeMap[queryType];
+  if (!key) return fallback;
+
+  const localized = t(key);
+  if (typeof localized !== 'string' || !localized.trim()) return fallback;
+
+  return localized.split(' - ')[0].trim();
+}
+
+function formatSummaryNumber(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '0';
+  return numeric.toLocaleString();
+}
+
+function renderAskExecutionSummary(result) {
+  if (!result || typeof result !== 'object') return '';
+
+  const confidence = Number(result.confidence);
+  const confidenceText = Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : 'n/a';
+  const chunksUsed = Number(result.chunks_used);
+  const sourceCount = Array.isArray(result.sources)
+    ? result.sources.length
+    : Array.isArray(result.top)
+      ? result.top.length
+      : 0;
+  const citationsCount = Array.isArray(result.citations?.citations)
+    ? result.citations.citations.length
+    : Array.isArray(result.llm_response?.citations)
+      ? result.llm_response.citations.length
+      : 0;
+  const snippetsCount = Array.isArray(result.snippets) ? result.snippets.length : 0;
+  const totalMs = Number(result.trace?.total_duration_ms);
+
+  const metricItems = [
+    { label: 'Type', value: formatQueryTypeLabel(result.query_type || 'simple_lookup') },
+    { label: 'Confidence', value: confidenceText },
+    { label: 'Chunks', value: formatSummaryNumber(chunksUsed) },
+    { label: 'Sources', value: formatSummaryNumber(sourceCount) },
+    { label: 'Citations', value: formatSummaryNumber(citationsCount) },
+    { label: 'Snippets', value: formatSummaryNumber(snippetsCount) }
+  ];
+
+  if (Number.isFinite(totalMs) && totalMs > 0) {
+    metricItems.push({ label: 'Latency', value: `${Math.round(totalMs)}ms` });
+  }
+
+  const metricHtml = metricItems.map(item => `
+    <div class="ask-summary-metric">
+      <span class="ask-summary-label">${escapeHtml(item.label)}</span>
+      <span class="ask-summary-value">${escapeHtml(item.value)}</span>
+    </div>
+  `).join('');
+
+  const retrievalSources = result.retrieval_sources && typeof result.retrieval_sources === 'object'
+    ? Object.entries(result.retrieval_sources).filter(([, count]) => Number(count) > 0)
+    : [];
+
+  const retrievalHtml = retrievalSources.length > 0
+    ? `<div class="ask-summary-source-row">${
+        retrievalSources
+          .map(([name, count]) => `<span class="ask-summary-source-pill">${escapeHtml(humanizeTraceKey(name))}: ${formatSummaryNumber(count)}</span>`)
+          .join('')
+      }</div>`
+    : '';
+
+  const pathValue = Array.isArray(result.tree_paths) && result.tree_paths.length > 0 ? result.tree_paths[0] : null;
+  const pathHtml = pathValue
+    ? `<div class="ask-summary-path"><span class="ask-summary-path-label">Top Path</span><code>${escapeHtml(pathValue)}</code></div>`
+    : '';
+
+  return `
+    <div class="ask-summary-card">
+      <div class="ask-summary-header">
+        <span>Execution Summary</span>
+      </div>
+      <div class="ask-summary-grid">${metricHtml}</div>
+      ${retrievalHtml}
+      ${pathHtml}
+    </div>
+  `;
 }
 
 function displayAskResult(result, showTrace = false) {
@@ -754,19 +995,23 @@ function displayAskResult(result, showTrace = false) {
   currentQueryResult = result;
 
   const resultDiv = document.getElementById('ask-result');
+  const queryText = document.getElementById('query-input').value.trim();
 
-  // Restore the proper HTML structure (skeleton loader replaced it)
+  // Build the result HTML with user bubble at top
   resultDiv.innerHTML = `
+    <div class="user-query-bubble">
+      <div class="bubble">${escapeHtml(queryText)}</div>
+    </div>
     <div class="result-header">
       <span class="query-type-badge" id="query-type-badge"></span>
       <span class="confidence-badge" id="confidence-badge"></span>
       <div class="feedback-buttons" id="feedback-buttons">
-        <button class="feedback-btn" data-rating="up" title="Helpful">👍</button>
-        <button class="feedback-btn" data-rating="down" title="Not helpful">👎</button>
+        <button class="feedback-btn" data-rating="up" title="Helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>
+        <button class="feedback-btn" data-rating="down" title="Not helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/></svg></button>
       </div>
     </div>
-    <div class="result-trace hidden" id="result-trace"></div>
     <div class="result-content" id="result-content"></div>
+    <div class="result-trace hidden" id="result-trace"></div>
     <div class="result-citations hidden" id="result-citations"></div>
     <div class="result-sources" id="result-sources"></div>
     <div class="related-questions hidden" id="related-questions">
@@ -790,7 +1035,7 @@ function displayAskResult(result, showTrace = false) {
   const relatedList = document.getElementById('related-questions-list');
 
   // Query type
-  typeBadge.textContent = result.query_type || 'simple_lookup';
+  typeBadge.textContent = formatQueryTypeLabel(result.query_type || 'simple_lookup');
 
   // Confidence settings
   const showConfidence = document.getElementById('opt-show-confidence')?.checked ?? true;
@@ -812,61 +1057,102 @@ function displayAskResult(result, showTrace = false) {
   }
 
   // Reset feedback buttons
-  document.querySelectorAll('.feedback-btn').forEach(btn => {
+  resultDiv.querySelectorAll('.feedback-btn').forEach(btn => {
     btn.classList.remove('selected');
     btn.disabled = false;
   });
 
   // Low confidence warning
-  const existingWarning = resultDiv.querySelector('.low-confidence-warning');
-  if (existingWarning) existingWarning.remove();
-
   if (confidence < minAnswerConfidence && confidence > 0) {
     const warning = document.createElement('div');
     warning.className = 'low-confidence-warning';
-    warning.innerHTML = `<span class="warning-icon">⚠️</span><span>${t('low_confidence_warning')}</span>`;
-    resultDiv.insertBefore(warning, traceDiv);
-  }
-
-  // Trace
-  if (showTrace && result.trace) {
-    traceDiv.classList.remove('hidden');
-    traceDiv.innerHTML = renderTrace(result.trace);
-  } else {
-    traceDiv.classList.add('hidden');
-    traceDiv.innerHTML = '';
+    warning.innerHTML = `<svg class="warning-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span>${t('low_confidence_warning')}</span>`;
+    contentDiv.parentNode.insertBefore(warning, contentDiv);
   }
 
   // Content - check for HTML answer with citations
   let contentHtml = '';
+  let plainAnswer = '';
+  const executionSummaryHtml = renderAskExecutionSummary(result);
 
   if (result.error) {
-    contentHtml = `<p class="error">${result.error}</p>`;
+    contentHtml = `${executionSummaryHtml}<p class="error">${escapeHtml(result.error)}</p>`;
   } else if (result.llm_response) {
     const llm = result.llm_response;
-    // Use HTML answer if available (has inline citations)
-    const answerContent = llm.final_answer_html || llm.final_answer || 'No answer available';
+    // Use HTML answer if available (has inline citations), otherwise render markdown
+    const answerContent = llm.final_answer_html || renderMarkdown(llm.final_answer) || 'No answer available';
+    plainAnswer = llm.final_answer || '';
     contentHtml = `
-      <h4>Answer</h4>
+      ${executionSummaryHtml}
       <div class="answer-text">${answerContent}</div>
-      ${llm.conditions?.length ? `<h4>Conditions</h4><ul>${llm.conditions.map(c => `<li>${c}</li>`).join('')}</ul>` : ''}
-      ${llm.missing_info?.length ? `<h4>Missing Information</h4><ul>${llm.missing_info.map(m => `<li>${m}</li>`).join('')}</ul>` : ''}
+      ${llm.conditions?.length ? `<h4>Conditions</h4><ul>${llm.conditions.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>` : ''}
+      ${llm.missing_info?.length ? `<h4>Missing Information</h4><ul>${llm.missing_info.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>` : ''}
+      <div class="answer-actions">
+        <button class="copy-answer-btn" id="copy-answer-btn" title="Copy answer"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>
+      </div>
     `;
   } else if (result.data) {
     if (result.query_type === 'comparison' && result.data.table) {
-      contentHtml = renderComparisonTable(result.data);
+      contentHtml = `${executionSummaryHtml}${renderComparisonTable(result.data)}`;
     } else if (result.query_type === 'recommendation' && result.data.recommendations) {
-      contentHtml = renderRecommendations(result.data);
+      contentHtml = `${executionSummaryHtml}${renderRecommendations(result.data)}`;
     } else if (result.data.answer) {
-      contentHtml = `<h4>Answer</h4><p>${result.data.answer}</p>`;
+      plainAnswer = result.data.answer;
+      contentHtml = `${executionSummaryHtml}<div class="answer-text">${renderMarkdown(result.data.answer)}</div>
+        <div class="answer-actions">
+          <button class="copy-answer-btn" id="copy-answer-btn" title="Copy answer"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>
+        </div>`;
     } else {
-      contentHtml = `<pre>${JSON.stringify(result.data, null, 2)}</pre>`;
+      contentHtml = `${executionSummaryHtml}<pre>${JSON.stringify(result.data, null, 2)}</pre>`;
     }
   } else if (result.message) {
-    contentHtml = `<p>${result.message}</p>`;
+    contentHtml = `${executionSummaryHtml}<p>${renderMarkdown(result.message)}</p>`;
   }
 
   contentDiv.innerHTML = contentHtml;
+
+  // Attach copy button handler
+  const copyBtn = document.getElementById('copy-answer-btn');
+  if (copyBtn && plainAnswer) {
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(plainAnswer).then(() => {
+        copyBtn.classList.add('copied');
+        copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg> Copied';
+        setTimeout(() => {
+          copyBtn.classList.remove('copied');
+          copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy';
+        }, 2000);
+      });
+    });
+  }
+
+  // Trace - rendered after content, collapsible
+  if (showTrace && result.trace) {
+    traceDiv.classList.remove('hidden');
+    traceDiv.innerHTML = renderTrace(result.trace);
+    // Attach trace toggle
+    const traceToggle = traceDiv.querySelector('.trace-toggle-btn');
+    const traceBody = traceDiv.querySelector('.trace-body');
+    if (traceToggle && traceBody) {
+      traceToggle.addEventListener('click', () => {
+        traceToggle.classList.toggle('expanded');
+        traceBody.classList.toggle('expanded');
+      });
+    }
+    // Attach step toggles
+    traceDiv.querySelectorAll('.trace-step-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const details = header.nextElementSibling;
+        if (details && details.classList.contains('trace-step-details')) {
+          details.classList.toggle('expanded');
+          header.classList.toggle('expanded');
+        }
+      });
+    });
+  } else {
+    traceDiv.classList.add('hidden');
+    traceDiv.innerHTML = '';
+  }
 
   // Citations
   if (result.citations?.citations?.length > 0) {
@@ -923,11 +1209,25 @@ function displayAskResult(result, showTrace = false) {
     `;
   }
 
-  // Sources
+  // Sources - display as cards
   const sources = result.sources || result.top?.map(t => t.node) || [];
   let sourcesHtml = '';
   if (sources.length > 0) {
-    sourcesHtml = `<strong>Sources:</strong> ${sources.map(s => s.name || s.node_id || s).join(', ')}`;
+    sourcesHtml = `
+      <div class="source-cards">
+        ${sources.map(s => {
+          const name = s.name || s.node_id || s;
+          const id = s.node_id || '';
+          return `
+            <div class="source-card">
+              <svg class="source-card-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <span class="source-card-name">${escapeHtml(typeof name === 'string' ? name : String(name))}</span>
+              ${id ? `<span class="source-card-id">${escapeHtml(id)}</span>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
   }
 
   sourcesDiv.innerHTML = factsHtml + snippetsHtml + sourcesHtml;
@@ -946,6 +1246,12 @@ function displayAskResult(result, showTrace = false) {
   }
 
   resultDiv.classList.remove('hidden');
+
+  // Scroll chat to bottom after result
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) {
+    requestAnimationFrame(() => { chatMessages.scrollTop = chatMessages.scrollHeight; });
+  }
 }
 
 function renderComparisonTable(data) {
@@ -996,35 +1302,410 @@ function renderRecommendations(data) {
   return html;
 }
 
+function humanizeTraceKey(keyPath) {
+  return String(keyPath || 'value')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\[(\d+)\]/g, ' $1')
+    .replace(/[._]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatTracePrimitive(value, maxLen = 220) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+  let text = String(value);
+  if (text.length > maxLen) {
+    text = `${text.slice(0, maxLen)}...`;
+  }
+  return text;
+}
+
+function collectTraceResultRows(value, keyPrefix = '', depth = 0, rows = [], seen = new WeakSet(), limit = 36) {
+  if (rows.length >= limit) return rows;
+
+  const baseKey = keyPrefix || 'value';
+
+  if (value === null || value === undefined || typeof value !== 'object') {
+    rows.push({ key: baseKey, value: formatTracePrimitive(value) });
+    return rows;
+  }
+
+  if (seen.has(value)) {
+    rows.push({ key: baseKey, value: '[circular reference]' });
+    return rows;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      rows.push({ key: baseKey, value: '[] (empty)' });
+      return rows;
+    }
+
+    const scalarArray = value.every(item => item === null || item === undefined || typeof item !== 'object');
+    if (scalarArray) {
+      const preview = value.slice(0, 6).map(item => formatTracePrimitive(item, 60)).join(', ');
+      const suffix = value.length > 6 ? ` (+${value.length - 6} more)` : '';
+      rows.push({ key: baseKey, value: `[${preview}]${suffix}` });
+      return rows;
+    }
+
+    rows.push({ key: baseKey, value: `${value.length} item(s)` });
+    if (depth >= 2) return rows;
+
+    const sampleCount = Math.min(2, value.length);
+    for (let i = 0; i < sampleCount && rows.length < limit; i++) {
+      collectTraceResultRows(value[i], `${baseKey}[${i}]`, depth + 1, rows, seen, limit);
+    }
+    return rows;
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length === 0) {
+    rows.push({ key: baseKey, value: '{} (empty)' });
+    return rows;
+  }
+
+  for (const [key, nestedValue] of entries) {
+    if (rows.length >= limit) break;
+    const nextKey = keyPrefix ? `${keyPrefix}.${key}` : key;
+
+    if (nestedValue === null || nestedValue === undefined || typeof nestedValue !== 'object') {
+      rows.push({ key: nextKey, value: formatTracePrimitive(nestedValue) });
+      continue;
+    }
+
+    if (Array.isArray(nestedValue)) {
+      if (nestedValue.length === 0) {
+        rows.push({ key: nextKey, value: '[] (empty)' });
+        continue;
+      }
+
+      const scalarArray = nestedValue.every(item => item === null || item === undefined || typeof item !== 'object');
+      if (scalarArray) {
+        const preview = nestedValue.slice(0, 6).map(item => formatTracePrimitive(item, 60)).join(', ');
+        const suffix = nestedValue.length > 6 ? ` (+${nestedValue.length - 6} more)` : '';
+        rows.push({ key: nextKey, value: `[${preview}]${suffix}` });
+      } else if (depth >= 2) {
+        rows.push({ key: nextKey, value: `${nestedValue.length} item(s)` });
+      } else {
+        rows.push({ key: nextKey, value: `${nestedValue.length} item(s)` });
+        const sampleCount = Math.min(2, nestedValue.length);
+        for (let i = 0; i < sampleCount && rows.length < limit; i++) {
+          collectTraceResultRows(nestedValue[i], `${nextKey}[${i}]`, depth + 1, rows, seen, limit);
+        }
+      }
+      continue;
+    }
+
+    if (depth >= 2) {
+      rows.push({ key: nextKey, value: '{...}' });
+      continue;
+    }
+    collectTraceResultRows(nestedValue, nextKey, depth + 1, rows, seen, limit);
+  }
+
+  return rows;
+}
+
+function renderTraceResultSummary(result) {
+  if (result === null || result === undefined) {
+    return '<div class="trace-result-empty">No payload</div>';
+  }
+
+  const rows = collectTraceResultRows(result, '', 0, [], new WeakSet(), 36);
+  if (rows.length === 0) {
+    return '<div class="trace-result-empty">No payload</div>';
+  }
+
+  const visibleRows = rows.slice(0, 20);
+  const rowsHtml = visibleRows.map(row => `
+    <div class="trace-result-row">
+      <span class="trace-result-key">${escapeHtml(humanizeTraceKey(row.key))}</span>
+      <span class="trace-result-value">${escapeHtml(row.value)}</span>
+    </div>
+  `).join('');
+
+  const overflow = rows.length > visibleRows.length
+    ? `<div class="trace-result-more">+${rows.length - visibleRows.length} more field(s) in raw payload</div>`
+    : '';
+
+  return `<div class="trace-result-grid">${rowsHtml}</div>${overflow}`;
+}
+
+function renderTraceRawPayload(result) {
+  if (result === null || result === undefined) return '';
+
+  let rawText = '';
+  try {
+    rawText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+  } catch {
+    rawText = '[Unable to serialize payload]';
+  }
+
+  const maxChars = 12000;
+  if (rawText.length > maxChars) {
+    rawText = `${rawText.slice(0, maxChars)}\n... (truncated ${rawText.length - maxChars} chars)`;
+  }
+
+  return `
+    <details class="trace-raw-payload">
+      <summary>Raw Payload</summary>
+      <pre class="trace-step-result">${escapeHtml(rawText)}</pre>
+    </details>
+  `;
+}
+
+function formatTraceMetric(value, digits = 2) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value ?? '');
+  return numeric.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function summarizeTraceArray(items, formatter, limit = 3) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+
+  const preview = items
+    .slice(0, limit)
+    .map(formatter)
+    .filter(Boolean);
+
+  if (preview.length === 0) return '';
+  const remaining = items.length - preview.length;
+  return remaining > 0 ? `${preview.join(' | ')} +${remaining}` : preview.join(' | ');
+}
+
+function pushTraceInsight(insights, label, value) {
+  if (value === null || value === undefined) return;
+  const text = String(value).trim();
+  if (!text) return;
+  insights.push({ label, value: text });
+}
+
+function buildTraceStepInsights(step) {
+  const result = step?.result;
+  if (!result || typeof result !== 'object') return [];
+
+  const insights = [];
+
+  if (result.query_type) {
+    pushTraceInsight(insights, 'Query Type', formatQueryTypeLabel(result.query_type));
+  }
+
+  if (typeof result.confidence === 'number') {
+    pushTraceInsight(insights, 'Confidence', `${Math.round(result.confidence * 100)}%`);
+  }
+
+  if (result.method) {
+    pushTraceInsight(insights, 'Method', result.method);
+  }
+
+  if (Array.isArray(result.entities) && result.entities.length > 0) {
+    pushTraceInsight(insights, 'Entities', summarizeTraceArray(result.entities, entity => entity));
+  }
+
+  if (Array.isArray(result.criteria) && result.criteria.length > 0) {
+    pushTraceInsight(insights, 'Criteria', summarizeTraceArray(result.criteria, criterion => criterion));
+  }
+
+  if (Array.isArray(result.subQueries) && result.subQueries.length > 0) {
+    pushTraceInsight(insights, 'Sub-Queries', summarizeTraceArray(result.subQueries, query => query));
+  }
+
+  if (Array.isArray(result.variants) && result.variants.length > 0) {
+    const variantText = summarizeTraceArray(
+      result.variants,
+      variant => `${variant.text} (${formatTraceMetric(variant.weight ?? 1, 2)})`
+    );
+    pushTraceInsight(insights, 'Variants', variantText);
+  }
+
+  if (typeof result.variants_used === 'number') {
+    pushTraceInsight(insights, 'Variants Used', result.variants_used);
+  }
+
+  if (typeof result.doc_title === 'number' || typeof result.bm25 === 'number' || typeof result.simple === 'number') {
+    pushTraceInsight(
+      insights,
+      'Direct Hits',
+      `title ${result.doc_title || 0}, bm25 ${result.bm25 || 0}, simple ${result.simple || 0}`
+    );
+  }
+
+  if (Array.isArray(result.top_nodes) && result.top_nodes.length > 0) {
+    const topNodesText = summarizeTraceArray(
+      result.top_nodes,
+      node => `${node.name || node.id || 'node'} (${formatTraceMetric(node.score ?? 0, 3)})`
+    );
+    pushTraceInsight(insights, 'Top Nodes', topNodesText);
+  }
+
+  if (Array.isArray(result.nodes) && result.nodes.length > 0) {
+    const nodeText = summarizeTraceArray(
+      result.nodes,
+      node => `${node.name || node.id || 'node'} (+${node.chunks_added || 0})`
+    );
+    pushTraceInsight(insights, 'Node Coverage', nodeText);
+  }
+
+  if (Array.isArray(result.top_chunks) && result.top_chunks.length > 0) {
+    const topChunkText = summarizeTraceArray(
+      result.top_chunks,
+      chunk => `${chunk.node || chunk.doc || chunk.id} (${formatTraceMetric(chunk.score ?? 0, 3)})`
+    );
+    pushTraceInsight(insights, 'Top Chunks', topChunkText);
+  }
+
+  if (Array.isArray(result.top_reranked) && result.top_reranked.length > 0) {
+    const rerankedText = summarizeTraceArray(
+      result.top_reranked,
+      chunk => `${chunk.id} (${formatTraceMetric(chunk.score ?? chunk.rerank_score ?? 0, 3)})`
+    );
+    pushTraceInsight(insights, 'Reranked Top', rerankedText);
+  }
+
+  if (typeof result.added === 'number' || typeof result.total === 'number') {
+    pushTraceInsight(insights, 'Enrichment', `${result.added || 0} added, ${result.total || 0} total`);
+  }
+
+  if (typeof result.from_hierarchical === 'number' || typeof result.from_direct === 'number') {
+    pushTraceInsight(
+      insights,
+      'Chunk Merge',
+      `hierarchical ${result.from_hierarchical || 0}, direct ${result.from_direct || 0}, total ${result.unique_total || 0}`
+    );
+  }
+
+  if (Array.isArray(result.paths) && result.paths.length > 0) {
+    const pathPreview = summarizeTraceArray(
+      result.paths,
+      path => Array.isArray(path) ? path.join(' > ') : path
+    );
+    pushTraceInsight(insights, 'Paths', pathPreview);
+  }
+
+  if (Array.isArray(result.sources) && result.sources.length > 0) {
+    pushTraceInsight(insights, 'Sources', result.sources.join(', '));
+  }
+
+  if (result.factors && typeof result.factors === 'object') {
+    const factorText = summarizeTraceArray(
+      Object.entries(result.factors)
+        .filter(([, value]) => typeof value === 'number')
+        .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])),
+      ([key, value]) => `${humanizeTraceKey(key)} ${formatTraceMetric(value, 2)}`,
+      4
+    );
+    pushTraceInsight(insights, 'Confidence Factors', factorText);
+  }
+
+  return insights.slice(0, 8);
+}
+
+function renderTraceStepInsights(step) {
+  const insights = buildTraceStepInsights(step);
+  if (insights.length === 0) return '';
+
+  const insightHtml = insights.map(item => `
+    <div class="trace-insight-item">
+      <span class="trace-insight-label">${escapeHtml(item.label)}</span>
+      <span class="trace-insight-value">${escapeHtml(item.value)}</span>
+    </div>
+  `).join('');
+
+  return `<div class="trace-step-insights">${insightHtml}</div>`;
+}
+
+function shouldExpandTraceStepByDefault(step, index, totalSteps) {
+  if (!step) return false;
+  if (step.status === 'error') return true;
+  if (index === 0 || index === totalSteps - 1) return true;
+
+  const stepName = String(step.name || '').toLowerCase();
+  return stepName.includes('hierarchical retrieval complete') || stepName.includes('final chunk selection');
+}
+
 function renderTrace(trace) {
   if (!trace || !trace.steps || trace.steps.length === 0) {
     return '<p class="trace-empty">No trace information available</p>';
   }
 
-  let html = '<div class="trace-container">';
-  html += '<h4 class="trace-title">Processing Trace</h4>';
-  html += '<div class="trace-timeline">';
+  const totalMs = trace.total_duration_ms || 0;
+  const maxStepMs = Math.max(...trace.steps.map(s => s.duration_ms || 0), 1);
+  const stepCount = trace.steps.length;
+  const successCount = trace.steps.filter(s => s.status === 'success').length;
+  const firstTimestamp = trace.steps[0]?.timestamp || Date.now();
+
+  // Progress dots
+  let progressHtml = '<div class="trace-progress">';
+  trace.steps.forEach((step, i) => {
+    const dotClass = step.status === 'success' ? 'success' :
+                     step.status === 'error' ? 'error' :
+                     step.status === 'skipped' ? 'skipped' : '';
+    progressHtml += `<span class="trace-progress-dot ${dotClass}" title="${step.name}"></span>`;
+    if (i < trace.steps.length - 1) {
+      progressHtml += '<span class="trace-progress-line"></span>';
+    }
+  });
+  progressHtml += '</div>';
+
+  // Toggle button
+  let html = `
+    <button class="trace-toggle-btn expanded" type="button">
+      <span class="trace-toggle-left">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Processing Trace (${successCount}/${stepCount} steps${totalMs ? ` \u00B7 ${totalMs}ms` : ''})
+      </span>
+      <svg class="trace-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    ${progressHtml}
+    <div class="trace-body expanded">
+      <div class="trace-body-inner">
+        <div class="trace-timeline">
+  `;
 
   trace.steps.forEach((step, i) => {
     const statusClass = step.status === 'success' ? 'trace-success' :
                        step.status === 'error' ? 'trace-error' :
                        step.status === 'skipped' ? 'trace-skipped' : '';
+    const metaStatusClass = step.status === 'error' ? 'error' :
+                           step.status === 'skipped' ? 'skipped' : 'success';
     const isHierarchy = step.name && step.name.toLowerCase().startsWith('hierarchy');
-    const hierarchyClass = isHierarchy ? 'trace-hierarchy' : '';
     const hierarchyTag = isHierarchy ? '<span class="trace-step-tag">hierarchy</span>' : '';
     const duration = step.duration_ms ? `${step.duration_ms}ms` : '';
+    const durationBarWidth = step.duration_ms ? Math.max(5, (step.duration_ms / maxStepMs) * 100) : 0;
+    const relativeMs = step.timestamp ? Math.max(0, step.timestamp - firstTimestamp) : 0;
+    const defaultExpanded = shouldExpandTraceStepByDefault(step, i, trace.steps.length);
+    const expandedClass = defaultExpanded ? ' expanded' : '';
+    const insightsHtml = renderTraceStepInsights(step);
+    const resultSummaryHtml = renderTraceResultSummary(step.result);
+    const rawPayloadHtml = renderTraceRawPayload(step.result);
 
     html += `
-      <div class="trace-step ${statusClass} ${hierarchyClass}">
-        <div class="trace-step-header">
+      <div class="trace-step ${statusClass}">
+        <div class="trace-step-header${expandedClass}">
           <span class="trace-step-number">${i + 1}</span>
-          <span class="trace-step-name">${step.name}</span>
+          <span class="trace-step-name">${escapeHtml(step.name)}</span>
           ${hierarchyTag}
           ${duration ? `<span class="trace-step-duration">${duration}</span>` : ''}
+          <svg class="trace-step-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
-        <div class="trace-step-details">
-          ${step.description ? `<p>${step.description}</p>` : ''}
-          ${step.result ? `<pre class="trace-step-result">${typeof step.result === 'object' ? JSON.stringify(step.result, null, 2) : step.result}</pre>` : ''}
+        ${durationBarWidth > 0 ? `<div class="trace-step-duration-bar" style="width: ${durationBarWidth}%"></div>` : ''}
+        <div class="trace-step-details${expandedClass}">
+          <div class="trace-step-details-inner">
+            ${step.description ? `<p class="trace-step-description">${escapeHtml(step.description)}</p>` : ''}
+            <div class="trace-step-meta">
+              <span class="trace-meta-pill ${metaStatusClass}">${escapeHtml(step.status || 'success')}</span>
+              <span class="trace-meta-pill">+${relativeMs}ms</span>
+              ${duration ? `<span class="trace-meta-pill">step ${duration}</span>` : ''}
+            </div>
+            ${insightsHtml}
+            ${resultSummaryHtml}
+            ${rawPayloadHtml}
+          </div>
         </div>
       </div>
     `;
@@ -1033,10 +1714,10 @@ function renderTrace(trace) {
   html += '</div>';
 
   if (trace.total_duration_ms) {
-    html += `<div class="trace-total">Total: ${trace.total_duration_ms}ms</div>`;
+    html += `<div class="trace-total">Total: <span class="trace-total-badge">${trace.total_duration_ms}ms</span></div>`;
   }
 
-  html += '</div>';
+  html += '</div></div>';
   return html;
 }
 
@@ -1090,13 +1771,23 @@ async function loadTree() {
     allNodes = flattenTree(data.tree || []);
 
     if (!data.tree || data.tree.length === 0) {
-      treeView.innerHTML = '<p class="loading-text">No nodes found. Create some nodes to get started.</p>';
+      treeView.innerHTML = renderEmptyState(
+        '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="14"/><circle cx="6" cy="19" r="3"/><line x1="12" y1="14" x2="6" y2="16"/><circle cx="18" cy="19" r="3"/><line x1="12" y1="14" x2="18" y2="16"/></svg>',
+        'No nodes yet',
+        'Create your first node to start building your knowledge tree.',
+        '<button class="btn btn-primary" onclick="document.getElementById(\'add-node-btn\').click()">+ Add Node</button>'
+      );
       return;
     }
 
-    treeView.innerHTML = renderTree(data.tree);
+    // Preserve search wrapper, replace tree content only
+    const searchWrapper = document.getElementById('tree-search-wrapper');
+    const searchHtml = searchWrapper ? searchWrapper.outerHTML : '';
+    treeView.innerHTML = searchHtml + renderTree(data.tree);
     attachTreeEvents();
     populateNodeSelects();
+    // Re-init search events
+    initTreeSearch();
 
     // Update graph if currently in graph view
     if (currentGraphView === 'graph') {
@@ -1291,7 +1982,7 @@ async function loadNodeDetail(nodeId) {
     if (facts.length > 0) {
       html += `
         <div class="node-facts">
-          <h4>📋 Facts (${facts.length})</h4>
+          <h4>Facts (${facts.length})</h4>
           <div class="facts-list">
       `;
 
@@ -1317,7 +2008,7 @@ async function loadNodeDetail(nodeId) {
     } else if (debugInfo && debugInfo.total_facts_in_db > 0) {
       html += `
         <div class="node-facts empty">
-          <h4>📋 Facts</h4>
+          <h4>Facts</h4>
           <p class="no-facts">No facts found for this node (${debugInfo.total_facts_in_db} facts in database).</p>
         </div>
       `;
@@ -1507,7 +2198,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
       formData.append('detectConflicts', detectConflicts);
 
-      const response = await fetch('/upload', { method: 'POST', body: formData });
+      const response = await fetch('/upload', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
       const result = await response.json();
       if (result.queued) {
         displayUploadResult([{
@@ -1524,7 +2215,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
       formData.append('detectConflicts', detectConflicts);
 
-      const response = await fetch('/upload/batch', { method: 'POST', body: formData });
+      const response = await fetch('/upload/batch', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
       const result = await response.json();
       if (result.queued && Array.isArray(result.jobs)) {
         displayUploadResult(result.jobs.map(j => ({
@@ -1604,7 +2295,11 @@ async function loadDocuments() {
     const data = await api(`/documents${status ? `?status=${status}` : ''}`);
 
     if (!data.documents || data.documents.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="loading-text">No documents found</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="8">${renderEmptyState(
+        '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+        'No documents yet',
+        'Upload your first document to populate the knowledge base.'
+      )}</td></tr>`;
       return;
     }
 
@@ -1735,7 +2430,11 @@ async function loadConflicts() {
 
     // List
     if (!data.conflicts || data.conflicts.length === 0) {
-      listDiv.innerHTML = `<p class="loading-text">${escapeHtml(t('no_unresolved_conflicts'))}</p>`;
+      listDiv.innerHTML = renderEmptyState(
+        '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+        t('no_unresolved_conflicts'),
+        ''
+      );
       return;
     }
 
@@ -1775,6 +2474,7 @@ async function loadConflicts() {
             <div class="conflict-actions">
               <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepAId}, ${keepBId})">${t('keep_a')}</button>
               <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepBId}, ${keepAId})">${t('keep_b')}</button>
+              <button class="btn btn-secondary btn-sm" onclick="keepBothChunks(${c.id})">${t('keep_both')}</button>
             </div>
           </div>
         </div>
@@ -1794,6 +2494,23 @@ window.resolveConflict = async function(conflictId, keepId, archiveId) {
         keepChunkId: keepId,
         archiveChunkId: archiveId,
         notes: 'Resolved via UI'
+      })
+    });
+
+    showToast(t('success'), 'success');
+    loadConflicts();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+};
+
+window.keepBothChunks = async function(conflictId) {
+  try {
+    await api(`/conflicts/${conflictId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({
+        resolution: 'keep_both',
+        notes: 'Kept both chunks via UI'
       })
     });
 
@@ -2360,4 +3077,379 @@ function resetGraph() {
   );
   // Re-render to reset positions
   createGraph();
+}
+
+// ============================================
+// Mobile Sidebar
+// ============================================
+
+function initMobileSidebar() {
+  const toggle = document.getElementById('sidebar-toggle');
+  const backdrop = document.getElementById('sidebar-backdrop');
+
+  toggle?.addEventListener('click', () => {
+    const sidebar = document.getElementById('sidebar');
+    sidebar.classList.toggle('open');
+    backdrop.classList.toggle('visible');
+  });
+
+  backdrop?.addEventListener('click', closeMobileSidebar);
+}
+
+function closeMobileSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  sidebar?.classList.remove('open');
+  backdrop?.classList.remove('visible');
+}
+
+// ============================================
+// Tree Search / Filter
+// ============================================
+
+function initTreeSearch() {
+  const input = document.getElementById('tree-search-input');
+  if (!input) return;
+
+  let debounceTimer = null;
+  input.addEventListener('input', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      filterTree(input.value.trim().toLowerCase());
+    }, 150);
+  });
+}
+
+function filterTree(query) {
+  const countEl = document.getElementById('tree-search-count');
+  const treeItems = document.querySelectorAll('.tree-node-item');
+
+  if (!query) {
+    // Reset - show all
+    treeItems.forEach(item => {
+      item.classList.remove('search-hidden');
+      item.closest('.tree-branch')?.classList.remove('search-hidden');
+      // Restore original name (remove highlights)
+      const nameEl = item.querySelector('.tree-name');
+      if (nameEl && nameEl.dataset.originalName) {
+        nameEl.textContent = nameEl.dataset.originalName;
+      }
+    });
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+
+  let matchCount = 0;
+
+  // First pass: find matches and mark them
+  treeItems.forEach(item => {
+    const nameEl = item.querySelector('.tree-name');
+    if (!nameEl) return;
+
+    // Store original name
+    if (!nameEl.dataset.originalName) {
+      nameEl.dataset.originalName = nameEl.textContent;
+    }
+
+    const name = nameEl.dataset.originalName.toLowerCase();
+    const matches = name.includes(query);
+
+    if (matches) {
+      matchCount++;
+      // Highlight match
+      const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+      nameEl.innerHTML = nameEl.dataset.originalName.replace(regex, '<mark>$1</mark>');
+
+      // Show this item and all ancestors
+      item.classList.remove('search-hidden');
+      item.closest('.tree-branch')?.classList.remove('search-hidden');
+
+      // Expand ancestor tree-children
+      let parent = item.closest('.tree-branch')?.parentElement;
+      while (parent) {
+        if (parent.classList.contains('tree-children')) {
+          parent.classList.add('expanded');
+          parent.classList.remove('search-hidden');
+        }
+        if (parent.classList.contains('tree-branch')) {
+          parent.classList.remove('search-hidden');
+        }
+        parent = parent.parentElement;
+      }
+    } else {
+      nameEl.textContent = nameEl.dataset.originalName;
+    }
+  });
+
+  // Second pass: hide non-matching items that don't have matching children
+  treeItems.forEach(item => {
+    const nameEl = item.querySelector('.tree-name');
+    if (!nameEl) return;
+
+    const name = (nameEl.dataset.originalName || nameEl.textContent).toLowerCase();
+    if (!name.includes(query)) {
+      // Check if any descendant matches
+      const branch = item.closest('.tree-branch');
+      const childMatches = branch?.querySelectorAll('.tree-name mark');
+      if (!childMatches || childMatches.length === 0) {
+        item.classList.add('search-hidden');
+        branch?.classList.add('search-hidden');
+      }
+    }
+  });
+
+  if (countEl) {
+    countEl.textContent = matchCount > 0 ? `${matchCount} node${matchCount !== 1 ? 's' : ''} found` : 'No matches';
+  }
+}
+
+// ============================================
+// Better Empty States
+// ============================================
+
+function renderEmptyState(icon, title, description, actionHtml = '') {
+  return `
+    <div class="empty-state">
+      <div class="empty-state-icon">${icon}</div>
+      <div class="empty-state-title">${title}</div>
+      <div class="empty-state-desc">${description}</div>
+      ${actionHtml ? `<div class="empty-state-action">${actionHtml}</div>` : ''}
+    </div>
+  `;
+}
+
+// ============================================
+// Datasets Tab
+// ============================================
+
+async function initDatasets() {
+  // Restore saved dataset from localStorage
+  const saved = localStorage.getItem(DATASET_KEY);
+
+  try {
+    const data = await fetch('/datasets').then(r => r.json());
+    allDatasets = data.datasets || [];
+
+    // Populate sidebar dropdown
+    renderDatasetDropdown();
+
+    // Restore saved selection
+    if (saved && allDatasets.find(d => d.id === saved)) {
+      switchDataset(saved, allDatasets.find(d => d.id === saved).name, false);
+    } else if (allDatasets.length > 0) {
+      switchDataset(allDatasets[0].id, allDatasets[0].name, false);
+    }
+  } catch (err) {
+    console.error('Failed to load datasets:', err);
+  }
+
+  // Wire up sidebar select
+  document.getElementById('dataset-select')?.addEventListener('change', (e) => {
+    const id = e.target.value;
+    const dataset = allDatasets.find(d => d.id === id);
+    if (dataset) switchDataset(id, dataset.name, true);
+  });
+
+  // New dataset button
+  document.getElementById('new-dataset-btn')?.addEventListener('click', () => {
+    document.getElementById('dataset-create-form').classList.remove('hidden');
+    document.getElementById('new-dataset-name')?.focus();
+  });
+
+  document.getElementById('cancel-create-dataset')?.addEventListener('click', () => {
+    document.getElementById('dataset-create-form').classList.add('hidden');
+    document.getElementById('new-dataset-name').value = '';
+    document.getElementById('new-dataset-desc').value = '';
+  });
+
+  document.getElementById('confirm-create-dataset')?.addEventListener('click', handleCreateDataset);
+}
+
+function renderDatasetDropdown() {
+  const select = document.getElementById('dataset-select');
+  if (!select) return;
+
+  select.innerHTML = allDatasets.map(d =>
+    `<option value="${escapeHtml(d.id)}" ${d.id === currentDatasetId ? 'selected' : ''}>${escapeHtml(d.name)}</option>`
+  ).join('');
+}
+
+function switchDataset(id, name, reload = true) {
+  currentDatasetId = id;
+  currentDatasetName = name;
+  localStorage.setItem(DATASET_KEY, id);
+
+  // Update sidebar dropdown
+  const select = document.getElementById('dataset-select');
+  if (select) select.value = id;
+
+  if (reload) {
+    // Reload active tab data with new dataset context
+    const activeTab = document.querySelector('.nav-btn.active')?.dataset.tab;
+    if (activeTab === 'tree') loadTree();
+    else if (activeTab === 'ask') {
+      // Clear the chat area when switching datasets
+      const welcome = document.getElementById('chat-welcome');
+      const result = document.getElementById('ask-result');
+      if (welcome) welcome.style.display = '';
+      if (result) result.classList.add('hidden');
+    }
+    else if (activeTab === 'documents') loadDocuments();
+    else if (activeTab === 'conflicts') loadConflicts();
+    else if (activeTab === 'stats') loadStats();
+    else if (activeTab === 'datasets') loadDatasets();
+  }
+}
+
+async function loadDatasets() {
+  const list = document.getElementById('datasets-list');
+  if (!list) return;
+
+  list.innerHTML = '<div class="loading-text">Loading datasets...</div>';
+
+  try {
+    const data = await fetch('/datasets').then(r => r.json());
+    allDatasets = data.datasets || [];
+    renderDatasetDropdown();
+
+    if (allDatasets.length === 0) {
+      list.innerHTML = `<div class="empty-state"><div class="empty-state-title">${t('no_datasets')}</div></div>`;
+      return;
+    }
+
+    // Fetch stats for each dataset in parallel
+    const statsResults = await Promise.allSettled(
+      allDatasets.map(d => fetch(`/datasets/${d.id}/stats`).then(r => r.json()))
+    );
+
+    list.innerHTML = allDatasets.map((d, i) => {
+      const stats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : {};
+      return renderDatasetCard(d, stats);
+    }).join('');
+
+    // Wire up card action buttons via delegation
+    list.addEventListener('click', handleDatasetCardAction);
+  } catch (err) {
+    list.innerHTML = `<div class="error-text">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderDatasetCard(dataset, stats = {}) {
+  const isActive = dataset.id === currentDatasetId;
+  const nodeCount = stats.node_count ?? '—';
+  const docCount = stats.document_count ?? '—';
+  const createdDate = dataset.created_at ? new Date(dataset.created_at).toLocaleDateString() : '';
+
+  return `
+    <div class="dataset-card" data-dataset-id="${escapeHtml(dataset.id)}">
+      <div class="dataset-card-header">
+        <div class="dataset-card-title">
+          <h3 class="dataset-name">${escapeHtml(dataset.name)}</h3>
+          ${isActive ? `<span class="dataset-active-badge">${t('dataset_active')}</span>` : ''}
+        </div>
+        ${dataset.description ? `<div class="dataset-description">${escapeHtml(dataset.description)}</div>` : ''}
+        <div class="dataset-meta">
+          ${createdDate ? `<span>${createdDate}</span> · ` : ''}
+          <span>${nodeCount} ${t('dataset_nodes')} · ${docCount} ${t('dataset_docs')}</span>
+        </div>
+      </div>
+      <div class="dataset-card-actions">
+        ${!isActive ? `<button class="btn btn-primary btn-small" data-action="switch">${t('dataset_switch')}</button>` : ''}
+        <button class="btn btn-secondary btn-small" data-action="rename">${t('dataset_rename')}</button>
+        <button class="btn btn-secondary btn-small" data-action="duplicate">${t('dataset_duplicate')}</button>
+        <button class="btn btn-secondary btn-small" data-action="export">${t('dataset_export')}</button>
+        <button class="btn btn-danger btn-small" data-action="delete">${t('dataset_delete')}</button>
+      </div>
+      <div class="dataset-rename-form hidden" data-rename-form>
+        <input type="text" class="dataset-rename-input" value="${escapeHtml(dataset.name)}" placeholder="${t('dataset_name_placeholder')}">
+        <input type="text" class="dataset-desc-input" value="${escapeHtml(dataset.description || '')}" placeholder="${t('dataset_desc_placeholder')}">
+        <div class="form-actions">
+          <button class="btn btn-secondary btn-small" data-action="cancel-rename">${t('cancel')}</button>
+          <button class="btn btn-primary btn-small" data-action="save-rename">${t('save')}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function handleDatasetCardAction(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+
+  const card = btn.closest('.dataset-card');
+  if (!card) return;
+
+  const datasetId = card.dataset.datasetId;
+  const action = btn.dataset.action;
+
+  if (action === 'switch') {
+    const dataset = allDatasets.find(d => d.id === datasetId);
+    if (dataset) {
+      switchDataset(datasetId, dataset.name, true);
+      loadDatasets();
+    }
+  } else if (action === 'rename') {
+    card.querySelector('[data-rename-form]').classList.remove('hidden');
+    card.querySelector('.dataset-rename-input')?.focus();
+  } else if (action === 'cancel-rename') {
+    card.querySelector('[data-rename-form]').classList.add('hidden');
+  } else if (action === 'save-rename') {
+    const newName = card.querySelector('.dataset-rename-input')?.value.trim();
+    const newDesc = card.querySelector('.dataset-desc-input')?.value.trim();
+    if (!newName) { showToast('Name is required', 'error'); return; }
+    try {
+      await api(`/datasets/${datasetId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: newName, description: newDesc })
+      });
+      if (datasetId === currentDatasetId) currentDatasetName = newName;
+      showToast(t('dataset_renamed'), 'success');
+      loadDatasets();
+    } catch (err) { showToast(err.message, 'error'); }
+  } else if (action === 'duplicate') {
+    const dataset = allDatasets.find(d => d.id === datasetId);
+    const suggestedName = dataset ? `${dataset.name} (copy)` : 'Copy';
+    try {
+      await api(`/datasets/${datasetId}/duplicate`, {
+        method: 'POST',
+        body: JSON.stringify({ name: suggestedName })
+      });
+      showToast(t('dataset_duplicated'), 'success');
+      loadDatasets();
+    } catch (err) { showToast(err.message, 'error'); }
+  } else if (action === 'export') {
+    window.location.href = `/datasets/${datasetId}/export`;
+  } else if (action === 'delete') {
+    const confirmation = prompt(t('confirm_delete_dataset'));
+    if (confirmation !== 'DELETE') return;
+    try {
+      await api(`/datasets/${datasetId}?confirm=yes`, { method: 'DELETE' });
+      showToast(t('dataset_deleted'), 'success');
+      // If we deleted the active dataset, switch to first remaining
+      if (datasetId === currentDatasetId) {
+        const remaining = allDatasets.filter(d => d.id !== datasetId);
+        if (remaining.length > 0) switchDataset(remaining[0].id, remaining[0].name, true);
+      }
+      loadDatasets();
+    } catch (err) { showToast(err.message, 'error'); }
+  }
+}
+
+async function handleCreateDataset() {
+  const nameInput = document.getElementById('new-dataset-name');
+  const descInput = document.getElementById('new-dataset-desc');
+  const name = nameInput?.value.trim();
+  if (!name) { showToast('Name is required', 'error'); return; }
+
+  try {
+    const result = await api('/datasets', {
+      method: 'POST',
+      body: JSON.stringify({ name, description: descInput?.value.trim() || '' })
+    });
+    document.getElementById('dataset-create-form').classList.add('hidden');
+    nameInput.value = '';
+    if (descInput) descInput.value = '';
+    showToast(t('dataset_created'), 'success');
+    loadDatasets();
+  } catch (err) { showToast(err.message, 'error'); }
 }

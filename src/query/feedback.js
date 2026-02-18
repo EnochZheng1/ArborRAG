@@ -363,5 +363,4 @@ export function initFeedbackTables() {
   }
 }
 
-// Initialize tables on module load
-initFeedbackTables();
+// Note: initFeedbackTables() is called by initDatasetDb() for each dataset connection.

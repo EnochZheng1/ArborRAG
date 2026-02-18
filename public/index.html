@@ -9,44 +9,74 @@
 </head>
 <body>
   <div class="app">
+    <!-- Mobile sidebar toggle -->
+    <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle menu">&#9776;</button>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="logo">
-        <h1>🌳 TreeKB</h1>
-        <span class="subtitle">Knowledge Graph</span>
+        <div class="logo-mark">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="14"/>
+            <circle cx="6" cy="19" r="3"/><line x1="12" y1="14" x2="6" y2="16"/>
+            <circle cx="18" cy="19" r="3"/><line x1="12" y1="14" x2="18" y2="16"/>
+          </svg>
+        </div>
+        <div class="logo-text">
+          <h1>TreeKB</h1>
+          <span class="subtitle">Knowledge Graph</span>
+        </div>
+      </div>
+
+      <div class="dataset-switcher" id="dataset-switcher">
+        <label class="dataset-switcher-label" for="dataset-select" data-i18n="dataset_switcher_label">Dataset</label>
+        <div class="dataset-select-wrapper">
+          <select id="dataset-select" class="dataset-select"></select>
+        </div>
       </div>
 
       <nav class="nav">
         <button class="nav-btn active" data-tab="ask">
-          <span class="icon">💬</span> Ask
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Ask</span>
         </button>
         <button class="nav-btn" data-tab="tree">
-          <span class="icon">🗂️</span> Tree
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span>Tree</span>
         </button>
         <button class="nav-btn" data-tab="upload">
-          <span class="icon">📤</span> Upload
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Upload</span>
         </button>
         <button class="nav-btn" data-tab="documents">
-          <span class="icon">📄</span> Documents
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span>Documents</span>
         </button>
         <button class="nav-btn" data-tab="conflicts">
-          <span class="icon">⚠️</span> Conflicts
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>Conflicts</span>
         </button>
         <button class="nav-btn" data-tab="stats">
-          <span class="icon">📊</span> Stats
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>Stats</span>
+        </button>
+        <button class="nav-btn" data-tab="datasets">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          <span data-i18n="datasets_title">Datasets</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="theme-switch">
+        <div class="sidebar-footer-row">
           <button class="theme-btn" id="theme-toggle" title="Toggle theme">
-            <span class="theme-icon light">☀️</span>
-            <span class="theme-icon dark">🌙</span>
+            <svg class="theme-icon-svg light-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <svg class="theme-icon-svg dark-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
-        </div>
-        <div class="lang-switch">
-          <button class="lang-btn active" data-lang="en">EN</button>
-          <button class="lang-btn" data-lang="zh">中文</button>
+          <div class="lang-switch">
+            <button class="lang-btn active" data-lang="en">EN</button>
+            <button class="lang-btn" data-lang="zh">中文</button>
+          </div>
         </div>
       </div>
     </aside>
@@ -55,178 +85,161 @@
     <main class="main">
       <!-- Ask Tab -->
       <section class="tab-content active" id="tab-ask">
-        <div class="tab-header">
-          <h2 data-i18n="ask_title">Ask a Question</h2>
-          <p data-i18n="ask_subtitle">Query the knowledge base with natural language</p>
-        </div>
-
-        <div class="ask-container">
-          <div class="ask-input-wrapper">
-            <textarea
-              id="query-input"
-              class="ask-input"
-              placeholder="Ask anything... (e.g., 'Compare Product A and B', '销售流程是什么？')"
-              rows="3"
-            ></textarea>
-            <div class="ask-options">
-              <label class="checkbox-label" title="Automatically classifies your query type (comparison, recommendation, reasoning, etc.) and routes to the best handler">
-                <input type="checkbox" id="use-classification" checked>
-                <span data-i18n="smart_routing">Smart Routing</span>
-                <span class="tooltip-icon" data-i18n-title="smart_routing_tooltip">?</span>
-              </label>
-              <label class="checkbox-label" title="Combines BM25 keyword matching with semantic vector search for better relevance">
-                <input type="checkbox" id="use-hybrid" checked>
-                <span data-i18n="hybrid_search">Hybrid Search</span>
-                <span class="tooltip-icon" data-i18n-title="hybrid_search_tooltip">?</span>
-              </label>
-              <label class="checkbox-label" title="Show step-by-step trace of how your query was processed">
-                <input type="checkbox" id="show-trace">
-                <span data-i18n="show_trace">Show Trace</span>
-                <span class="tooltip-icon" data-i18n-title="show_trace_tooltip">?</span>
-              </label>
-              <button type="button" class="btn btn-small btn-text" id="toggle-advanced-options">
-                <span data-i18n="advanced_options">Advanced Options</span> <span id="advanced-toggle-icon">+</span>
-              </button>
+        <div class="chat-layout">
+          <!-- Chat messages area -->
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-welcome" id="chat-welcome">
+              <div class="chat-welcome-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="14"/>
+                  <circle cx="6" cy="19" r="3"/><line x1="12" y1="14" x2="6" y2="16"/>
+                  <circle cx="18" cy="19" r="3"/><line x1="12" y1="14" x2="18" y2="16"/>
+                </svg>
+              </div>
+              <h2 data-i18n="ask_title">Ask a Question</h2>
+              <p data-i18n="ask_subtitle">Query the knowledge base with natural language</p>
+              <!-- Query History inline -->
+              <div class="chat-history" id="query-history">
+                <div class="history-header">
+                  <h4 data-i18n="query_history">Recent Queries</h4>
+                  <button class="btn btn-small btn-text" id="clear-history-btn" data-i18n="clear">Clear</button>
+                </div>
+                <div class="history-list" id="history-list"></div>
+              </div>
             </div>
 
-            <div class="advanced-options hidden" id="advanced-options">
+            <div id="ask-result" class="ask-result hidden">
+              <div class="result-header">
+                <span class="query-type-badge" id="query-type-badge"></span>
+                <span class="confidence-badge" id="confidence-badge"></span>
+                <div class="feedback-buttons" id="feedback-buttons">
+                  <button class="feedback-btn" data-rating="up" title="Helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>
+                  <button class="feedback-btn" data-rating="down" title="Not helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/></svg></button>
+                </div>
+              </div>
+              <div class="result-trace hidden" id="result-trace"></div>
+              <div class="result-content" id="result-content"></div>
+              <div class="result-citations hidden" id="result-citations"></div>
+              <div class="result-sources" id="result-sources"></div>
+              <div class="related-questions hidden" id="related-questions">
+                <h4 data-i18n="related_questions">Related Questions</h4>
+                <div class="related-questions-list" id="related-questions-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Input bar fixed at bottom -->
+          <div class="chat-input-bar">
+            <div class="chat-input-wrapper">
+              <div class="suggestions-container hidden" id="suggestions-container">
+                <ul class="suggestions-list" id="suggestions-list"></ul>
+              </div>
+              <textarea
+                id="query-input"
+                class="ask-input"
+                placeholder="Ask anything... (e.g., 'Compare Product A and B', '销售流程是什么？')"
+                rows="1"
+              ></textarea>
+              <div class="chat-input-actions">
+                <button type="button" class="chat-settings-btn" id="toggle-advanced-options" title="Settings">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+                <button id="ask-btn" class="chat-send-btn" title="Send">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                  <span class="loading-spinner hidden"></span>
+                </button>
+              </div>
+            </div>
+            <div class="chat-input-meta">
+              <span class="ask-keyboard-hint"><kbd>Enter</kbd> to send &middot; <kbd>Shift+Enter</kbd> new line</span>
+            </div>
+
+            <!-- Settings panel (hidden by default) -->
+            <div class="chat-settings-panel hidden" id="advanced-options">
+              <div class="settings-panel-header">
+                <span>Search Settings</span>
+                <button type="button" class="settings-close-btn" id="close-advanced-options">&times;</button>
+              </div>
+              <div class="settings-quick-toggles">
+                <label class="toggle-pill" title="Automatically classifies your query type and routes to the best handler">
+                  <input type="checkbox" id="use-classification" checked>
+                  <span data-i18n="smart_routing">Smart Routing</span>
+                </label>
+                <label class="toggle-pill" title="Combines BM25 keyword matching with semantic vector search">
+                  <input type="checkbox" id="use-hybrid" checked>
+                  <span data-i18n="hybrid_search">Hybrid Search</span>
+                </label>
+                <label class="toggle-pill" title="Show step-by-step processing trace">
+                  <input type="checkbox" id="show-trace">
+                  <span data-i18n="show_trace">Show Trace</span>
+                </label>
+              </div>
               <div class="options-grid">
                 <div class="option-group option-group-wide">
                   <div class="option-label-row">
                     <label for="opt-query-type" data-i18n="query_type">Query Type</label>
                     <span class="option-help" data-i18n-title="query_type_help">?</span>
                   </div>
-                  <p class="option-desc" data-i18n="query_type_desc">Auto-detect or manually select how to process your query</p>
                   <select id="opt-query-type" class="option-select">
                     <option value="auto" data-i18n="query_type_auto">Auto (Recommended)</option>
-                    <option value="simple_lookup" data-i18n="query_type_simple">Simple Lookup - Direct fact retrieval</option>
-                    <option value="comparison" data-i18n="query_type_comparison">Comparison - Compare entities</option>
-                    <option value="recommendation" data-i18n="query_type_recommendation">Recommendation - Suggest options</option>
-                    <option value="reasoning" data-i18n="query_type_reasoning">Reasoning - Multi-hop analysis</option>
-                    <option value="aggregation" data-i18n="query_type_aggregation">Aggregation - Summarize content</option>
+                    <option value="simple_lookup" data-i18n="query_type_simple">Simple Lookup</option>
+                    <option value="comparison" data-i18n="query_type_comparison">Comparison</option>
+                    <option value="recommendation" data-i18n="query_type_recommendation">Recommendation</option>
+                    <option value="reasoning" data-i18n="query_type_reasoning">Reasoning</option>
+                    <option value="aggregation" data-i18n="query_type_aggregation">Aggregation</option>
                   </select>
                 </div>
                 <div class="option-group">
                   <div class="option-label-row">
                     <label for="opt-show-confidence" data-i18n="show_confidence">Show Confidence</label>
-                    <span class="option-help" data-i18n-title="show_confidence_help">?</span>
                   </div>
-                  <p class="option-desc" data-i18n="show_confidence_desc">Display confidence score in results</p>
                   <label class="toggle-switch">
                     <input type="checkbox" id="opt-show-confidence" checked>
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-min-answer-confidence" data-i18n="min_answer_confidence">Min Answer Confidence</label>
-                    <span class="option-help" data-i18n-title="min_answer_confidence_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="min_answer_confidence_desc">Warn if answer confidence is below this</p>
-                  <input type="range" id="opt-min-answer-confidence" min="0" max="1" value="0.3" step="0.05">
-                  <span class="option-value" id="opt-min-answer-confidence-value">0.30</span>
-                </div>
-                <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-top-k" data-i18n="top_k">Top K Nodes</label>
-                    <span class="option-help" data-i18n-title="top_k_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="top_k_desc">Number of candidate nodes to retrieve</p>
+                  <label for="opt-top-k" data-i18n="top_k">Top K Nodes</label>
                   <input type="range" id="opt-top-k" min="5" max="50" value="30" step="5">
                   <span class="option-value" id="opt-top-k-value">30</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-max-chunks" data-i18n="max_chunks">Max Chunks</label>
-                    <span class="option-help" data-i18n-title="max_chunks_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="max_chunks_desc">Maximum text chunks to include in context</p>
+                  <label for="opt-max-chunks" data-i18n="max_chunks">Max Chunks</label>
                   <input type="range" id="opt-max-chunks" min="5" max="50" value="20" step="5">
                   <span class="option-value" id="opt-max-chunks-value">20</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-min-confidence" data-i18n="min_confidence">Min Confidence</label>
-                    <span class="option-help" data-i18n-title="min_confidence_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="min_confidence_desc">Minimum similarity score for vector search</p>
+                  <label for="opt-min-confidence" data-i18n="min_confidence">Min Confidence</label>
                   <input type="range" id="opt-min-confidence" min="0" max="1" value="0" step="0.05">
                   <span class="option-value" id="opt-min-confidence-value">0.00</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-hybrid-alpha" data-i18n="hybrid_alpha">Hybrid Alpha</label>
-                    <span class="option-help" data-i18n-title="hybrid_alpha_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="hybrid_alpha_desc">Balance: 0=keyword, 1=semantic</p>
+                  <label for="opt-hybrid-alpha" data-i18n="hybrid_alpha">Hybrid Alpha</label>
                   <input type="range" id="opt-hybrid-alpha" min="0" max="1" value="0.5" step="0.1">
                   <span class="option-value" id="opt-hybrid-alpha-value">0.5</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-reranker-threshold" data-i18n="reranker_threshold">Reranker Threshold</label>
-                    <span class="option-help" data-i18n-title="reranker_threshold_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="reranker_threshold_desc">Min score to keep after LLM re-ranking</p>
+                  <label for="opt-reranker-threshold" data-i18n="reranker_threshold">Reranker Threshold</label>
                   <input type="range" id="opt-reranker-threshold" min="0" max="1" value="0.3" step="0.05">
                   <span class="option-value" id="opt-reranker-threshold-value">0.30</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-context-window" data-i18n="context_window">Context Window</label>
-                    <span class="option-help" data-i18n-title="context_window_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="context_window_desc">Adjacent chunks to include for context</p>
+                  <label for="opt-context-window" data-i18n="context_window">Context Window</label>
                   <input type="range" id="opt-context-window" min="0" max="5" value="1" step="1">
                   <span class="option-value" id="opt-context-window-value">1</span>
                 </div>
                 <div class="option-group">
-                  <div class="option-label-row">
-                    <label for="opt-temperature" data-i18n="temperature">Temperature</label>
-                    <span class="option-help" data-i18n-title="temperature_help">?</span>
-                  </div>
-                  <p class="option-desc" data-i18n="temperature_desc">LLM creativity: 0=precise, 1=creative</p>
+                  <label for="opt-temperature" data-i18n="temperature">Temperature</label>
                   <input type="range" id="opt-temperature" min="0" max="1" value="0.3" step="0.1">
                   <span class="option-value" id="opt-temperature-value">0.3</span>
                 </div>
+                <div class="option-group">
+                  <label for="opt-min-answer-confidence" data-i18n="min_answer_confidence">Min Answer Confidence</label>
+                  <input type="range" id="opt-min-answer-confidence" min="0" max="1" value="0.3" step="0.05">
+                  <span class="option-value" id="opt-min-answer-confidence-value">0.30</span>
+                </div>
               </div>
             </div>
-            <button id="ask-btn" class="btn btn-primary">
-              <span data-i18n="ask_btn">Ask</span>
-              <span class="loading-spinner hidden"></span>
-            </button>
-          </div>
-
-          <div id="ask-result" class="ask-result hidden">
-            <div class="result-header">
-              <span class="query-type-badge" id="query-type-badge"></span>
-              <span class="confidence-badge" id="confidence-badge"></span>
-              <div class="feedback-buttons" id="feedback-buttons">
-                <button class="feedback-btn" data-rating="up" title="Helpful">👍</button>
-                <button class="feedback-btn" data-rating="down" title="Not helpful">👎</button>
-              </div>
-            </div>
-            <div class="result-trace hidden" id="result-trace"></div>
-            <div class="result-content" id="result-content"></div>
-            <div class="result-citations hidden" id="result-citations"></div>
-            <div class="result-sources" id="result-sources"></div>
-            <div class="related-questions hidden" id="related-questions">
-              <h4 data-i18n="related_questions">Related Questions</h4>
-              <div class="related-questions-list" id="related-questions-list"></div>
-            </div>
-          </div>
-
-          <div class="suggestions-container hidden" id="suggestions-container">
-            <ul class="suggestions-list" id="suggestions-list"></ul>
-          </div>
-
-          <!-- Query History -->
-          <div class="query-history" id="query-history">
-            <div class="history-header">
-              <h4 data-i18n="query_history">Recent Queries</h4>
-              <button class="btn btn-small btn-text" id="clear-history-btn" data-i18n="clear">Clear</button>
-            </div>
-            <div class="history-list" id="history-list"></div>
           </div>
         </div>
       </section>
@@ -238,10 +251,10 @@
           <div class="header-actions">
             <div class="view-toggle">
               <button class="view-btn active" data-view="list" title="List View">
-                <span>📋</span>
+                <svg class="view-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
               </button>
               <button class="view-btn" data-view="graph" title="Graph View">
-                <span>🕸️</span>
+                <svg class="view-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg>
               </button>
             </div>
             <button id="empty-tree-btn" class="btn btn-danger" title="Delete all nodes and data">
@@ -258,6 +271,11 @@
 
         <div class="tree-container">
           <div class="tree-view" id="tree-view">
+            <div class="tree-search-wrapper" id="tree-search-wrapper">
+              <svg class="tree-search-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" class="tree-search-input" id="tree-search-input" placeholder="Filter nodes..." data-i18n-placeholder="filter_nodes">
+              <div class="tree-search-count" id="tree-search-count"></div>
+            </div>
             <!-- Skeleton loader -->
             <div class="skeleton-tree" id="skeleton-tree">
               <div class="skeleton-node"><div class="skeleton-line w-40"></div></div>
@@ -329,8 +347,10 @@
 
         <div class="upload-container">
           <div class="upload-zone" id="upload-zone">
-            <div class="upload-icon">📁</div>
-            <p data-i18n="drop_files">Drop files here or click to browse</p>
+            <div class="upload-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <p class="upload-label" data-i18n="drop_files">Drop files here or click to browse</p>
             <p class="upload-hint" data-i18n="supported_formats">Supported: PDF, DOCX, XLSX, HTML, TXT, MD, CSV, JSON</p>
             <input type="file" id="file-input" multiple accept=".pdf,.docx,.xlsx,.xls,.html,.htm,.txt,.md,.csv,.json" hidden>
           </div>
@@ -510,6 +530,30 @@
             </div>
           </div>
         </div>
+      </section>
+      <!-- Datasets Tab -->
+      <section class="tab-content" id="tab-datasets">
+        <div class="tab-header">
+          <h2 data-i18n="datasets_title">Datasets</h2>
+          <button class="btn btn-primary" id="new-dataset-btn" data-i18n="new_dataset">+ New Dataset</button>
+        </div>
+
+        <div class="dataset-create-form hidden" id="dataset-create-form">
+          <div class="form-group">
+            <label for="new-dataset-name" data-i18n="dataset_name_label">Name</label>
+            <input type="text" id="new-dataset-name" data-i18n-placeholder="dataset_name_placeholder" placeholder="Dataset name" required>
+          </div>
+          <div class="form-group">
+            <label for="new-dataset-desc" data-i18n="dataset_desc_label">Description</label>
+            <input type="text" id="new-dataset-desc" data-i18n-placeholder="dataset_desc_placeholder" placeholder="Description (optional)">
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" id="cancel-create-dataset" data-i18n="cancel">Cancel</button>
+            <button class="btn btn-primary" id="confirm-create-dataset" data-i18n="create">Create</button>
+          </div>
+        </div>
+
+        <div class="datasets-list" id="datasets-list"></div>
       </section>
     </main>
   </div>

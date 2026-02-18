@@ -5,6 +5,21 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { initDb, db } from "./db/db.js";
+import {
+  getConnection,
+  createDataset,
+  renameDataset,
+  deleteDataset,
+  duplicateDataset,
+  exportDataset,
+  getDatasetStats
+} from "./db/datasetManager.js";
+import {
+  listDatasets,
+  getDataset,
+  getDefaultDatasetId
+} from "./db/registry.js";
+import { runWithDb } from "./db/activeDb.js";
 import { ask, simpleAsk } from "./kg/qa.js";
 import { logger, apiLogger, requestLogger } from "./utils/logger.js";
 import {
@@ -73,9 +88,120 @@ app.use(express.json({ limit: "50mb" }));
 app.use(requestLogger);
 startIngestionQueue();
 
-// Serve static files from public directory
+// ==================== DATASET REGISTRY ENDPOINTS (before middleware) ====================
+// These operate on registry.db directly and do not need a dataset DB context.
+
+app.get("/datasets", (req, res) => {
+  try {
+    const datasets = listDatasets().map(({ db_path: _omit, ...rest }) => rest);
+    res.json({ datasets, count: datasets.length });
+  } catch (err) {
+    apiLogger.error("List datasets error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/datasets", (req, res) => {
+  try {
+    const { name, description } = req.body || {};
+    if (!name?.trim()) return res.status(400).json({ error: "name is required" });
+    const dataset = createDataset(name.trim(), description || "");
+    const { db_path: _omit, ...safe } = dataset;
+    res.status(201).json({ dataset: safe });
+  } catch (err) {
+    apiLogger.error("Create dataset error:", err.message);
+    const status = err.status || (err.message.includes("already exists") ? 409 : 500);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.put("/datasets/:id", (req, res) => {
+  try {
+    const { name, description } = req.body || {};
+    if (name === undefined && description === undefined) {
+      return res.status(400).json({ error: "Provide name and/or description to update" });
+    }
+    const dataset = renameDataset(req.params.id, name, description);
+    if (!dataset) return res.status(404).json({ error: "Dataset not found" });
+    const { db_path: _omit, ...safe } = dataset;
+    res.json({ dataset: safe });
+  } catch (err) {
+    apiLogger.error("Rename dataset error:", err.message);
+    const status = err.status || (err.message.includes("already exists") ? 409 : 500);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.delete("/datasets/:id", (req, res) => {
+  try {
+    if (req.query.confirm !== "yes") {
+      return res.status(400).json({ error: "Add ?confirm=yes to confirm deletion" });
+    }
+    deleteDataset(req.params.id);
+    res.json({ success: true, deleted_id: req.params.id });
+  } catch (err) {
+    apiLogger.error("Delete dataset error:", err.message);
+    const status = err.status || 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.post("/datasets/:id/duplicate", async (req, res) => {
+  try {
+    const { name } = req.body || {};
+    const dataset = await duplicateDataset(req.params.id, name);
+    const { db_path: _omit, ...safe } = dataset;
+    res.status(201).json({ dataset: safe });
+  } catch (err) {
+    apiLogger.error("Duplicate dataset error:", err.message);
+    const status = err.status || (err.message.includes("already exists") ? 409 : 500);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.get("/datasets/:id/export", async (req, res) => {
+  try {
+    const { tempPath, name } = await exportDataset(req.params.id);
+    const safeName = name.replace(/[^a-zA-Z0-9_\-\u4e00-\u9fff]/g, "_");
+    res.download(tempPath, `${safeName}.db`, (err) => {
+      try { fs.unlinkSync(tempPath); } catch (_) {}
+      if (err && !res.headersSent) {
+        apiLogger.error("Export dataset stream error:", err.message);
+      }
+    });
+  } catch (err) {
+    apiLogger.error("Export dataset error:", err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get("/datasets/:id/stats", (req, res) => {
+  try {
+    res.json(getDatasetStats(req.params.id));
+  } catch (err) {
+    apiLogger.error("Dataset stats error:", err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Serve static files from public directory (before dataset middleware — no DB needed)
 const publicDir = path.join(__dirname, "../public");
 app.use(express.static(publicDir));
+
+// ==================== DATASET MIDDLEWARE ====================
+// Resolves X-Dataset-ID header and runs the rest of the request
+// inside the correct DB context via AsyncLocalStorage.
+
+app.use((req, res, next) => {
+  const datasetId = req.headers["x-dataset-id"] || getDefaultDatasetId();
+  try {
+    const conn = getConnection(datasetId);
+    req.datasetConn = conn; // survives multer's async boundary
+    runWithDb(conn, next);
+  } catch {
+    res.status(404).json({ error: `Dataset '${datasetId}' not found` });
+  }
+});
 
 // Configure multer for file uploads
 const uploadDir = path.join(__dirname, "../uploads");
@@ -86,7 +212,10 @@ if (!fs.existsSync(uploadDir)) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${file.originalname}`;
+    // file.originalname is already utf8-decoded by fileFilter at this point.
+    // Use only ASCII-safe characters for the disk path (ext only).
+    const ext = path.extname(file.originalname).toLowerCase() || "";
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
     cb(null, uniqueName);
   }
 });
@@ -94,6 +223,10 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
+    // Multer reads originalname as latin1 per the HTTP spec, but browsers send
+    // UTF-8 encoded filenames. Re-decode so Chinese (and other non-ASCII) names
+    // are stored and displayed correctly.
+    file.originalname = Buffer.from(file.originalname, "latin1").toString("utf8");
     if (isSupportedFileType(file.originalname)) {
       cb(null, true);
     } else {
@@ -150,72 +283,80 @@ app.post("/classify", async (req, res) => {
 // ==================== DOCUMENT UPLOAD ENDPOINTS ====================
 
 // Upload and process a single file
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+app.post("/upload", upload.single("file"), (req, res) => {
+  // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
+  runWithDb(req.datasetConn, async () => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+      const processOptions = {
+        targetNodeId,
+        useLLM: useLLM === "true" || useLLM === true,
+        detectConflicts: detectConflicts === "true" || detectConflicts === true,
+        originalName: req.file.originalname
+      };
+
+      if (sync === "true" || sync === true) {
+        const result = await processDocument(req.file.path, processOptions);
+        return res.json(result);
+      }
+
+      const job = enqueueIngestionJob(req.file.path, {
+        originalName: req.file.originalname,
+        fileSize: req.file.size,
+        processOptions
+      });
+
+      res.status(202).json({
+        queued: true,
+        message: "File queued for background processing",
+        job
+      });
+    } catch (err) {
+      apiLogger.error("Upload error:", err.message);
+      res.status(500).json({ error: err.message });
     }
-
-    const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
-    const processOptions = {
-      targetNodeId,
-      useLLM: useLLM === "true" || useLLM === true,
-      detectConflicts: detectConflicts === "true" || detectConflicts === true
-    };
-
-    if (sync === "true" || sync === true) {
-      const result = await processDocument(req.file.path, processOptions);
-      return res.json(result);
-    }
-
-    const job = enqueueIngestionJob(req.file.path, {
-      originalName: req.file.originalname,
-      fileSize: req.file.size,
-      processOptions
-    });
-
-    res.status(202).json({
-      queued: true,
-      message: "File queued for background processing",
-      job
-    });
-  } catch (err) {
-    apiLogger.error("Upload error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  });
 });
 
 // Upload multiple files
-app.post("/upload/batch", upload.array("files", 20), async (req, res) => {
-  try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: "No files uploaded" });
+app.post("/upload/batch", upload.array("files", 20), (req, res) => {
+  // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
+  runWithDb(req.datasetConn, async () => {
+    try {
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: "No files uploaded" });
+      }
+
+      const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+      const processOptions = {
+        targetNodeId,
+        useLLM: useLLM === "true" || useLLM === true,
+        detectConflicts: detectConflicts === "true" || detectConflicts === true
+        // Note: originalName is per-file; for batch sync it falls back to metadata.filename
+      };
+
+      if (sync === "true" || sync === true) {
+        const filePaths = req.files.map(f => f.path);
+        const result = await processDocumentBatch(filePaths, processOptions);
+        return res.json(result);
+      }
+
+      const jobs = enqueueIngestionJobs(req.files, { processOptions });
+      res.status(202).json({
+        queued: true,
+        message: `${jobs.length} files queued for background processing`,
+        jobs,
+        count: jobs.length
+      });
+    } catch (err) {
+      apiLogger.error("Batch upload error:", err.message);
+      res.status(500).json({ error: err.message });
     }
-
-    const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
-    const processOptions = {
-      targetNodeId,
-      useLLM: useLLM === "true" || useLLM === true,
-      detectConflicts: detectConflicts === "true" || detectConflicts === true
-    };
-
-    if (sync === "true" || sync === true) {
-      const filePaths = req.files.map(f => f.path);
-      const result = await processDocumentBatch(filePaths, processOptions);
-      return res.json(result);
-    }
-
-    const jobs = enqueueIngestionJobs(req.files, { processOptions });
-    res.status(202).json({
-      queued: true,
-      message: `${jobs.length} files queued for background processing`,
-      jobs,
-      count: jobs.length
-    });
-  } catch (err) {
-    apiLogger.error("Batch upload error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  });
 });
 
 // ==================== INGESTION JOB ENDPOINTS ====================

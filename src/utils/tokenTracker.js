@@ -27,8 +27,7 @@ export function initTokenTrackingTable() {
   `);
 }
 
-// Initialize on module load
-initTokenTrackingTable();
+// Note: initTokenTrackingTable() is called by initDatasetDb() for each dataset connection.
 
 /**
  * Record token usage from an API response
