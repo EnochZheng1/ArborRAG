@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
  * Extract metadata from text using TF-IDF and LLM
@@ -253,6 +254,7 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
     result.language = lang;
     return result;
   } catch (err) {
+    rethrowIfRateLimit(err);
     console.error("LLM metadata extraction failed:", err.message);
     // Fallback to basic extraction
     return {

@@ -1,4 +1,5 @@
 import { db, safeJson } from "../db/db.js";
+import { isChineseLang } from "../utils/langDetect.js";
 
 /**
  * Query Suggestions Module
@@ -332,7 +333,7 @@ export function getExampleQueries(lang = 'en') {
   refreshCacheIfNeeded();
   const nodeExamples = suggestionCache.nodes
     .slice(0, 3)
-    .map(n => lang === 'zh' ? `介绍一下${n.name}` : `Tell me about ${n.name}`);
+    .map(n => isChineseLang(lang) ? `介绍一下${n.name}` : `Tell me about ${n.name}`);
 
   return [...(examples[lang] || examples.en).slice(0, 3), ...nodeExamples].slice(0, 5);
 }

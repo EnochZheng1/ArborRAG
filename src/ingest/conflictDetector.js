@@ -1,6 +1,7 @@
 import { db, safeJson, logAudit, runTransaction } from "../db/db.js";
 import { GoogleGenAI } from "@google/genai";
 import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
  * Detect and manage conflicts between chunks
@@ -141,6 +142,7 @@ export async function detectConflictWithLLM(chunkA, chunkB) {
 
     return null;
   } catch (err) {
+    rethrowIfRateLimit(err);
     console.error("LLM conflict detection failed:", err.message);
     return compareChunks(chunkA, chunkB);
   }

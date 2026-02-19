@@ -4,9 +4,10 @@
 
 // Default configuration
 const DEFAULT_CONFIG = {
-  maxChunkSize: 500,      // Target max tokens (approximate as ~4 chars/token)
-  minChunkSize: 100,      // Minimum chunk size
-  overlap: 50,            // Overlap tokens between chunks
+  maxChunkSize: 800,      // Target max tokens (approximate as ~4 chars/token)
+  minChunkSize: 150,      // Minimum chunk size
+  overlap: 150,           // Overlap tokens between chunks — larger overlap reduces info loss at boundaries
+  softLimitFactor: 1.15,  // Allow chunks up to 15% over maxChunkSize to avoid mid-thought cuts
   preserveParagraphs: true,
   preserveSentences: true
 };
@@ -31,6 +32,97 @@ function splitIntoSentences(text) {
   // Match sentence endings: . ! ? or Chinese equivalents
   const sentences = text.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g) || [text];
   return sentences.map(s => s.trim()).filter(s => s.length > 0);
+}
+
+// Detect whether a text block looks like a list (most lines are list items)
+const LIST_ITEM_RE = /^[ \t]*[-*•+][ \t]|^[ \t]*\d+[.)]\s/m;
+function isListBlock(text) {
+  const lines = text.split('\n').filter(l => l.trim().length > 0);
+  if (lines.length === 0) return false;
+  const listLines = lines.filter(l => LIST_ITEM_RE.test(l));
+  return listLines.length / lines.length > 0.5;
+}
+
+// Detect whether a paragraph looks like a header or label
+// (short, ends with ':' or '：', starts with '#', or is all-caps)
+function isLikelyHeader(text) {
+  const t = text.trim();
+  return (
+    t.length < 120 &&
+    (t.endsWith(':') || t.endsWith('：') || t.startsWith('#') || /^[A-Z][A-Z\s,.\-–—]{5,}$/.test(t))
+  );
+}
+
+/**
+ * Pre-group paragraphs to keep semantically related units together.
+ *  - Glues header/label paragraphs to the following paragraph
+ *  - Glues intro sentences to immediately following list blocks
+ */
+function preGroupParagraphs(paragraphs) {
+  const groups = [];
+  let i = 0;
+
+  while (i < paragraphs.length) {
+    const current = paragraphs[i];
+
+    // A header/label paragraph — attach it to the next paragraph so it is
+    // never left alone in a chunk without the content it introduces.
+    if (isLikelyHeader(current) && i + 1 < paragraphs.length) {
+      groups.push(current + '\n\n' + paragraphs[i + 1]);
+      i += 2;
+      continue;
+    }
+
+    // A short intro paragraph immediately before a list block — attach them.
+    if (current.length < 250 && i + 1 < paragraphs.length && isListBlock(paragraphs[i + 1])) {
+      let combined = current + '\n\n' + paragraphs[i + 1];
+      i += 2;
+      // Absorb any additional consecutive list blocks that follow
+      while (i < paragraphs.length && isListBlock(paragraphs[i])) {
+        combined += '\n\n' + paragraphs[i];
+        i++;
+      }
+      groups.push(combined);
+      continue;
+    }
+
+    groups.push(current);
+    i++;
+  }
+
+  return groups;
+}
+
+/**
+ * Produce overlap text by taking the last complete paragraph(s) that fit
+ * within overlapChars, rather than a raw character-tail (which can start
+ * mid-sentence).
+ */
+function getOverlapText(text, overlapChars) {
+  if (!text || overlapChars <= 0) return '';
+  if (text.length <= overlapChars) return text;
+
+  const paras = text.split(/\n\n+/).filter(p => p.trim().length > 0);
+  let overlap = '';
+  // Work backwards: include as many complete paragraphs as fit
+  for (let i = paras.length - 1; i >= 0; i--) {
+    const candidate = paras.slice(i).join('\n\n');
+    if (candidate.length <= overlapChars) {
+      overlap = candidate;
+    } else {
+      break;
+    }
+  }
+
+  if (overlap) return overlap;
+
+  // Fall back: character slice, but try to start at a sentence boundary
+  const sliced = text.slice(-overlapChars);
+  const sentenceStart = sliced.search(/(?<=[.!?。！？]\s)[A-Z\u4e00-\u9fa5]/);
+  if (sentenceStart > 0 && sentenceStart < overlapChars * 0.6) {
+    return sliced.slice(sentenceStart);
+  }
+  return sliced;
 }
 
 // Split text into sections (by headers)
@@ -76,6 +168,7 @@ export function chunkText(text, config = {}) {
   const maxChars = cfg.maxChunkSize * 4; // Approximate chars
   const minChars = cfg.minChunkSize * 4;
   const overlapChars = cfg.overlap * 4;
+  const softLimit = maxChars * (cfg.softLimitFactor || 1.15);
 
   const chunks = [];
   let chunkIndex = 0;
@@ -88,6 +181,7 @@ export function chunkText(text, config = {}) {
       maxChars,
       minChars,
       overlapChars,
+      softLimit,
       preserveParagraphs: cfg.preserveParagraphs,
       preserveSentences: cfg.preserveSentences
     });
@@ -112,6 +206,7 @@ export function chunkText(text, config = {}) {
       maxChars,
       minChars,
       overlapChars,
+      softLimit,
       preserveParagraphs: cfg.preserveParagraphs,
       preserveSentences: cfg.preserveSentences
     });
@@ -134,27 +229,36 @@ export function chunkText(text, config = {}) {
 }
 
 // Chunk a single section
-function chunkSection(text, { maxChars, minChars, overlapChars, preserveParagraphs, preserveSentences }) {
+function chunkSection(text, { maxChars, minChars, overlapChars, softLimit, preserveParagraphs, preserveSentences }) {
   const chunks = [];
+  const effectiveSoftLimit = softLimit || maxChars * 1.15;
 
-  if (text.length <= maxChars) {
+  if (text.length <= effectiveSoftLimit) {
     return [{ content: text, startOffset: 0, endOffset: text.length }];
   }
 
-  // Split by paragraphs first if enabled
-  let units = preserveParagraphs ? splitIntoParagraphs(text) : [text];
+  // Split by paragraphs first if enabled, then pre-group related paragraphs
+  let units;
+  if (preserveParagraphs) {
+    const rawParagraphs = splitIntoParagraphs(text);
+    units = preGroupParagraphs(rawParagraphs);
+  } else {
+    units = [text];
+  }
 
-  // If paragraphs are too large, split into sentences
+  // If any grouped unit is still too large, split into sentences
   const processedUnits = [];
   for (const unit of units) {
     if (unit.length > maxChars && preserveSentences) {
-      processedUnits.push(...splitIntoSentences(unit));
+      // Try splitting into sentences; if a sentence itself is huge, keep it whole
+      const sentences = splitIntoSentences(unit);
+      processedUnits.push(...sentences);
     } else {
       processedUnits.push(unit);
     }
   }
 
-  // Build chunks from units
+  // Build chunks from units using a soft size limit
   let currentChunk = "";
   let currentStart = 0;
   let offset = 0;
@@ -162,11 +266,17 @@ function chunkSection(text, { maxChars, minChars, overlapChars, preserveParagrap
   for (let i = 0; i < processedUnits.length; i++) {
     const unit = processedUnits[i];
     const separator = currentChunk ? "\n\n" : "";
+    const projectedSize = currentChunk.length + separator.length + unit.length;
 
-    if (currentChunk.length + separator.length + unit.length <= maxChars) {
+    if (projectedSize <= maxChars) {
+      // Normal case: unit fits within the hard limit
+      currentChunk += separator + unit;
+    } else if (projectedSize <= effectiveSoftLimit && unit.length < maxChars * 0.25) {
+      // Soft limit: allow slightly oversized chunks to avoid orphaning a small
+      // trailing unit (e.g., the last sentence of a paragraph).
       currentChunk += separator + unit;
     } else {
-      // Save current chunk if it's big enough
+      // Must split here — save current chunk if it meets the minimum size
       if (currentChunk.length >= minChars) {
         chunks.push({
           content: currentChunk,
@@ -174,17 +284,22 @@ function chunkSection(text, { maxChars, minChars, overlapChars, preserveParagrap
           endOffset: offset
         });
 
-        // Start new chunk with overlap
-        if (overlapChars > 0 && currentChunk.length > overlapChars) {
-          const overlapText = currentChunk.slice(-overlapChars);
-          currentChunk = overlapText + "\n\n" + unit;
-          currentStart = offset - overlapChars;
+        // Start new chunk with paragraph-aware overlap
+        if (overlapChars > 0) {
+          const overlapText = getOverlapText(currentChunk, overlapChars);
+          if (overlapText) {
+            currentChunk = overlapText + "\n\n" + unit;
+            currentStart = offset - overlapText.length;
+          } else {
+            currentChunk = unit;
+            currentStart = offset;
+          }
         } else {
           currentChunk = unit;
           currentStart = offset;
         }
       } else {
-        // Chunk too small, force add the unit
+        // Current chunk is too small to save alone — absorb the unit even if oversized
         currentChunk += separator + unit;
       }
     }
@@ -192,7 +307,7 @@ function chunkSection(text, { maxChars, minChars, overlapChars, preserveParagrap
     offset += unit.length + (i < processedUnits.length - 1 ? 2 : 0);
   }
 
-  // Don't forget the last chunk
+  // Save the last chunk
   if (currentChunk.length > 0) {
     chunks.push({
       content: currentChunk,

@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
 
 /**
  * LLM Re-ranking Module
@@ -130,7 +130,7 @@ export async function rerankerNodes(query, nodes, options = {}) {
 
     // Detect language from query
     const lang = detectLanguage(query);
-    const aliasLabel = lang === 'zh' ? '别名' : 'aliases';
+    const aliasLabel = isChineseLang(lang) ? '别名' : 'aliases';
 
     const nodeTexts = nodes.map((n, i) => {
       const node = n.node || n;

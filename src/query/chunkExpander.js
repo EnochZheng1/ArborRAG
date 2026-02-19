@@ -16,7 +16,7 @@ export function expandChunksWithContext(chunks, options = {}) {
   const {
     windowBefore = 1,  // Number of chunks to include before
     windowAfter = 1,   // Number of chunks to include after
-    maxContextLength = 1000,  // Max chars for context
+    maxContextLength = 2000,  // Max chars for context (per side)
     deduplicateById = true
   } = options;
 

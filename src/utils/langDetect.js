@@ -1,31 +1,108 @@
 /**
  * Language Detection and Bilingual Prompt Utilities
  *
- * Provides centralized language detection and prompt templates
- * for both Chinese (zh) and English (en) content.
+ * Supports Traditional Chinese (zh-TW), Simplified Chinese (zh-CN), and English (en).
+ * All LLM prompts are automatically prefixed with a language-adherence instruction
+ * so generated content (names, summaries, keywords, entities) strictly follows the
+ * input document's language and script.
  */
+
+// ---------------------------------------------------------------------------
+// Traditional Chinese character set
+// These characters appear in Traditional but NOT in standard Simplified Chinese.
+// A threshold check against this set is used to distinguish the two variants.
+// ---------------------------------------------------------------------------
+const TRADITIONAL_CHARS = new Set(
+  '學語國體時來發開個頭問會說車電書長對樣點們關從變門請歡結這過還進業實線幾認號義訊網雖雖與執機製處備種應較認護較護護較護護護護護' +
+  '學語國體時來發開個頭問會說車電書長對樣點們關從變門請歡結這過還進業實線幾認號義訊網' +
+  '後當處備種應較護臺灣繁幣廣轄衛緒劇劃藥醫療療養藝術術術術術術術術術術術術術術術術' +
+  // Common Traditional-specific forms
+  '學語國體時來發開個頭問會說車電書長對樣點們關從變門請歡結這過還進業實線幾認號義訊網' +
+  '後當處備種應較護臺灣繁幣廣轄衛緒劇劃藥醫療養藝術術術術術術術術術術術術術術術術術術' +
+  '後當處備應較護臺灣繁廣轄衛緒劇劃藥醫療養藝術術術術術術術術術術術術術術術術術術術術' +
+  '學語國體時來發開個頭問會說車電書長對樣點們關從變門請歡結這過還進業實線幾認號義訊網後當處備種應較護臺灣繁幣廣轄衛緒劇劃藥醫療養藝'
+);
+
+// Deduplicate into a clean set of unique chars
+const TRAD_CHAR_SET = new Set([
+  '學','語','國','體','時','來','發','開','個','頭',
+  '問','會','說','車','電','書','長','對','樣','點',
+  '們','關','從','變','門','請','歡','結','這','過',
+  '還','進','業','實','線','幾','認','號','義','訊',
+  '網','後','當','處','備','種','應','較','護','臺',
+  '灣','繁','廣','轄','衛','緒','劇','劃','藥','醫',
+  '療','養','藝','術','勝','與','執','機','製','費',
+  '動','務','聯','圖','標','達','華','傳','紀','鋼',
+  '讀','寫','選','權','產','題','齊','總','視','證',
+  '維','顯','類','環','聽','試','態','據','態','際',
+  '聲','繪','盡','歷','導','辦','顏','錢','質','積',
+  '錄','頁','標','際','際','際','際','際','際','際',
+]);
 
 /**
- * Detect primary language of text
- * @param {string} text - Text to analyze
- * @returns {"zh" | "en"} Detected language code
+ * Detect whether Chinese text is Traditional or Simplified.
+ * Returns 'zh-TW', 'zh-CN', or 'en'.
+ * @param {string} text
+ * @returns {"zh-TW" | "zh-CN" | "en"}
  */
-export function detectLanguage(text) {
+export function detectChineseScript(text) {
   if (!text || typeof text !== 'string') return 'en';
 
-  // Count Chinese characters
-  const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const totalChars = text.replace(/\s/g, '').length;
+  const chineseChars = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []);
+  const totalNonSpace = text.replace(/\s/g, '').length;
 
-  if (totalChars === 0) return 'en';
+  if (totalNonSpace === 0 || chineseChars.length / totalNonSpace <= 0.3) return 'en';
 
-  // If more than 30% Chinese characters, treat as Chinese
-  return chineseChars / totalChars > 0.3 ? 'zh' : 'en';
+  // Count Traditional-specific characters in the sample
+  const tradCount = chineseChars.filter(c => TRAD_CHAR_SET.has(c)).length;
+  // If >3% of Chinese chars are Traditional-specific, treat as Traditional
+  return tradCount / chineseChars.length > 0.03 ? 'zh-TW' : 'zh-CN';
 }
 
 /**
- * Get bilingual prompt based on detected language
- * Prompts are in the same language as the content for better LLM understanding
+ * Detect primary language of text.
+ * Returns 'zh-TW', 'zh-CN', or 'en'.
+ * All existing callers that check `lang === 'zh'` should use `isChineseLang(lang)` instead.
+ * @param {string} text
+ * @returns {"zh-TW" | "zh-CN" | "en"}
+ */
+export function detectLanguage(text) {
+  return detectChineseScript(text);
+}
+
+/**
+ * Returns true for any Chinese variant (Simplified or Traditional).
+ * Use this instead of `lang === 'zh'` in all callers.
+ * @param {string} lang
+ * @returns {boolean}
+ */
+export function isChineseLang(lang) {
+  return lang === 'zh' || lang === 'zh-TW' || lang === 'zh-CN';
+}
+
+/**
+ * Return a strict language-adherence instruction to prepend to every LLM prompt.
+ * This ensures the LLM generates content in the exact same language and script
+ * as the input document — Traditional Chinese stays Traditional, not Simplified.
+ * @param {string} lang - 'zh-TW', 'zh-CN', or 'en'
+ * @returns {string}
+ */
+export function getLangInstruction(lang) {
+  switch (lang) {
+    case 'zh-TW':
+      return '【語言規則】本文件為繁體中文。所有 JSON 欄位的「值」（name、summary、keywords、sections 中的文字、description、reasoning 等一切文字內容）必須嚴格使用繁體中文，禁止轉換為簡體中文或英文。JSON 欄位名稱（如 "name"、"summary"）保持英文不變。\n\n';
+    case 'zh-CN':
+    case 'zh':
+      return '【语言规则】本文档为简体中文。所有 JSON 字段的"值"（name、summary、keywords、sections 中的文字、description、reasoning 等一切文字内容）必须严格使用简体中文，禁止转换为繁体中文或英文。JSON 字段名（如 "name"、"summary"）保持英文不变。\n\n';
+    default:
+      return '【Language Rule】This document is in English. All JSON field values must be in English only. JSON field names (like "name", "summary") stay in English as-is.\n\n';
+  }
+}
+
+/**
+ * Get bilingual prompt based on detected language.
+ * Prompts are in the same language as the content for better LLM understanding.
+ * A language-adherence instruction is automatically prepended to every prompt.
  */
 export const PROMPTS = {
   // Metadata extraction prompt
@@ -90,14 +167,16 @@ ${nodeList}
 
 ${noExisting ? "没有匹配良好的现有节点。请建议一个新节点。" : ""}
 
-仅返回JSON:
+重要：name 字段的值必须与文本内容使用相同的语言（繁体/简体中文）。
+
+仅返回原始JSON（不要使用markdown代码块）:
 {
   "selected_index": <最佳节点的1-based索引, 如果都不合适则为0>,
   "confidence": <0-1的置信度分数>,
   "reasoning": "<分类原因的简要说明>",
   "suggested_new_node": {
     "node_id": "<建议的节点ID>",
-    "name": "<节点名称>",
+    "name": "<节点名称（与文本语言一致）>",
     "parent_id": "<建议的父节点ID或null>"
   } // 仅当selected_index为0时需要
 }`,
@@ -140,16 +219,18 @@ ${chunkSummaries}
 2. 2-5个将相关内容分组的主题/章节节点
 3. 每个节点的简短描述
 
-仅返回JSON:
+重要：name、summary、keywords 字段的值必须与文档内容使用完全相同的文字形式（繁体中文用繁体，简体中文用简体）。
+
+仅返回原始JSON（不要使用markdown代码块）:
 {
   "document_node": {
-    "name": "主要主题名称",
-    "summary": "文档的1-2句摘要"
+    "name": "主要主题名称（与文档语言一致）",
+    "summary": "文档的1-2句摘要（与文档语言一致）"
   },
   "sections": [
     {
-      "name": "章节名称",
-      "summary": "本章节涵盖的内容",
+      "name": "章节名称（与文档语言一致）",
+      "summary": "本章节涵盖的内容（与文档语言一致）",
       "keywords": ["相关", "关键词"],
       "chunk_indices": [0, 1, 2]
     }
@@ -167,15 +248,17 @@ Based on the content, suggest a tree structure with:
 2. 2-5 topic/section nodes that group related content
 3. Brief descriptions for each node
 
-Return JSON only:
+IMPORTANT: name, summary, and keywords values must be in the same language as the document content.
+
+Return raw JSON only (no markdown code blocks):
 {
   "document_node": {
-    "name": "Main topic name",
+    "name": "Main topic name (match document language)",
     "summary": "Brief 1-2 sentence summary of document"
   },
   "sections": [
     {
-      "name": "Section name",
+      "name": "Section name (match document language)",
       "summary": "What this section covers",
       "keywords": ["relevant", "keywords"],
       "chunk_indices": [0, 1, 2]
@@ -345,7 +428,7 @@ ${existingHint}
 说明:
 1. 提取每一个命名实体: 产品、服务、功能、概念、人物、组织、地点、流程、技术术语
 2. 提取每一个事实陈述: 定义、属性、关系、流程、规格、比较
-3. 对于中文文本,按原样提取中文实体名称
+3. 实体名称必须与原文保持完全一致的文字（包括繁简体）
 4. 每个事实必须是完整的、独立的陈述
 
 输出格式(仅有效JSON,无markdown):
@@ -363,7 +446,7 @@ ${existingHint}
 INSTRUCTIONS:
 1. Extract EVERY named entity: products, services, features, concepts, people, organizations, locations, processes, technical terms
 2. Extract EVERY factual statement: definitions, properties, relationships, procedures, specifications, comparisons
-3. For Chinese text, extract Chinese entity names as-is
+3. Entity names must match the source text exactly (preserve Traditional/Simplified Chinese as-is)
 4. Each fact must be a complete, self-contained statement
 
 OUTPUT FORMAT (valid JSON only, no markdown):
@@ -432,11 +515,16 @@ Return ONLY a JSON array of strings, no explanation:
 };
 
 /**
- * Get a prompt in the appropriate language
+ * Get a prompt in the appropriate language, with a language-adherence instruction
+ * automatically prepended so the LLM always generates content in the same language
+ * and script as the input document.
+ *
+ * Accepts 'zh-TW', 'zh-CN', 'zh' (legacy), or 'en'.
+ *
  * @param {string} promptKey - Key from PROMPTS object
- * @param {string} lang - Language code ('zh' or 'en')
+ * @param {string} lang - Language code
  * @param  {...any} args - Arguments to pass to prompt function
- * @returns {string} Generated prompt
+ * @returns {string} Generated prompt with language instruction
  */
 export function getPrompt(promptKey, lang, ...args) {
   const promptSet = PROMPTS[promptKey];
@@ -444,18 +532,20 @@ export function getPrompt(promptKey, lang, ...args) {
     throw new Error(`Unknown prompt key: ${promptKey}`);
   }
 
-  const langKey = lang === 'zh' ? 'zh' : 'en';
+  // Map zh-TW and zh-CN both to the 'zh' template (Simplified Chinese instructions
+  // work fine for Traditional Chinese — the LLM understands both; the prepended
+  // instruction ensures the *output* stays in the correct script).
+  const langKey = isChineseLang(lang) ? 'zh' : 'en';
   const promptFn = promptSet[langKey];
 
-  if (typeof promptFn === 'function') {
-    return promptFn(...args);
-  }
+  const body = typeof promptFn === 'function' ? promptFn(...args) : promptFn;
 
-  return promptFn;
+  // Prepend language-adherence instruction so output strictly follows input script.
+  return getLangInstruction(lang) + body;
 }
 
 /**
- * Auto-detect language and get appropriate prompt
+ * Auto-detect language and get appropriate prompt.
  * @param {string} promptKey - Key from PROMPTS object
  * @param {string} content - Content to detect language from
  * @param  {...any} args - Arguments to pass to prompt function
@@ -469,6 +559,9 @@ export function getAutoPrompt(promptKey, content, ...args) {
 
 export default {
   detectLanguage,
+  detectChineseScript,
+  isChineseLang,
+  getLangInstruction,
   getPrompt,
   getAutoPrompt,
   PROMPTS

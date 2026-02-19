@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { db } from "../db/db.js";
+import { isChineseLang } from "../utils/langDetect.js";
 
 /**
  * Related Questions Module
@@ -361,8 +362,8 @@ function rankQuestions(questions, originalQuery) {
  */
 export function formatQuestionsForAPI(questions, lang = 'en') {
   return questions.map(q => ({
-    question: lang === 'zh' && q.text_zh ? q.text_zh : q.text,
-    question_alt: lang === 'zh' ? q.text : q.text_zh,
+    question: isChineseLang(lang) && q.text_zh ? q.text_zh : q.text,
+    question_alt: isChineseLang(lang) ? q.text : q.text_zh,
     type: q.type,
     node_id: q.node_id
   }));

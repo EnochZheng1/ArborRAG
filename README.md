@@ -23,6 +23,7 @@ A hierarchical knowledge management system that processes documents into a tree 
 - **Conflict Detection**: Identifies contradictions between knowledge chunks with LLM-powered analysis; resolve by keeping one, both, or archiving
 - **Bilingual Support**: Automatic Chinese/English detection and response generation
 - **Background Ingestion Queue**: Documents are processed asynchronously with automatic retries and job status tracking
+- **Real-time Ingestion Progress**: WebSocket push delivers live stage-by-stage progress (chunking → metadata → mapping → conflicts → finalize) directly to the upload card — no waiting for polling
 - **Multiple Datasets**: Create isolated knowledge bases; switch with the sidebar dropdown; import/export as `.db` files
 - **Incremental Updates**: Add new documents without rebuilding the entire knowledge base
 - **Web UI**: Built-in web interface for managing the knowledge base
@@ -56,24 +57,24 @@ The UI provides:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         API Layer                                │
-│                      (Express.js REST)                           │
+│                 API Layer (Express.js REST + WebSocket)          │
+│                  src/routes/  ·  src/server.js                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │   Ingestion  │  │    Query     │  │      Retrieval       │  │
-│  │   Pipeline   │  │   Handlers   │  │       Engine         │  │
+│  │   Pipeline   │  │   Handlers   │  │      Strategies      │  │
 │  ├──────────────┤  ├──────────────┤  ├──────────────────────┤  │
 │  │ File Parser  │  │ Classifier   │  │ BM25 (FTS5)          │  │
 │  │ Chunker      │  │ Comparator   │  │ Vector Search        │  │
 │  │ Metadata     │  │ Recommender  │  │ Hybrid (RRF)         │  │
 │  │ Node Mapper  │  │ Reasoner     │  │ Graph Traversal      │  │
-│  │ Conflict Det │  │ Query Planner│  │ Multi-factor Ranking │  │
+│  │ Conflict Det │  │ Query Planner│  │ Alias + Expansion    │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 │                                                                  │
 ├─────────────────────────────────────────────────────────────────┤
-│                      Storage Layer                               │
-│              (SQLite + FTS5 + Vector Store)                      │
+│              Storage Layer — per-dataset SQLite files            │
+│    data/registry.db  +  data/datasets/<id>.db (FTS5 + vectors)  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -334,10 +335,20 @@ kg-mvp/
 │   └── uploads/             ← temporary upload staging area
 ├── public/
 │   ├── index.html
-│   ├── app.js               ← single-page frontend
+│   ├── app.js               ← single-page frontend (WS client + job progress)
 │   └── styles.css
 └── src/
-    ├── server.js              # Express API server
+    ├── server.js              # Express + WebSocket server (74 lines)
+    ├── routes/                # Route modules (one file per concern)
+    │   ├── datasets.js        #   GET/POST/PUT/DELETE /datasets + export/duplicate/stats
+    │   ├── ingest.js          #   POST /upload, /upload/batch, GET/POST /ingest/jobs/*
+    │   ├── query.js           #   POST /ask, /ask/simple, /classify, /suggestions, /feedback
+    │   ├── documents.js       #   GET/DELETE /documents/:id
+    │   ├── nodes.js           #   /nodes, /chunks, /aliases/sync
+    │   ├── conflicts.js       #   GET/POST /conflicts
+    │   ├── embeddings.js      #   /embeddings/sync, /embeddings/coverage
+    │   ├── stats.js           #   /stats, /stats/tokens, /health, DELETE /tree
+    │   └── entities.js        #   /entities, /facts, /extraction
     ├── db/
     │   ├── db.js              # Proxy-based active-DB router
     │   ├── activeDb.js        # AsyncLocalStorage request context
@@ -347,13 +358,23 @@ kg-mvp/
     │   └── init.sql           # Schema definition
     ├── kg/
     │   ├── qa.js              # Main Q&A orchestration
-    │   ├── recallNodes.js     # Search (BM25, vector, hybrid)
+    │   ├── recallNodes.js     # Hybrid retrieval orchestrator + re-exports
+    │   ├── strategies/        # Retrieval strategy modules
+    │   │   ├── bm25.js        #   BM25 keyword search (nodes + chunks)
+    │   │   ├── vector.js      #   Vector similarity search
+    │   │   ├── hierarchy.js   #   Ancestor/child enrichment + hierarchical chunks
+    │   │   ├── aliases.js     #   Alias cache + alias-based recall
+    │   │   ├── expansion.js   #   Query expansion + variant generation
+    │   │   └── utils.js       #   Shared: RRF, CJK n-grams, FTS escaping
     │   ├── nodeScoring.js     # Multi-factor ranking
     │   ├── graphTraversal.js  # Tree navigation
     │   └── seedNodes.js       # Initial data seeding
     ├── ingest/
-    │   ├── index.js           # Pipeline entry point
-    │   ├── jobQueue.js        # Background ingestion queue
+    │   ├── index.js           # Document management + pipeline re-export
+    │   ├── pipeline/          # Ingestion pipeline
+    │   │   ├── index.js       #   Runner: stage loop, rollback, WS progress emit
+    │   │   └── stages.js      #   6 stage functions (parse→register→enrich→map→entities→finalize)
+    │   ├── jobQueue.js        # Background ingestion queue with retries
     │   ├── fileParser.js      # Multi-format file parsing
     │   ├── chunker.js         # Text chunking
     │   ├── metadataExtractor.js # Keyword/entity extraction
@@ -374,6 +395,7 @@ kg-mvp/
     │   ├── reasoner.js        # Multi-hop reasoning
     │   └── feedback.js        # Thumbs-up/down feedback logging
     └── utils/
+        ├── progressEmitter.js # WebSocket job-progress subscriptions + broadcast
         ├── logger.js
         └── tokenTracker.js
 ```
@@ -419,6 +441,20 @@ curl -X POST http://localhost:3000/embeddings/sync
 ---
 
 ## Changelog
+
+### v2.2.0 — 2026-02-19
+
+**Real-time ingestion progress via WebSocket**
+- Upload a document and watch a live progress bar advance through each pipeline stage (chunking → metadata extraction → node mapping → conflict detection → finalize) — updates push from the server over WebSocket with sub-second latency instead of waiting for 2-second HTTP polls
+- Progress bar and stage label appear inside the job card immediately after upload; the card auto-refreshes with the final result when processing completes
+- WebSocket connection opens on page load and auto-reconnects on disconnect; existing HTTP polling remains as a transparent fallback
+
+**Modular server architecture**
+- `src/server.js` reduced from 1 087 lines to 74 — all route logic extracted into `src/routes/` (9 files, one per concern: datasets, query, ingest, documents, nodes, conflicts, embeddings, stats, entities)
+- Ingestion pipeline decomposed into `src/ingest/pipeline/stages.js` (6 named stage functions) + `src/ingest/pipeline/index.js` (runner with rollback and WS emit)
+- Retrieval strategies split into `src/kg/strategies/` (bm25, vector, hierarchy, aliases, expansion, utils) — `recallNodes.js` becomes a thin orchestrator
+
+---
 
 ### v2.1.0 — 2026-02-18
 
@@ -496,8 +532,11 @@ TreeKB 是一个层级化知识管理系统，可将文档处理成树形结构�
   - 实体对比
   - 基于条件的推荐
   - 跨知识树的多跳推理
-- **冲突检测**：使用 LLM 驱动的分析识别知识片段之间的矛盾
+- **冲突检测**：使用 LLM 驱动的分析识别知识片段之间的矛盾；可选择保留一方、保留双方或归档
 - **双语支持**：自动检测中英文并生成相应语言的回答
+- **后台导入队列**：异步处理文档，支持自动重试和任务状态追踪
+- **实时导入进度**：通过 WebSocket 推送实时进度（分块 → 元数据 → 节点映射 → 冲突检测 → 完成），在上传卡片中即时显示进度条
+- **多数据集**：创建相互隔离的知识库，通过侧边栏下拉切换，支持导入/导出 `.db` 文件
 - **增量更新**：添加新文档无需重建整个知识库
 - **Web 界面**：内置 Web 管理界面
 
@@ -751,18 +790,43 @@ TreeKB 内置 Web 界面，启动服务器后访问 `http://localhost:3000`。
 
 ```
 src/
-├── server.js              # Express API 服务器
+├── server.js              # Express + WebSocket 服务器（74 行）
+├── routes/                # 路由模块（按功能拆分）
+│   ├── datasets.js        #   数据集 CRUD + 导出/复制/统计
+│   ├── ingest.js          #   上传、批量上传、任务管理
+│   ├── query.js           #   /ask, /ask/simple, /classify, 建议, 反馈
+│   ├── documents.js       #   文档管理
+│   ├── nodes.js           #   节点、分块、别名
+│   ├── conflicts.js       #   冲突管理
+│   ├── embeddings.js      #   向量同步和覆盖率
+│   ├── stats.js           #   统计、健康检查、清空树
+│   └── entities.js        #   实体和事实
 ├── db/
-│   ├── db.js              # 数据库连接和工具
+│   ├── db.js              # 代理式数据库路由
+│   ├── activeDb.js        # AsyncLocalStorage 请求上下文
+│   ├── initDatasetDb.js   # 数据集 Schema 初始化
+│   ├── registry.js        # 数据集注册表 CRUD
+│   ├── datasetManager.js  # 连接池 + 数据集生命周期
 │   └── init.sql           # 数据库表结构
 ├── kg/
 │   ├── qa.js              # 主问答流程
-│   ├── recallNodes.js     # 搜索（BM25、向量、混合）
+│   ├── recallNodes.js     # 混合检索协调器
+│   ├── strategies/        # 检索策略模块
+│   │   ├── bm25.js        #   BM25 关键词检索
+│   │   ├── vector.js      #   向量相似度检索
+│   │   ├── hierarchy.js   #   层级上下文扩展
+│   │   ├── aliases.js     #   别名缓存与检索
+│   │   ├── expansion.js   #   查询扩展与变体生成
+│   │   └── utils.js       #   公共工具（RRF、CJK n-gram、FTS 转义）
 │   ├── nodeScoring.js     # 多因子排序
 │   ├── graphTraversal.js  # 树遍历
 │   └── seedNodes.js       # 初始数据
 ├── ingest/
-│   ├── index.js           # 导入管道入口
+│   ├── index.js           # 文档管理 + 管道重导出
+│   ├── pipeline/          # 导入管道
+│   │   ├── index.js       #   运行器：阶段循环、回滚、WS 进度推送
+│   │   └── stages.js      #   6 个阶段函数（解析→注册→分块→映射→实体→完成）
+│   ├── jobQueue.js        # 后台导入队列，支持重试
 │   ├── fileParser.js      # 多格式文件解析
 │   ├── chunker.js         # 文本分块
 │   ├── metadataExtractor.js # 关键词/实体提取
@@ -772,13 +836,20 @@ src/
 │   ├── embedder.js        # Gemini 向量嵌入
 │   ├── vectorStore.js     # 向量存储和搜索
 │   └── chunkEmbeddings.js # 嵌入管理
-└── query/
-    ├── classifier.js      # 查询分类
-    ├── queryPlanner.js    # 复杂查询分解
-    ├── multiNodeRetriever.js # 多实体检索
-    ├── comparator.js      # 对比处理器
-    ├── recommender.js     # 推荐处理器
-    └── reasoner.js        # 多跳推理
+├── extraction/
+│   └── entityFactExtractor.js # 实体与事实提取
+├── query/
+│   ├── classifier.js      # 查询分类
+│   ├── queryPlanner.js    # 复杂查询分解
+│   ├── multiNodeRetriever.js # 多实体检索
+│   ├── comparator.js      # 对比处理器
+│   ├── recommender.js     # 推荐处理器
+│   ├── reasoner.js        # 多跳推理
+│   └── feedback.js        # 点赞/踩反馈记录
+└── utils/
+    ├── progressEmitter.js # WebSocket 任务进度订阅与广播
+    ├── logger.js
+    └── tokenTracker.js
 ```
 
 ## 使用示例

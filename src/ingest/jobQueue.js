@@ -4,6 +4,7 @@ import { ingestLogger as logger } from "../utils/logger.js";
 import { processDocument } from "./index.js";
 import { getAllConnections } from "../db/datasetManager.js";
 import { runWithDb } from "../db/activeDb.js";
+import { RateLimitError } from "../utils/rateLimitError.js";
 
 const DEFAULT_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_CONCURRENCY || "2", 10) || 2);
 const DEFAULT_MAX_ATTEMPTS = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_MAX_ATTEMPTS || "3", 10) || 3);
@@ -15,7 +16,8 @@ const JOB_STATUS = {
   PROCESSING: "processing",
   COMPLETED: "completed",
   FAILED: "failed",
-  CANCELLED: "cancelled"
+  CANCELLED: "cancelled",
+  RATE_LIMITED: "rate_limited"  // paused due to API 429; resume manually
 };
 
 let queueStarted = false;
@@ -145,6 +147,19 @@ function failJob(conn, job, errorMessage, result = null) {
   logger.error(`[ingest-job:${job.id}] exhausted retries: ${errorMessage}`);
 }
 
+function pauseRateLimitedJob(conn, job, errorMessage) {
+  conn.prepare(`
+    UPDATE ingestion_jobs
+    SET status = ?,
+        error_message = ?,
+        started_at = NULL,
+        finished_at = NULL,
+        updated_at = datetime('now')
+    WHERE id = ?
+  `).run(JOB_STATUS.RATE_LIMITED, errorMessage, job.id);
+  logger.warn(`[ingest-job:${job.id}] paused (rate limited). Resume when quota resets: ${errorMessage}`);
+}
+
 function isDuplicateResult(result) {
   const errors = Array.isArray(result?.errors) ? result.errors : [];
   return errors.some(msg => String(msg).toLowerCase().includes("duplicate hash"));
@@ -171,7 +186,8 @@ async function processClaimedJob(job, conn) {
     // Pass original_name so the document record shows the human-readable filename.
     result = await runWithDb(conn, () => processDocument(job.file_path, {
       ...job.options,
-      originalName: job.original_name || null
+      originalName: job.original_name || null,
+      jobId: job.id
     }));
     const duplicate = isDuplicateResult(result);
 
@@ -187,7 +203,13 @@ async function processClaimedJob(job, conn) {
     maybeCleanupUploadedFile(job.file_path, duplicate ? "duplicate" : "completed");
     logger.info(`[ingest-job:${job.id}] completed`);
   } catch (err) {
-    failJob(conn, job, err.message, result);
+    if (err instanceof RateLimitError) {
+      // processDocument already rolled back the partial document state.
+      // Pause the job so the user can resume it after their quota resets.
+      pauseRateLimitedJob(conn, job, `Rate limit hit (429) — resume when quota resets: ${err.message}`);
+    } else {
+      failJob(conn, job, err.message, result);
+    }
   }
 }
 
@@ -328,7 +350,7 @@ export function retryIngestionJob(jobId) {
   if (!job) {
     throw new Error("Ingestion job not found");
   }
-  if (![JOB_STATUS.FAILED, JOB_STATUS.CANCELLED].includes(job.status)) {
+  if (![JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.RATE_LIMITED].includes(job.status)) {
     throw new Error(`Cannot retry job in status: ${job.status}`);
   }
   if (!fs.existsSync(job.file_path)) {
@@ -382,7 +404,8 @@ export function getIngestionQueueStats() {
     processing: 0,
     completed: 0,
     failed: 0,
-    cancelled: 0
+    cancelled: 0,
+    rate_limited: 0
   };
   for (const row of counts) {
     byStatus[row.status] = row.count;

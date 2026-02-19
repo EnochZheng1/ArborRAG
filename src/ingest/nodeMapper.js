@@ -2,7 +2,8 @@ import { db, safeJson, logAudit, runTransaction } from "../db/db.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
 import { GoogleGenAI } from "@google/genai";
 import { ingestLogger as logger } from "../utils/logger.js";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
  * Map chunks to appropriate tree nodes
@@ -80,7 +81,7 @@ export async function suggestNodeWithLLM(chunk, candidates) {
   const lang = detectLanguage(chunk.content || '');
 
   const nodeList = candidates.map((c, i) =>
-    `${i + 1}. ${c.node.node_id} - ${c.node.name}: ${c.node.node_summary || (lang === 'zh' ? "(无摘要)" : "(no summary)")}`
+    `${i + 1}. ${c.node.node_id} - ${c.node.name}: ${c.node.node_summary || (isChineseLang(lang) ? "(无摘要)" : "(no summary)")}`
   ).join("\n");
 
   const chunkPreview = chunk.content.slice(0, 500);
@@ -100,11 +101,12 @@ export async function suggestNodeWithLLM(chunk, candidates) {
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
+    rethrowIfRateLimit(err);
     logger.error("LLM node suggestion failed:", err.message);
     return {
       selected_index: candidates.length > 0 ? 1 : 0,
       confidence: 0.3,
-      reasoning: lang === 'zh' ? "LLM调用失败,使用后备方案" : "LLM call failed, using fallback"
+      reasoning: isChineseLang(lang) ? "LLM调用失败,使用后备方案" : "LLM call failed, using fallback"
     };
   }
 }
@@ -310,9 +312,10 @@ function generateNodeId(text) {
  * Use LLM to analyze document structure and suggest hierarchy
  * @param {string} docTitle - Document title
  * @param {Array} chunks - All chunks from document
+ * @param {string} lang - Language code detected by caller
  * @returns {Promise<object>} Suggested hierarchy
  */
-async function analyzeDocumentStructure(docTitle, chunks) {
+async function analyzeDocumentStructure(docTitle, chunks, lang) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return null;
@@ -321,13 +324,9 @@ async function analyzeDocumentStructure(docTitle, chunks) {
   const ai = new GoogleGenAI({ apiKey });
   const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
-  // Detect language from first chunk
-  const firstChunkContent = chunks[0]?.content || '';
-  const lang = detectLanguage(firstChunkContent);
-
   // Build a summary of chunk contents for analysis
-  const chunkLabel = lang === 'zh' ? '片段' : 'Chunk';
-  const keywordsLabel = lang === 'zh' ? '关键词' : 'Keywords';
+  const chunkLabel = isChineseLang(lang) ? '片段' : 'Chunk';
+  const keywordsLabel = isChineseLang(lang) ? '关键词' : 'Keywords';
   const chunkSummaries = chunks.slice(0, 10).map((c, i) => {
     const preview = c.content.slice(0, 200).replace(/\n/g, " ");
     const keywords = c.keywords?.slice(0, 5).join(", ") || "";
@@ -344,9 +343,20 @@ async function analyzeDocumentStructure(docTitle, chunks) {
     });
 
     const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-    return JSON.parse(jsonMatch[1] || text);
+
+    // Robust JSON extraction: try markdown code block first, then bare JSON object
+    let jsonStr = text.trim();
+    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1].trim();
+    } else {
+      // Find the outermost JSON object, ignoring surrounding text
+      const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (objMatch) jsonStr = objMatch[0];
+    }
+    return JSON.parse(jsonStr);
   } catch (err) {
+    rethrowIfRateLimit(err);
     logger.warn("Document structure analysis failed:", err.message);
     return null;
   }
@@ -357,9 +367,10 @@ async function analyzeDocumentStructure(docTitle, chunks) {
  * @param {string} docTitle - Document title
  * @param {Array} chunks - Document chunks
  * @param {object} structure - LLM suggested structure (optional)
+ * @param {string} lang - Language code ('zh-TW', 'zh-CN', or 'en')
  * @returns {object} Created hierarchy with document node and section nodes
  */
-function createDocumentHierarchy(docTitle, chunks, structure = null) {
+function createDocumentHierarchy(docTitle, chunks, structure = null, lang = 'en') {
   ensureRootNode();
 
   const cleanTitle = docTitle.replace(/\.(docx?|pdf|txt|md|xlsx?)$/i, "").trim();
@@ -413,7 +424,7 @@ function createDocumentHierarchy(docTitle, chunks, structure = null) {
     }
   }
 
-  // If no sections or not all chunks mapped, create a "Content" section
+  // If no sections or not all chunks mapped, create a language-appropriate fallback section
   const unmappedChunks = chunks.filter((_, i) => !chunkToSection.has(i));
   if (unmappedChunks.length > 0 && sectionNodes.length === 0) {
     // Create default sections based on chunk count
@@ -423,12 +434,18 @@ function createDocumentHierarchy(docTitle, chunks, structure = null) {
         chunkToSection.set(i, docNode);
       }
     } else {
-      // Multiple chunks - create a "Content" section
+      // Multiple chunks - create a localized content section
+      const contentName = lang === 'zh-TW' ? '內容' : isChineseLang(lang) ? '内容' : 'Content';
+      const contentSummary = lang === 'zh-TW'
+        ? `來自「${cleanTitle}」的主要內容`
+        : isChineseLang(lang)
+          ? `来自「${cleanTitle}」的主要内容`
+          : `Main content from ${cleanTitle}`;
       const contentNode = createNode({
         node_id: generateNodeId("content"),
-        name: "Content",
+        name: contentName,
         parent_id: docNode.node_id,
-        summary: `Main content from ${cleanTitle}`,
+        summary: contentSummary,
         scope: {}
       });
       sectionNodes.push(contentNode);
@@ -503,8 +520,9 @@ function generateNodeFromChunk(chunk, parentId = "root") {
  * @param {Array} nodes - Nodes to update
  * @param {Array} chunks - All chunks
  * @param {Array} mappings - Chunk to node mappings
+ * @param {string} lang - Language code ('zh-TW', 'zh-CN', or 'en')
  */
-function updateNodeSummaries(nodes, chunks, mappings) {
+function updateNodeSummaries(nodes, chunks, mappings, lang = 'en') {
   // Group chunks by node
   const chunksByNode = new Map();
   for (const mapping of mappings) {
@@ -538,16 +556,26 @@ function updateNodeSummaries(nodes, chunks, mappings) {
       summary = content.slice(0, 500).replace(/\n/g, " ").trim();
       if (content.length > 500) summary += "...";
     } else {
-      // Multiple chunks - create overview
+      // Multiple chunks - create overview with localized label
       const firstChunkPreview = nodeChunks[0].content?.slice(0, 200).replace(/\n/g, " ").trim() || "";
-      summary = `Contains ${nodeChunks.length} sections. ${firstChunkPreview}`;
+      const containsLabel = lang === 'zh-TW'
+        ? `包含 ${nodeChunks.length} 個部分。`
+        : isChineseLang(lang)
+          ? `包含 ${nodeChunks.length} 个部分。`
+          : `Contains ${nodeChunks.length} sections.`;
+      summary = `${containsLabel} ${firstChunkPreview}`;
       if (firstChunkPreview.length >= 200) summary += "...";
     }
 
     // Add keywords if available
     if (allKeywords.size > 0) {
       const keywordStr = Array.from(allKeywords).slice(0, 10).join(", ");
-      summary += `\n\nKey topics: ${keywordStr}`;
+      const topicsLabel = lang === 'zh-TW'
+        ? '\n\n主要主題：'
+        : isChineseLang(lang)
+          ? '\n\n主要主题：'
+          : '\n\nKey topics: ';
+      summary += `${topicsLabel}${keywordStr}`;
     }
 
     // Update node in database
@@ -619,6 +647,10 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
   // Get document title from first chunk
   const docTitle = chunks[0]?.doc_title || "Untitled Document";
 
+  // Detect language once from first chunk content — passed to all sub-functions
+  // so they can use language-appropriate strings and prompts.
+  const lang = detectLanguage(chunks[0]?.content || '');
+
   // Strategy: Create a document hierarchy for new documents
   if (createNewNodes && chunks.length > 0) {
     // First, check if there are existing nodes that match well
@@ -627,16 +659,16 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
 
     if (!hasGoodExistingMatch) {
       // No good existing match - create new document hierarchy
-      logger.info(`Creating document hierarchy for: ${docTitle}`);
+      logger.info(`Creating document hierarchy for: ${docTitle} (lang: ${lang})`);
 
       // Analyze document structure with LLM if enabled
       let structure = null;
       if (useLLM) {
-        structure = await analyzeDocumentStructure(docTitle, chunks);
+        structure = await analyzeDocumentStructure(docTitle, chunks, lang);
       }
 
-      // Create the hierarchy
-      const hierarchy = createDocumentHierarchy(docTitle, chunks, structure);
+      // Create the hierarchy with language context
+      const hierarchy = createDocumentHierarchy(docTitle, chunks, structure, lang);
       results.newNodes.push(hierarchy.documentNode, ...hierarchy.sectionNodes);
 
       // Map chunks to their respective nodes
@@ -656,7 +688,7 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
       }
 
       // Update node summaries based on assigned chunks
-      updateNodeSummaries(results.newNodes, chunks, results.mapped);
+      updateNodeSummaries(results.newNodes, chunks, results.mapped, lang);
 
       return results;
     }
@@ -860,6 +892,7 @@ export async function generateNodeAliases(nodeId, options = {}) {
     logger.info(`Generated ${validAliases.length} aliases for node ${nodeId}`);
     return validAliases;
   } catch (err) {
+    rethrowIfRateLimit(err);
     logger.error(`Failed to generate aliases for ${nodeId}:`, err.message);
     return generateSimpleAliases(node.name);
   }

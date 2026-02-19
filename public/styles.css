@@ -1938,6 +1938,11 @@ select:focus {
   box-shadow: var(--shadow-lg);
   border: 1px solid var(--border);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 100px);
+  position: sticky;
+  top: 24px;
 }
 
 .node-detail-header {
@@ -1955,6 +1960,8 @@ select:focus {
 
 .node-detail-content {
   padding: 20px;
+  overflow-y: auto;
+  flex: 1;
 }
 
 .node-detail-content dl {
@@ -2003,6 +2010,57 @@ select:focus {
 .node-children-count {
   color: var(--text-secondary);
   margin-bottom: 16px;
+}
+
+.node-children-section {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.node-children-section h4 {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.node-children-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.node-child-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-main);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  font-size: 0.875rem;
+}
+
+.node-child-item:hover {
+  background: var(--bg-hover, rgba(99,102,241,0.08));
+  border-color: var(--primary);
+}
+
+.node-child-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+.node-child-name {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .node-chunks {
@@ -2266,6 +2324,78 @@ select:focus {
 .status-failed {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.status-rate_limited {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Rate-limited jobs banner */
+.rate-limited-banner {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(180, 83, 9, 0.08), rgba(245, 158, 11, 0.12));
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--radius);
+}
+
+.rate-limit-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.rate-limit-icon {
+  font-size: 18px;
+}
+
+.rate-limit-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.rate-limit-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rate-limit-job {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.rate-limit-job-name {
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rate-limit-job-err {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 2;
+  min-width: 0;
+}
+
+.btn-warning {
+  background: #f59e0b;
+  color: white;
+}
+
+.btn-warning:hover {
+  background: #d97706;
 }
 
 /* Conflicts */
@@ -4153,4 +4283,41 @@ select:focus {
 [data-theme="dark"] .dataset-select {
   background-color: rgba(255,255,255,0.05);
   border-color: var(--border-dark);
+}
+
+/* ── Job live progress (WebSocket real-time updates) ─────────────────────── */
+.job-live-progress {
+  margin-top: 8px;
+}
+
+.job-progress-bar {
+  height: 4px;
+  background: var(--border, #e2e8f0);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.job-progress-fill {
+  height: 100%;
+  background: var(--primary, #6366f1);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.job-stage-msg {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary, #64748b);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-theme="dark"] .job-progress-bar {
+  background: rgba(255,255,255,0.1);
+}
+
+[data-theme="dark"] .job-progress-fill {
+  background: var(--primary, #818cf8);
 }

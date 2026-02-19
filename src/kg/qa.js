@@ -22,7 +22,7 @@ import { getFactsForQuestion, retrieveFactsForQuery } from "../extraction/entity
 import { recordTokenUsage } from "../utils/tokenTracker.js";
 import { enhancedRetrieval, buildEnhancedContext } from "./enhancedRetrieval.js";
 import { hierarchicalRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
-import { detectLanguage as detectLang } from "../utils/langDetect.js";
+import { detectLanguage as detectLang, isChineseLang } from "../utils/langDetect.js";
 
 // Detect language - wrapper that considers both query and context
 function detectLanguage(text) {
@@ -40,7 +40,7 @@ function detectPromptLanguage(query, context) {
 
   // If context is Chinese but query is English, prefer Chinese prompts
   // The LLM will better understand Chinese context with Chinese instructions
-  if (contextLang === 'zh') {
+  if (isChineseLang(contextLang)) {
     return 'zh';
   }
 
@@ -80,7 +80,7 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
   const detectedLang = lang === "auto" ? detectPromptLanguage(query, context) : lang;
   const system = SYSTEM_PROMPTS[detectedLang] || SYSTEM_PROMPTS.en;
 
-  const userPrompt = detectedLang === "zh"
+  const userPrompt = isChineseLang(detectedLang)
     ? `【问题】\n${query}\n\n【限定节点】\n${nodeId} ${nodeName}\n\n【上下文 chunks】\n${context}`
     : `[Question]\n${query}\n\n[Restricted Node]\n${nodeId} ${nodeName}\n\n[Context Chunks]\n${context}`;
 
@@ -118,7 +118,7 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
       conditions: [],
       citations: [],
       conflicts: [],
-      missing_info: [detectedLang === "zh"
+      missing_info: [isChineseLang(detectedLang)
         ? "输出不是JSON（建议开启 Gemini 的结构化输出）"
         : "Output is not valid JSON (consider enabling Gemini structured output)"]
     };
@@ -355,7 +355,7 @@ export async function ask({ query, queryScope = null, options = {} }) {
     minConfidence = 0.0,          // Minimum confidence threshold (0.0-1.0)
     hybridAlpha = 0.5,            // Weight for vector vs BM25 (0=BM25 only, 1=vector only)
     rerankerThreshold = 0.3,      // Minimum reranker score to keep
-    contextWindow = 1,            // Number of neighboring chunks to include
+    contextWindow = 2,            // Number of neighboring chunks to include on each side
     temperature = 0.3             // LLM temperature for answer generation
   } = options;
 
@@ -756,7 +756,7 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     minConfidence = 0.0,
     hybridAlpha = 0.5,
     rerankerThreshold = 0.3,
-    contextWindow = 1,
+    contextWindow = 2,
     temperature = 0.3
   } = retrievalOptions;
 

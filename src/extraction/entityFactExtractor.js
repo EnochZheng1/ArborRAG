@@ -1,7 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { db, safeJson } from "../db/db.js";
 import { recordTokenUsage } from "../utils/tokenTracker.js";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
  * Entity-Fact Extraction Module
@@ -126,7 +127,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
 
     // Provide existing entities for deduplication hints
     const existingHint = existingEntities.length > 0
-      ? (lang === 'zh'
+      ? (isChineseLang(lang)
         ? `\n已知实体(如引用相同内容请使用完全相同的名称): ${existingEntities.slice(0, 15).map(e => e.name).join(', ')}`
         : `\nKnown entities (reuse exact names if referring to same thing): ${existingEntities.slice(0, 15).map(e => e.name).join(', ')}`)
       : '';
@@ -194,6 +195,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
 
     return { entities, facts };
   } catch (error) {
+    rethrowIfRateLimit(error);
     console.error('Entity-fact extraction error:', error.message);
     return extractWithRules(content, chunk);
   }

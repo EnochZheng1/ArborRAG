@@ -2,6 +2,71 @@
 
 const API_BASE = '';
 
+// ── WebSocket (real-time job progress) ───────────────────────────────────────
+let _ws = null;
+const _wsQueue = [];
+
+function _wsSend(msg) {
+  const raw = JSON.stringify(msg);
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    _ws.send(raw);
+  } else {
+    _wsQueue.push(raw);
+  }
+}
+
+function initWebSocket() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  _ws = new WebSocket(`${proto}//${location.host}`);
+
+  _ws.addEventListener('open', () => {
+    _wsQueue.splice(0).forEach(msg => _ws.send(msg));
+  });
+
+  _ws.addEventListener('message', (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'job_progress') _handleJobProgress(msg);
+    } catch { /* ignore */ }
+  });
+
+  _ws.addEventListener('close', () => {
+    _ws = null;
+    setTimeout(initWebSocket, 4000);
+  });
+
+  _ws.addEventListener('error', () => { /* close will fire */ });
+}
+
+function _handleJobProgress({ jobId, step, progress, message, status }) {
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
+
+  // Update live progress strip inside the job card
+  const progressEl = document.getElementById(`job-progress-${jobId}`);
+  if (progressEl) {
+    if (TERMINAL.has(status)) {
+      progressEl.innerHTML = '';
+    } else {
+      const pct = Math.max(0, Math.min(100, progress || 0));
+      const stepLabel = (step || '').replace(/_/g, ' ');
+      progressEl.innerHTML = `
+        <div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>
+        <p class="job-stage-msg">${escapeHtml(stepLabel)}${message ? ' — ' + escapeHtml(message) : ''}</p>
+      `;
+    }
+  }
+
+  if (TERMINAL.has(status)) {
+    // Trigger an immediate poll to get the full final job state
+    const entry = _uploadJobPollers.get(String(jobId));
+    if (entry) {
+      clearTimeout(entry.timer);
+      entry.pollFn();
+    }
+    _wsSend({ type: 'unwatch', jobId: String(jobId) });
+  }
+}
+
 // i18n translations
 const i18n = {
   en: {
@@ -477,6 +542,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initGraphView();
   initMobileSidebar();
   initTreeSearch();
+  initWebSocket();
 });
 
 // Theme Management
@@ -676,14 +742,17 @@ function initAsk() {
     btn.addEventListener('click', () => handleFeedback(btn.dataset.rating));
   });
 
-  // Related questions (delegate)
-  document.getElementById('related-questions-list')?.addEventListener('click', (e) => {
+  // Related questions — delegate to #ask-result (stable ancestor) because
+  // #related-questions-list is injected dynamically via innerHTML and does not
+  // exist when this init code runs.
+  document.getElementById('ask-result')?.addEventListener('click', (e) => {
     const btn = e.target.closest('.related-question-btn');
-    if (btn) {
-      const question = decodeURIComponent(btn.dataset.question);
-      document.getElementById('query-input').value = question;
-      handleAsk();
-    }
+    if (!btn) return;
+    const question = decodeURIComponent(btn.dataset.question);
+    const input = document.getElementById('query-input');
+    input.value = question;
+    input.focus();
+    input.setSelectionRange(question.length, question.length);
   });
 
   // Suggestions list (delegate)
@@ -1912,9 +1981,21 @@ async function loadNodeDetail(nodeId) {
       </div>
     `;
 
-    // Show children count
+    // Show child nodes as a clickable list
     if (node.children?.length) {
-      html += `<p class="node-children-count">📁 ${node.children.length} child node(s)</p>`;
+      html += `
+        <div class="node-children-section">
+          <h4>📁 Child Nodes (${node.children.length})</h4>
+          <ul class="node-children-list">
+            ${node.children.map(child => `
+              <li class="node-child-item" data-node-id="${child.node_id}" title="${child.node_summary || ''}">
+                <span class="node-child-icon">${child.children?.length ? '📁' : '📄'}</span>
+                <span class="node-child-name">${child.name}</span>
+              </li>
+            `).join('')}
+          </ul>
+        </div>
+      `;
     }
 
     // Debug info from API
@@ -1928,7 +2009,7 @@ async function loadNodeDetail(nodeId) {
           <div class="entities-list">
       `;
 
-      for (const entity of entities.slice(0, 10)) {
+      for (const entity of entities) {
         const entityFacts = entity.facts || [];
         html += `
           <div class="entity-item">
@@ -1938,18 +2019,14 @@ async function loadNodeDetail(nodeId) {
               ${entity.mention_count > 1 ? `<span class="entity-mentions">${entity.mention_count} mentions</span>` : ''}
             </div>
             ${entity.description ? `<p class="entity-description">${entity.description}</p>` : ''}
-            ${entity.aliases?.length ? `<div class="entity-aliases">Also: ${entity.aliases.slice(0, 3).join(', ')}</div>` : ''}
+            ${entity.aliases?.length ? `<div class="entity-aliases">Also: ${entity.aliases.join(', ')}</div>` : ''}
             ${entityFacts.length > 0 ? `
               <div class="entity-facts-mini">
-                ${entityFacts.slice(0, 3).map(f => `<span class="fact-mini">${f.content}</span>`).join('')}
+                ${entityFacts.map(f => `<span class="fact-mini">${f.content}</span>`).join('')}
               </div>
             ` : ''}
           </div>
         `;
-      }
-
-      if (entities.length > 10) {
-        html += `<p class="more-entities">... and ${entities.length - 10} more entities</p>`;
       }
 
       html += '</div></div>';
@@ -1986,7 +2063,7 @@ async function loadNodeDetail(nodeId) {
           <div class="facts-list">
       `;
 
-      for (const fact of facts.slice(0, 10)) {
+      for (const fact of facts) {
         const confidenceClass = fact.confidence >= 0.8 ? 'high' : fact.confidence >= 0.5 ? 'medium' : 'low';
         html += `
           <div class="fact-item">
@@ -1998,10 +2075,6 @@ async function loadNodeDetail(nodeId) {
             ${fact.source_doc ? `<span class="fact-source">From: ${fact.source_doc}</span>` : ''}
           </div>
         `;
-      }
-
-      if (facts.length > 10) {
-        html += `<p class="more-facts">... and ${facts.length - 10} more facts</p>`;
       }
 
       html += '</div></div>';
@@ -2022,11 +2095,8 @@ async function loadNodeDetail(nodeId) {
           <div class="chunks-list">
       `;
 
-      for (const chunk of chunks.slice(0, 5)) {
-        const preview = (chunk.content_clean || chunk.content || '')
-          .slice(0, 300)
-          .replace(/\n/g, ' ')
-          .trim();
+      for (const chunk of chunks) {
+        const fullContent = (chunk.content_clean || chunk.content || '').trim();
         const keywords = chunk.keywords_json ?
           (typeof chunk.keywords_json === 'string' ? JSON.parse(chunk.keywords_json) : chunk.keywords_json) : [];
 
@@ -2036,14 +2106,10 @@ async function loadNodeDetail(nodeId) {
               <span class="chunk-type">${chunk.chunk_type || 'content'}</span>
               <span class="chunk-source">${chunk.doc_title || 'Unknown source'}</span>
             </div>
-            <p class="chunk-preview">${preview}${preview.length >= 300 ? '...' : ''}</p>
-            ${keywords.length ? `<div class="chunk-keywords">${keywords.slice(0, 5).map(k => `<span class="keyword-tag">${k}</span>`).join('')}</div>` : ''}
+            <p class="chunk-preview">${fullContent.replace(/\n/g, '<br>')}</p>
+            ${keywords.length ? `<div class="chunk-keywords">${keywords.map(k => `<span class="keyword-tag">${k}</span>`).join('')}</div>` : ''}
           </div>
         `;
-      }
-
-      if (chunks.length > 5) {
-        html += `<p class="more-chunks">... and ${chunks.length - 5} more chunk(s)</p>`;
       }
 
       html += '</div></div>';
@@ -2052,6 +2118,18 @@ async function loadNodeDetail(nodeId) {
     }
 
     contentEl.innerHTML = html;
+
+    // Wire up child node items to navigate on click
+    contentEl.querySelectorAll('.node-child-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const childId = item.dataset.nodeId;
+        // Highlight the corresponding tree node if visible
+        document.querySelectorAll('.tree-node-item').forEach(n => n.classList.remove('selected'));
+        const treeItem = document.querySelector(`.tree-node-item[data-node-id="${childId}"]`);
+        if (treeItem) treeItem.classList.add('selected');
+        loadNodeDetail(childId);
+      });
+    });
   } catch (error) {
     contentEl.innerHTML = `<p class="error">${error.message}</p>`;
   }
@@ -2241,34 +2319,123 @@ async function handleUpload() {
   }
 }
 
+// Tracks active polling timers keyed by job id → { timer, intervalMs }
+const _uploadJobPollers = new Map();
+
+function _renderUploadJobRow(r, liveJob) {
+  const job = liveJob || r.job || null;
+  const jobStatus = job?.status || r.status;
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
+  const isTerminal = TERMINAL.has(jobStatus);
+  const isQueued = !isTerminal && (r.queued || jobStatus === 'queued' || jobStatus === 'processing');
+  const isSuccess = jobStatus === 'completed' || r.success === true;
+  const isRateLimited = jobStatus === 'rate_limited';
+  const isFailed = jobStatus === 'failed' || (isTerminal && !isSuccess && !isRateLimited);
+
+  let statusText, statusClass;
+  if (jobStatus === 'completed') { statusText = 'completed'; statusClass = 'processed'; }
+  else if (jobStatus === 'processing') { statusText = 'processing'; statusClass = 'processing'; }
+  else if (jobStatus === 'queued') { statusText = 'queued'; statusClass = 'pending'; }
+  else if (jobStatus === 'failed') { statusText = 'failed'; statusClass = 'failed'; }
+  else if (jobStatus === 'cancelled') { statusText = 'cancelled'; statusClass = 'failed'; }
+  else if (jobStatus === 'rate_limited') { statusText = 'rate limited'; statusClass = 'rate_limited'; }
+  else if (r.success === true) { statusText = 'processed'; statusClass = 'processed'; }
+  else if (r.success === false) { statusText = 'failed'; statusClass = 'failed'; }
+  else { statusText = jobStatus || 'queued'; statusClass = 'pending'; }
+
+  const filename = r.filename || job?.original_name || 'Uploaded file';
+  const result = job?.result || null;
+  const chunkCount = result?.stats?.chunkCount ?? r.stats?.chunkCount;
+
+  return `
+    <div style="padding: 12px; background: var(--bg-main); border-radius: 8px; margin-top: 12px;">
+      <strong>${filename}</strong>
+      <span class="status-badge status-${statusClass}">${statusText}</span>
+      ${job?.id ? `<span style="margin-left: 8px; color: var(--text-secondary); font-size: 12px;">Job #${job.id}</span>` : ''}
+      ${isQueued ? `<p style="margin-top: 8px; color: var(--text-secondary); font-size: 13px;">⏳ Background processing in progress…</p>` : ''}
+      ${job?.id && isQueued ? `<div class="job-live-progress" id="job-progress-${job.id}"></div>` : ''}
+      ${chunkCount ? `<p style="margin-top: 8px; color: var(--text-secondary); font-size: 13px;">${chunkCount} chunks created</p>` : ''}
+      ${job?.document_id ? `<p style="margin-top: 6px; color: var(--text-secondary); font-size: 12px;">Document #${job.document_id}</p>` : ''}
+      ${result?.errors?.length ? `<p style="margin-top: 6px; color: var(--danger); font-size: 13px;">${result.errors.join(', ')}</p>` : ''}
+      ${job?.error_message && !isQueued ? `<p style="margin-top: 6px; color: var(--danger); font-size: 13px;">${job.error_message}</p>` : ''}
+      ${isRateLimited ? `<p style="margin-top: 6px; color: var(--warning, #f59e0b); font-size: 13px;">Paused — API rate limit hit. Go to the Documents tab to resume.</p>` : ''}
+    </div>
+  `;
+}
+
+function _stopUploadJobPoller(jobId) {
+  const entry = _uploadJobPollers.get(jobId);
+  if (entry?.timer) clearTimeout(entry.timer);
+  _uploadJobPollers.delete(jobId);
+}
+
+function _startUploadJobPoller(jobId, resultIndex, allResults) {
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
+  const MAX_POLLS = 150; // ~5 minutes at 2s intervals
+  let pollCount = 0;
+
+  async function poll() {
+    pollCount++;
+    if (pollCount > MAX_POLLS) {
+      _stopUploadJobPoller(jobId);
+      return;
+    }
+
+    try {
+      const job = await api(`/ingest/jobs/${jobId}`);
+
+      // Update just this card in the result div
+      const resultDiv = document.getElementById('upload-result');
+      if (resultDiv) {
+        const cards = resultDiv.querySelectorAll('[data-job-id]');
+        for (const card of cards) {
+          if (String(card.dataset.jobId) === String(jobId)) {
+            card.outerHTML = `<div data-job-id="${jobId}">${_renderUploadJobRow(allResults[resultIndex], job)}</div>`;
+            break;
+          }
+        }
+      }
+
+      if (TERMINAL.has(job.status)) {
+        _stopUploadJobPoller(jobId);
+        _wsSend({ type: 'unwatch', jobId: String(jobId) });
+        // Refresh the Documents tab list in the background
+        if (job.status === 'completed') loadDocuments();
+        if (job.status === 'rate_limited') loadRateLimitedJobs();
+        return;
+      }
+    } catch {
+      // Network hiccup — keep polling
+    }
+
+    const entry = _uploadJobPollers.get(jobId);
+    if (entry) {
+      entry.timer = setTimeout(poll, 2000);
+    }
+  }
+
+  // Store pollFn so the WS handler can trigger an immediate poll
+  _uploadJobPollers.set(jobId, { timer: setTimeout(poll, 2000), pollFn: poll });
+}
+
 function displayUploadResult(results) {
+  // Stop any existing pollers
+  for (const jobId of _uploadJobPollers.keys()) _stopUploadJobPoller(jobId);
+
   const resultDiv = document.getElementById('upload-result');
+  const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
 
   let html = '<h4>Upload Results</h4>';
-
-  results.forEach(r => {
+  results.forEach((r, i) => {
     const job = r.job || null;
-    const jobStatus = job?.status || r.status;
-    const isQueued = r.queued || jobStatus === 'queued' || jobStatus === 'processing';
-    const isSuccess = r.success === true || jobStatus === 'completed';
-    const isFailed = r.success === false || jobStatus === 'failed';
-    const statusText = isQueued ? jobStatus || 'queued' : (isSuccess ? 'processed' : 'failed');
-    const statusClass = isQueued
-      ? (jobStatus === 'processing' ? 'processing' : 'pending')
-      : (isSuccess ? 'processed' : 'failed');
+    const jobId = job?.id;
+    html += `<div data-job-id="${jobId || ''}">${_renderUploadJobRow(r, null)}</div>`;
 
-    html += `
-      <div style="padding: 12px; background: var(--bg-main); border-radius: 8px; margin-top: 12px;">
-        <strong>${r.filename || job?.original_name || 'Uploaded file'}</strong>
-        <span class="status-badge status-${statusClass}">${statusText}</span>
-        ${job?.id ? `<p style="margin-top: 8px; color: var(--text-secondary);">Job #${job.id}</p>` : ''}
-        ${isQueued ? `<p style="margin-top: 8px; color: var(--text-secondary);">Queued for background processing</p>` : ''}
-        ${r.stats?.chunkCount ? `<p style="margin-top: 8px; color: var(--text-secondary);">${r.stats.chunkCount} chunks created</p>` : ''}
-        ${job?.document_id ? `<p style="margin-top: 8px; color: var(--text-secondary);">Document #${job.document_id}</p>` : ''}
-        ${r.errors?.length ? `<p style="color: var(--danger);">${r.errors.join(', ')}</p>` : ''}
-        ${job?.error_message ? `<p style="color: var(--danger);">${job.error_message}</p>` : ''}
-      </div>
-    `;
+    // Start polling and subscribe via WS for queued/processing jobs
+    if (jobId && !TERMINAL.has(job?.status)) {
+      _startUploadJobPoller(jobId, i, results);
+      _wsSend({ type: 'watch', jobId: String(jobId) });
+    }
   });
 
   resultDiv.innerHTML = html;
@@ -2281,7 +2448,51 @@ function initDocuments() {
   document.getElementById('doc-status-filter').addEventListener('change', loadDocuments);
 }
 
+async function loadRateLimitedJobs() {
+  const banner = document.getElementById('rate-limited-banner');
+  if (!banner) return;
+  try {
+    const data = await api('/ingest/jobs?status=rate_limited&limit=50');
+    const jobs = data.jobs || [];
+    if (jobs.length === 0) {
+      banner.classList.add('hidden');
+      return;
+    }
+    banner.classList.remove('hidden');
+    banner.innerHTML = `
+      <div class="rate-limit-banner-header">
+        <span class="rate-limit-icon">⏸</span>
+        <strong>${jobs.length} job${jobs.length > 1 ? 's' : ''} paused — API rate limit (429)</strong>
+        <span class="rate-limit-hint">Resume after your Gemini quota resets (usually within a minute or an hour).</span>
+      </div>
+      <div class="rate-limit-jobs">
+        ${jobs.map(job => `
+          <div class="rate-limit-job">
+            <span class="rate-limit-job-name">${job.original_name || job.file_path}</span>
+            <span class="rate-limit-job-err">${job.error_message ? job.error_message.replace(/^Rate limit hit \(429\) — resume when quota resets: /, '') : ''}</span>
+            <button class="btn btn-sm btn-warning resume-job-btn" data-job-id="${job.id}">Resume</button>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch {
+    banner.classList.add('hidden');
+  }
+}
+
+window.resumeRateLimitedJob = async function(jobId) {
+  try {
+    await api(`/ingest/jobs/${jobId}/retry`, { method: 'POST' });
+    showToast('Job resumed — processing will restart shortly.', 'success');
+    loadRateLimitedJobs();
+    loadDocuments();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+};
+
 async function loadDocuments() {
+  loadRateLimitedJobs();
   const tbody = document.getElementById('documents-tbody');
   if (documentsPollTimer) {
     clearTimeout(documentsPollTimer);
@@ -2339,6 +2550,11 @@ function formatDocumentStep(doc) {
   }
   return message;
 }
+
+document.getElementById('tab-documents')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.resume-job-btn');
+  if (btn) resumeRateLimitedJob(Number(btn.dataset.jobId));
+});
 
 window.deleteDocument = async function(id) {
   if (!confirm(t('confirm_delete'))) return;
