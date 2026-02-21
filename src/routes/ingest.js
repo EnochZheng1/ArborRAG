@@ -68,7 +68,14 @@ router.post("/upload", upload.single("file"), (req, res) => {
       };
 
       if (sync === "true" || sync === true) {
-        const result = await processDocument(req.file.path, processOptions);
+        let result;
+        try {
+          result = await processDocument(req.file.path, processOptions);
+        } catch (procErr) {
+          try { fs.unlinkSync(req.file.path); } catch (_) {}
+          throw procErr;
+        }
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
         return res.json(result);
       }
 
@@ -84,6 +91,7 @@ router.post("/upload", upload.single("file"), (req, res) => {
         job
       });
     } catch (err) {
+      if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
       apiLogger.error("Upload error:", err.message);
       res.status(500).json({ error: err.message });
     }

@@ -23,6 +23,8 @@ export function initRegistryDb() {
   }
 
   registryDb = new Database(REGISTRY_PATH);
+  registryDb.pragma("journal_mode = WAL");
+  registryDb.pragma("synchronous = NORMAL");
   registryDb.pragma("foreign_keys = ON");
   registryDb.pragma("busy_timeout = 5000");
 

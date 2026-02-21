@@ -33,7 +33,7 @@ export function unsubscribeAll(ws) {
   }
 }
 
-export function emitJobProgress(jobId, step, progress, message, status = "processing") {
+export function emitJobProgress(jobId, step, progress, message, status = "processing", datasetId = null) {
   const key = String(jobId);
   const clients = jobClients.get(key);
   if (!clients || clients.size === 0) return;
@@ -41,6 +41,7 @@ export function emitJobProgress(jobId, step, progress, message, status = "proces
   const payload = JSON.stringify({
     type: "job_progress",
     jobId,
+    datasetId,
     step,
     progress,
     message,

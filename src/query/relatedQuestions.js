@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { db } from "../db/db.js";
+import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
 
 /**
@@ -83,13 +83,7 @@ async function generateTreeBasedQuestions(nodes) {
 
     try {
       // Get siblings
-      const siblings = db.prepare(`
-        SELECT node_id, name, node_summary
-        FROM nodes
-        WHERE parent_id = (SELECT parent_id FROM nodes WHERE node_id = ?)
-          AND node_id != ?
-        LIMIT 3
-      `).all(nodeId, nodeId);
+      const siblings = SuggestionRepo.getSiblings(nodeId);
 
       for (const sibling of siblings) {
         if (sibling.name) {
@@ -104,12 +98,7 @@ async function generateTreeBasedQuestions(nodes) {
       }
 
       // Get children
-      const children = db.prepare(`
-        SELECT node_id, name, node_summary
-        FROM nodes
-        WHERE parent_id = ?
-        LIMIT 3
-      `).all(nodeId);
+      const children = SuggestionRepo.getChildren(nodeId);
 
       for (const child of children) {
         if (child.name) {
@@ -124,12 +113,7 @@ async function generateTreeBasedQuestions(nodes) {
       }
 
       // Get parent for broader context
-      const parent = db.prepare(`
-        SELECT p.node_id, p.name, p.node_summary
-        FROM nodes n
-        JOIN nodes p ON n.parent_id = p.node_id
-        WHERE n.node_id = ?
-      `).get(nodeId);
+      const parent = SuggestionRepo.getParent(nodeId);
 
       if (parent && parent.name) {
         questions.push({

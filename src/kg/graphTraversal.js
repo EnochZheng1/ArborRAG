@@ -1,4 +1,5 @@
-import { db, safeJson } from "../db/db.js";
+import { safeJson } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
 
 /**
  * Graph Traversal Utilities
@@ -12,7 +13,7 @@ import { db, safeJson } from "../db/db.js";
  * @returns {object|null} Node or null
  */
 export function getNode(nodeId) {
-  const row = db.prepare(`SELECT * FROM nodes WHERE node_id = ?`).get(nodeId);
+  const row = NodeRepo.findById(nodeId);
 
   if (!row) return null;
 
@@ -78,9 +79,7 @@ export function getPathToNode(nodeId) {
  * @returns {Array<object>} Child nodes
  */
 export function getChildren(nodeId) {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE parent_id = ? ORDER BY name
-  `).all(nodeId);
+  const rows = NodeRepo.findByParent(nodeId);
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -129,25 +128,12 @@ export function getSiblings(nodeId, includeSelf = false) {
   const node = getNode(nodeId);
   if (!node) return [];
 
-  let query;
-  let params;
-
+  let rows;
   if (node.parent_id) {
-    query = `SELECT * FROM nodes WHERE parent_id = ?`;
-    params = [node.parent_id];
+    rows = NodeRepo.findSiblings(node.parent_id, includeSelf ? null : nodeId);
   } else {
-    query = `SELECT * FROM nodes WHERE parent_id IS NULL`;
-    params = [];
+    rows = NodeRepo.findRootSiblings(includeSelf ? null : nodeId);
   }
-
-  if (!includeSelf) {
-    query += ` AND node_id != ?`;
-    params.push(nodeId);
-  }
-
-  query += ` ORDER BY name`;
-
-  const rows = db.prepare(query).all(...params);
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -310,9 +296,7 @@ export function getSubtree(nodeId, maxDepth = 3) {
  * @returns {Array<object>} Root nodes
  */
 export function getRootNodes() {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE parent_id IS NULL ORDER BY name
-  `).all();
+  const rows = NodeRepo.findRoots();
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -361,9 +345,7 @@ export function getFullTree() {
  * @returns {Array<object>} Nodes at that level
  */
 export function getNodesByLevel(level) {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE level = ? ORDER BY name
-  `).all(level);
+  const rows = NodeRepo.findByLevel(level);
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -380,38 +362,7 @@ export function getNodesByLevel(level) {
  * @returns {object} Tree statistics
  */
 export function getTreeStats() {
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as total_nodes,
-      MAX(level) as max_depth
-    FROM nodes
-  `).get();
-
-  // Count nodes that have children (are parents of other nodes)
-  const nodesWithChildren = db.prepare(`
-    SELECT COUNT(DISTINCT parent_id) as count
-    FROM nodes
-    WHERE parent_id IS NOT NULL
-  `).get();
-
-  const levelCounts = db.prepare(`
-    SELECT level, COUNT(*) as count
-    FROM nodes
-    GROUP BY level
-    ORDER BY level
-  `).all();
-
-  const rootCount = db.prepare(`
-    SELECT COUNT(*) as count FROM nodes WHERE parent_id IS NULL
-  `).get();
-
-  return {
-    total_nodes: stats.total_nodes || 0,
-    max_depth: stats.max_depth,
-    root_nodes: rootCount.count || 0,
-    nodes_with_children: nodesWithChildren.count || 0,
-    nodes_by_level: levelCounts.reduce((acc, l) => ({ ...acc, [l.level]: l.count }), {})
-  };
+  return NodeRepo.getTreeStats();
 }
 
 /**

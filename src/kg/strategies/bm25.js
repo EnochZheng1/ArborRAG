@@ -2,7 +2,9 @@
  * BM25 keyword-based retrieval strategies.
  */
 
-import { db, safeJson } from "../../db/db.js";
+import { safeJson } from "../../db/db.js";
+import { NodeRepo } from "../../db/repositories/NodeRepo.js";
+import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { extractSearchTerms, escapeFtsQuery } from "./utils.js";
 
@@ -11,14 +13,7 @@ import { extractSearchTerms, escapeFtsQuery } from "./utils.js";
 export function bm25RecallNodes(query, limit = 30) {
   const safeQuery = escapeFtsQuery(query);
   try {
-    const rows = db.prepare(`
-      SELECT n.*, -bm25(nodes_fts) as score
-      FROM nodes_fts
-      JOIN nodes n ON n.node_id = nodes_fts.node_id
-      WHERE nodes_fts MATCH ?
-      ORDER BY bm25(nodes_fts) ASC
-      LIMIT ?
-    `).all(safeQuery, limit);
+    const rows = NodeRepo.bm25Search(safeQuery, limit);
 
     return rows.map(r => ({
       node: {
@@ -41,12 +36,7 @@ export function bm25RecallNodes(query, limit = 30) {
 }
 
 export function searchNodesByName(name, limit = 10) {
-  const rows = db.prepare(`
-    SELECT * FROM nodes
-    WHERE name LIKE ? OR node_id LIKE ?
-    ORDER BY level ASC, name ASC
-    LIMIT ?
-  `).all(`%${name}%`, `%${name}%`, limit);
+  const rows = NodeRepo.searchByName(name, limit);
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -63,8 +53,7 @@ export function searchNodesByName(name, limit = 10) {
 
 export function getNodesByIds(nodeIds) {
   if (!nodeIds.length) return [];
-  const ph = nodeIds.map(() => "?").join(",");
-  return db.prepare(`SELECT * FROM nodes WHERE node_id IN (${ph})`).all(...nodeIds).map(r => ({
+  return NodeRepo.findByIds(nodeIds).map(r => ({
     node_id: r.node_id,
     name: r.name,
     parent_id: r.parent_id,
@@ -97,14 +86,7 @@ function buildChunkResult(r) {
 export function bm25RecallChunks(query, limit = 50) {
   const safeQuery = escapeFtsQuery(query);
   try {
-    const rows = db.prepare(`
-      SELECT c.*, -bm25(chunks_fts) as score
-      FROM chunks_fts
-      JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
-      WHERE chunks_fts MATCH ? AND c.status = 'active'
-      ORDER BY bm25(chunks_fts) ASC
-      LIMIT ?
-    `).all(safeQuery, limit);
+    const rows = ChunkRepo.bm25Search(safeQuery, limit);
 
     return rows.map(r => ({ chunk: buildChunkResult(r), bm25: r.score }));
   } catch (err) {
@@ -118,15 +100,7 @@ export function simpleContentSearch(query, limit = 30) {
     const terms = extractSearchTerms(query, { maxTerms: 32 });
     if (terms.length === 0) return [];
 
-    const conditions = terms.map(() => "c.content_clean LIKE ?").join(" OR ");
-    const params = terms.map(t => `%${t}%`);
-
-    const rows = db.prepare(`
-      SELECT c.* FROM chunks c
-      WHERE c.status = 'active' AND (${conditions})
-      ORDER BY c.uploaded_at DESC
-      LIMIT ?
-    `).all(...params, limit);
+    const rows = ChunkRepo.simpleContentSearch(terms, limit);
 
     logger.debug(`Simple content search for "${query}" found ${rows.length} chunks`);
     return rows.map(r => {
@@ -154,17 +128,7 @@ export function searchChunksByDocTitle(query, limit = 30) {
     const seenIds = new Set();
 
     for (const term of searchTerms) {
-      const rows = db.prepare(`
-        SELECT c.*,
-          CASE WHEN c.doc_title = ? THEN 1.0
-               WHEN c.doc_title LIKE ? THEN 0.8
-               ELSE 0.5 END as title_score
-        FROM chunks c
-        WHERE c.status = 'active'
-          AND (c.doc_title = ? OR c.doc_title LIKE ? OR c.doc_title LIKE ?)
-        ORDER BY title_score DESC, c.chunk_index ASC
-        LIMIT ?
-      `).all(term, `%${term}%`, term, `${term}%`, `%${term}%`, limit);
+      const rows = ChunkRepo.searchByDocTitle(term, limit);
 
       for (const r of rows) {
         if (!seenIds.has(r.id)) {
@@ -184,14 +148,7 @@ export function searchChunksByDocTitle(query, limit = 30) {
 
 export function getChunksByDocumentName(docName, limit = 50) {
   try {
-    return db.prepare(`
-      SELECT c.* FROM chunks c
-      JOIN documents d ON c.document_id = d.id
-      WHERE c.status = 'active'
-        AND (d.original_name = ? OR d.original_name LIKE ? OR c.doc_title = ? OR c.doc_title LIKE ?)
-      ORDER BY c.chunk_index ASC
-      LIMIT ?
-    `).all(docName, `%${docName}%`, docName, `%${docName}%`, limit).map(r => ({
+    return ChunkRepo.getByDocumentName(docName, limit).map(r => ({
       ...buildChunkResult(r), chunk_index: r.chunk_index
     }));
   } catch (err) {

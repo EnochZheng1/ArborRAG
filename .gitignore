@@ -7,8 +7,12 @@ uploads/
 
 kg.db
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+
+data/
 
 dist/
 build/

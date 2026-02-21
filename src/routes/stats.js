@@ -1,5 +1,7 @@
 import express from "express";
-import { db } from "../db/db.js";
+import { DocumentRepo } from "../db/repositories/DocumentRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
+import { EntityRepo } from "../db/repositories/EntityRepo.js";
 import { getTreeStats } from "../kg/graphTraversal.js";
 import { getEmbeddingCoverage } from "../embedding/chunkEmbeddings.js";
 import { getConflictStats } from "../ingest/conflictDetector.js";
@@ -27,37 +29,14 @@ router.get("/stats", (req, res) => {
     const conflictStats = getConflictStats();
     const queueStats = getIngestionQueueStats();
 
-    const docStats = db.prepare(`
-      SELECT
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) as processed,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-      FROM documents
-    `).get();
+    const docStats = DocumentRepo.getStats();
+    const chunkStats = { total: ChunkRepo.countActive() };
 
-    const chunkStats = db.prepare(`
-      SELECT COUNT(*) as total FROM chunks WHERE status = 'active'
-    `).get();
-
-    let extractionStats = { entities: 0, facts: 0, documents_extracted: 0 };
-    try {
-      const entityCount = db.prepare(`SELECT COUNT(*) as count FROM entities`).get();
-      const factCount = db.prepare(`SELECT COUNT(*) as count FROM facts`).get();
-      const docsExtracted = db.prepare(`
-        SELECT COUNT(DISTINCT document_id) as count
-        FROM chunks c
-        JOIN fact_evidence fe ON c.id = fe.chunk_id
-      `).get();
-      extractionStats = {
-        entities: entityCount?.count || 0,
-        facts: factCount?.count || 0,
-        documents_extracted: docsExtracted?.count || 0
-      };
-    } catch {
-      // Tables may not exist yet
-    }
+    const extractionStats = {
+      entities: EntityRepo.countAll(),
+      facts: EntityRepo.countFacts(),
+      documents_extracted: EntityRepo.countDocumentsExtracted()
+    };
 
     res.json({
       nodes: treeStats,

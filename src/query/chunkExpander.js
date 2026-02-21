@@ -1,4 +1,4 @@
-import { db } from "../db/db.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 
 /**
  * Contextual Chunk Expansion Module
@@ -92,14 +92,8 @@ export function expandChunksWithContext(chunks, options = {}) {
  */
 function getChunkSequenceInfo(chunkId) {
   try {
-    const row = db.prepare(`
-      SELECT id, document_id, chunk_index
-      FROM chunks
-      WHERE id = ?
-    `).get(chunkId);
-
-    return row || null;
-  } catch (error) {
+    return ChunkRepo.getSequenceInfo(chunkId);
+  } catch {
     return null;
   }
 }
@@ -115,30 +109,11 @@ function getNeighborChunks(docId, chunkIndex, windowBefore, windowAfter) {
   }
 
   try {
-    // Get chunks before
     if (windowBefore > 0) {
-      const beforeRows = db.prepare(`
-        SELECT id, content_clean, chunk_index
-        FROM chunks
-        WHERE document_id = ? AND chunk_index < ? AND chunk_index >= ? AND status = 'active'
-        ORDER BY chunk_index DESC
-        LIMIT ?
-      `).all(docId, chunkIndex, chunkIndex - windowBefore, windowBefore);
-
-      result.before = beforeRows.reverse(); // Restore order
+      result.before = ChunkRepo.getNeighborsBefore(docId, chunkIndex, windowBefore);
     }
-
-    // Get chunks after
     if (windowAfter > 0) {
-      const afterRows = db.prepare(`
-        SELECT id, content_clean, chunk_index
-        FROM chunks
-        WHERE document_id = ? AND chunk_index > ? AND chunk_index <= ? AND status = 'active'
-        ORDER BY chunk_index ASC
-        LIMIT ?
-      `).all(docId, chunkIndex, chunkIndex + windowAfter, windowAfter);
-
-      result.after = afterRows;
+      result.after = ChunkRepo.getNeighborsAfter(docId, chunkIndex, windowAfter);
     }
   } catch (error) {
     console.error('Error getting neighbor chunks:', error.message);

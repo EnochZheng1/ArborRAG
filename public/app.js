@@ -26,7 +26,11 @@ function initWebSocket() {
   _ws.addEventListener('message', (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'job_progress') _handleJobProgress(msg);
+      if (msg.type === 'job_progress') {
+        // Ignore progress events for other datasets (user may have switched while job ran)
+        if (msg.datasetId && msg.datasetId !== currentDatasetId) return;
+        _handleJobProgress(msg);
+      }
     } catch { /* ignore */ }
   });
 

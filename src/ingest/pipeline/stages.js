@@ -14,7 +14,8 @@
  *   → (stageFinalize)     [results.success = true]
  */
 
-import { db, logAudit, safeJson } from "../../db/db.js";
+import { logAudit, runTransaction } from "../../db/db.js";
+import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
 import { parseFile, isSupportedFileType } from "../fileParser.js";
 import { chunkText, getChunkStats } from "../chunker.js";
 import { extractKeywords, extractMetadataWithLLM, extractScope, detectChunkType, detectAuthorityLevel } from "../metadataExtractor.js";
@@ -35,39 +36,26 @@ function calculateFileHash(filePath) {
 
 function registerDocument(fileInfo) {
   const { filename, originalName, fileType, fileSize, fileHash, metadata = {} } = fileInfo;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const existing = db.prepare(`
-      SELECT id FROM documents
-      WHERE file_hash = ? AND status NOT IN ('deleted', 'failed')
-    `).get(fileHash);
+  return runTransaction(() => {
+    const existing = DocumentRepo.findByHash(fileHash);
+    if (existing) return { id: existing.id, duplicate: true };
 
-    if (existing) {
-      db.exec("COMMIT");
-      return { id: existing.id, duplicate: true };
-    }
-
-    const result = db.prepare(`
-      INSERT INTO documents (filename, original_name, file_type, file_size, file_hash, metadata_json, status, uploaded_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
-    `).run(filename, originalName, fileType, fileSize, fileHash, JSON.stringify(metadata));
+    const result = DocumentRepo.insert({
+      filename,
+      originalName,
+      fileType,
+      fileSize,
+      fileHash,
+      metadataJson: JSON.stringify(metadata)
+    });
 
     logAudit("create", "documents", result.lastInsertRowid, null, { filename, originalName });
-    db.exec("COMMIT");
     return { id: Number(result.lastInsertRowid), duplicate: false };
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+  });
 }
 
 function updateDocumentStatus(docId, status, chunkCount = null) {
-  const updates = ["status = ?"];
-  const params = [status];
-  if (status === "processed") updates.push("processed_at = datetime('now')");
-  if (chunkCount !== null) { updates.push("chunk_count = ?"); params.push(chunkCount); }
-  params.push(docId);
-  db.prepare(`UPDATE documents SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+  DocumentRepo.updateStatus(docId, status, chunkCount);
 }
 
 // ── Stage 1: Validate and parse the source file ───────────────────────────────

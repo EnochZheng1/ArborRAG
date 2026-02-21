@@ -3,7 +3,8 @@
  * Maintains an in-memory cache of node aliases for fast lookup.
  */
 
-import { db, safeJson } from "../../db/db.js";
+import { safeJson } from "../../db/db.js";
+import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { extractSearchTerms } from "./utils.js";
 
@@ -21,9 +22,7 @@ function refreshAliasCache(force = false) {
   const now = Date.now();
   if (!force && aliasCache.loadedAt && now - aliasCache.loadedAt < ALIAS_CACHE_TTL_MS) return;
 
-  const meta = db.prepare(
-    "SELECT COUNT(*) as count, MAX(updated_at) as max_updated_at FROM nodes"
-  ).get();
+  const meta = NodeRepo.getCountAndMaxUpdatedAt();
 
   if (!force &&
       aliasCache.nodeCount === meta.count &&
@@ -33,11 +32,7 @@ function refreshAliasCache(force = false) {
     return;
   }
 
-  const rows = db.prepare(`
-    SELECT node_id, name, parent_id, level, node_summary, aliases_json, scope_json
-    FROM nodes
-    WHERE aliases_json IS NOT NULL AND aliases_json != '[]' AND aliases_json != 'null'
-  `).all();
+  const rows = NodeRepo.getAllWithAliases();
 
   const entries = [];
   const exactMap = new Map();

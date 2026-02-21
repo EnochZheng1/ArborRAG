@@ -1,4 +1,7 @@
-import { db, safeJson, runTransaction } from "../db/db.js";
+import { safeJson, runTransaction } from "../db/db.js";
+import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { cosineSimilarity, getEmbeddingModel } from "./embedder.js";
 
 /**
@@ -14,25 +17,15 @@ import { cosineSimilarity, getEmbeddingModel } from "./embedder.js";
  */
 export function storeEmbedding(refType, refId, embedding) {
   const model = getEmbeddingModel();
+  const embeddingJson = JSON.stringify(embedding);
 
-  // Upsert embedding
-  const existing = db.prepare(`
-    SELECT id FROM embeddings WHERE ref_type = ? AND ref_id = ?
-  `).get(refType, String(refId));
-
+  const existing = EmbeddingRepo.findByRef(refType, refId);
   if (existing) {
-    db.prepare(`
-      UPDATE embeddings SET embedding_json = ?, model = ?, created_at = datetime('now')
-      WHERE id = ?
-    `).run(JSON.stringify(embedding), model, existing.id);
+    EmbeddingRepo.update(existing.id, embeddingJson, model);
     return existing.id;
   }
 
-  const result = db.prepare(`
-    INSERT INTO embeddings (ref_type, ref_id, embedding_json, model, created_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
-  `).run(refType, String(refId), JSON.stringify(embedding), model);
-
+  const result = EmbeddingRepo.insert({ refType, refId, embeddingJson, model });
   return Number(result.lastInsertRowid);
 }
 
@@ -59,10 +52,7 @@ export function storeEmbeddingBatch(items) {
  * @returns {number[]|null} Embedding vector or null
  */
 export function getEmbedding(refType, refId) {
-  const row = db.prepare(`
-    SELECT embedding_json FROM embeddings WHERE ref_type = ? AND ref_id = ?
-  `).get(refType, String(refId));
-
+  const row = EmbeddingRepo.getJson(refType, refId);
   return row ? safeJson(row.embedding_json, null) : null;
 }
 
@@ -72,11 +62,7 @@ export function getEmbedding(refType, refId) {
  * @returns {Array<{refId: string, embedding: number[]}>}
  */
 export function getAllEmbeddings(refType) {
-  const rows = db.prepare(`
-    SELECT ref_id, embedding_json FROM embeddings WHERE ref_type = ?
-  `).all(refType);
-
-  return rows.map(r => ({
+  return EmbeddingRepo.getAllJson(refType).map(r => ({
     refId: r.ref_id,
     embedding: safeJson(r.embedding_json, [])
   }));
@@ -89,11 +75,7 @@ export function getAllEmbeddings(refType) {
  * @returns {boolean} Whether deletion occurred
  */
 export function deleteEmbedding(refType, refId) {
-  const result = db.prepare(`
-    DELETE FROM embeddings WHERE ref_type = ? AND ref_id = ?
-  `).run(refType, String(refId));
-
-  return result.changes > 0;
+  return EmbeddingRepo.deleteByRef(refType, refId).changes > 0;
 }
 
 /**
@@ -138,11 +120,7 @@ export function searchNodesBySimilarity(queryVector, topK = 10, threshold = 0.5)
   if (results.length === 0) return [];
 
   const nodeIds = results.map(r => r.refId);
-  const placeholders = nodeIds.map(() => "?").join(",");
-
-  const nodes = db.prepare(`
-    SELECT * FROM nodes WHERE node_id IN (${placeholders})
-  `).all(...nodeIds);
+  const nodes = EmbeddingRepo.getNodesByIds(nodeIds);
 
   const nodeMap = new Map(nodes.map(n => [n.node_id, n]));
 
@@ -173,11 +151,7 @@ export function searchChunksBySimilarity(queryVector, topK = 10, threshold = 0.5
   if (results.length === 0) return [];
 
   const chunkIds = results.map(r => parseInt(r.refId));
-  const placeholders = chunkIds.map(() => "?").join(",");
-
-  const chunks = db.prepare(`
-    SELECT * FROM chunks WHERE id IN (${placeholders}) AND status = 'active'
-  `).all(...chunkIds);
+  const chunks = ChunkRepo.getByIds(chunkIds);
 
   const chunkMap = new Map(chunks.map(c => [c.id, c]));
 
@@ -199,17 +173,9 @@ export function searchChunksBySimilarity(queryVector, topK = 10, threshold = 0.5
  * @returns {object} Statistics
  */
 export function getEmbeddingStats() {
-  const stats = db.prepare(`
-    SELECT ref_type, COUNT(*) as count
-    FROM embeddings
-    GROUP BY ref_type
-  `).all();
-
-  const total = db.prepare(`SELECT COUNT(*) as total FROM embeddings`).get();
-
   return {
-    total: total.total,
-    by_type: stats.reduce((acc, s) => ({ ...acc, [s.ref_type]: s.count }), {})
+    total: EmbeddingRepo.getTotal(),
+    by_type: EmbeddingRepo.getStatsByType().reduce((acc, s) => ({ ...acc, [s.ref_type]: s.count }), {})
   };
 }
 
@@ -220,11 +186,7 @@ export function getEmbeddingStats() {
  * @returns {boolean}
  */
 export function hasEmbedding(refType, refId) {
-  const row = db.prepare(`
-    SELECT 1 FROM embeddings WHERE ref_type = ? AND ref_id = ? LIMIT 1
-  `).get(refType, String(refId));
-
-  return !!row;
+  return EmbeddingRepo.existsByRef(refType, refId);
 }
 
 /**
@@ -234,29 +196,7 @@ export function hasEmbedding(refType, refId) {
  * @returns {Array<{refId: string, text: string}>}
  */
 export function getPendingEmbeddings(refType, limit = 100) {
-  if (refType === "node") {
-    const rows = db.prepare(`
-      SELECT n.node_id as ref_id, n.name || ' ' || COALESCE(n.node_summary, '') as text
-      FROM nodes n
-      LEFT JOIN embeddings e ON e.ref_type = 'node' AND e.ref_id = n.node_id
-      WHERE e.id IS NULL
-      LIMIT ?
-    `).all(limit);
-
-    return rows;
-  }
-
-  if (refType === "chunk") {
-    const rows = db.prepare(`
-      SELECT c.id as ref_id, c.content_clean as text
-      FROM chunks c
-      LEFT JOIN embeddings e ON e.ref_type = 'chunk' AND e.ref_id = CAST(c.id AS TEXT)
-      WHERE e.id IS NULL AND c.status = 'active'
-      LIMIT ?
-    `).all(limit);
-
-    return rows.map(r => ({ refId: String(r.ref_id), text: r.text }));
-  }
-
+  if (refType === "node") return EmbeddingRepo.getPendingNodes(limit);
+  if (refType === "chunk") return EmbeddingRepo.getPendingChunks(limit);
   return [];
 }

@@ -9,7 +9,9 @@
  * 5. Adaptive depth: Go deeper in relevant branches, prune irrelevant ones
  */
 
-import { db, safeJson } from "../db/db.js";
+import { safeJson } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { queryLogger as logger } from "../utils/logger.js";
 import {
   getNode, getChildren, getAncestors, getSiblings, getDescendants,
@@ -187,9 +189,7 @@ function scoreNodeRelevance(node, query, queryTerms) {
  * Get all root nodes
  */
 function getRootNodes() {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE parent_id IS NULL ORDER BY name
-  `).all();
+  const rows = NodeRepo.findRoots();
 
   return rows.map(r => ({
     node_id: r.node_id,
@@ -208,14 +208,7 @@ function getRootNodes() {
 function getNodeChunks(nodeId, query, limit = 10) {
   const queryTerms = extractQueryTerms(query);
 
-  const rows = db.prepare(`
-    SELECT c.*, n.name as node_name, n.level as node_level
-    FROM chunks c
-    JOIN nodes n ON c.node_id = n.node_id
-    WHERE c.node_id = ? AND c.status = 'active'
-    ORDER BY c.authority_level ASC, c.uploaded_at DESC
-    LIMIT ?
-  `).all(nodeId, limit * 2); // Get more, then filter by relevance
+  const rows = ChunkRepo.getForNodeFull(nodeId, limit * 2); // Get more, then filter by relevance
 
   const chunks = rows.map(r => {
     const content = r.content_clean || '';
@@ -383,14 +376,7 @@ export function enrichWithAncestorContext(chunks, options = {}) {
       const ancestor = ancestors[i];
 
       // Get ancestor's chunks
-      const ancestorChunks = db.prepare(`
-        SELECT c.*, n.name as node_name
-        FROM chunks c
-        JOIN nodes n ON c.node_id = n.node_id
-        WHERE c.node_id = ? AND c.status = 'active'
-        ORDER BY c.authority_level ASC
-        LIMIT ?
-      `).all(ancestor.node_id, ancestorChunksPerLevel);
+      const ancestorChunks = ChunkRepo.getForNodeFull(ancestor.node_id, ancestorChunksPerLevel);
 
       for (const ac of ancestorChunks) {
         if (!seenChunkIds.has(ac.id)) {

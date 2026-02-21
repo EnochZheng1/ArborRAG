@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { db, safeJson } from "../db/db.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getNode, getRelatedNodes, getPathToNode, getChildren, getAncestors } from "../kg/graphTraversal.js";
 import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
 
@@ -13,13 +13,7 @@ import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
  * Get chunks for a node
  */
 function getChunksForNode(nodeId, limit = 10) {
-  const rows = db.prepare(`
-    SELECT id, doc_title, content_clean, chunk_type, authority_level
-    FROM chunks
-    WHERE node_id = ? AND status = 'active'
-    ORDER BY authority_level ASC, uploaded_at DESC
-    LIMIT ?
-  `).all(nodeId, limit);
+  const rows = ChunkRepo.getForNodeLimited(nodeId, limit);
 
   return rows.map(r => ({
     id: r.id,

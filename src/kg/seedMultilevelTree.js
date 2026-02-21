@@ -1,10 +1,9 @@
-import { db, initDb } from "../db/db.js";
+import { initDb, runTransaction } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
 
 initDb();
 
-const hasRoot = Boolean(
-  db.prepare("SELECT 1 FROM nodes WHERE node_id = ?").get("root")
-);
+const hasRoot = NodeRepo.existsById("root");
 
 const parentForDemoRoot = hasRoot ? "root" : null;
 
@@ -132,62 +131,39 @@ const demoNodes = [
   }
 ];
 
-const upsertNode = db.prepare(`
-  INSERT INTO nodes (node_id, name, parent_id, level, node_summary, updated_at)
-  VALUES (?, ?, ?, ?, ?, datetime('now'))
-  ON CONFLICT(node_id) DO UPDATE SET
-    name = excluded.name,
-    parent_id = excluded.parent_id,
-    level = excluded.level,
-    node_summary = excluded.node_summary,
-    updated_at = datetime('now')
-`);
-
-const insertFts = db.prepare(`
-  INSERT INTO nodes_fts (node_id, text)
-  VALUES (?, ?)
-`);
-
-const deleteFtsForNode = db.prepare("DELETE FROM nodes_fts WHERE node_id = ?");
-const getNodeLevel = db.prepare("SELECT level FROM nodes WHERE node_id = ?");
-const getExistingNode = db.prepare("SELECT node_id FROM nodes WHERE node_id = ?");
-
-const seedTransaction = db.transaction((nodes) => {
-  let inserted = 0;
-  let updated = 0;
-
-  for (const n of nodes) {
-    let level = 1;
-    if (!n.parent_id) {
-      level = 0;
-    } else {
-      const parent = getNodeLevel.get(n.parent_id);
-      if (!parent) {
-        throw new Error(`Parent node not found: ${n.parent_id} for node ${n.node_id}`);
-      }
-      level = (Number(parent.level) || 0) + 1;
-    }
-
-    const existing = getExistingNode.get(n.node_id);
-    upsertNode.run(n.node_id, n.name, n.parent_id, level, n.summary);
-    if (existing) {
-      updated += 1;
-    } else {
-      inserted += 1;
-    }
-
-    deleteFtsForNode.run(n.node_id);
-    insertFts.run(n.node_id, `${n.name} ${n.summary}`);
-  }
-
-  return { inserted, updated };
-});
-
 try {
-  const result = seedTransaction(demoNodes);
-  const totalDemo = db
-    .prepare("SELECT COUNT(*) as count FROM nodes WHERE node_id LIKE 'demo.%'")
-    .get().count;
+  const result = runTransaction(() => {
+    let inserted = 0;
+    let updated = 0;
+
+    for (const n of demoNodes) {
+      let level = 1;
+      if (!n.parent_id) {
+        level = 0;
+      } else {
+        const parentLevel = NodeRepo.getLevel(n.parent_id);
+        if (parentLevel === null) {
+          throw new Error(`Parent node not found: ${n.parent_id} for node ${n.node_id}`);
+        }
+        level = (Number(parentLevel) || 0) + 1;
+      }
+
+      const existing = NodeRepo.existsById(n.node_id);
+      NodeRepo.upsert({ node_id: n.node_id, name: n.name, parent_id: n.parent_id, level, summary: n.summary });
+      if (existing) {
+        updated += 1;
+      } else {
+        inserted += 1;
+      }
+
+      NodeRepo.deleteFtsForNode(n.node_id);
+      NodeRepo.insertFtsText(n.node_id, `${n.name} ${n.summary}`);
+    }
+
+    return { inserted, updated };
+  });
+
+  const totalDemo = NodeRepo.countByPrefix("demo.");
 
   console.log(
     `Seeded multilevel demo tree. Inserted: ${result.inserted}, Updated: ${result.updated}, Demo nodes total: ${totalDemo}`

@@ -1,4 +1,5 @@
-import { db, safeJson, logAudit, runTransaction } from "../db/db.js";
+import { safeJson, logAudit, runTransaction } from "../db/db.js";
+import { ConflictRepo } from "../db/repositories/ConflictRepo.js";
 import { GoogleGenAI } from "@google/genai";
 import { detectLanguage, getPrompt } from "../utils/langDetect.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
@@ -158,24 +159,10 @@ export async function detectConflictWithLLM(chunkA, chunkB) {
 export async function checkChunkConflicts(chunkId, nodeId, options = {}) {
   const { useLLM = true, maxComparisons = 20 } = options;
 
-  // Get the new chunk
-  const newChunk = db.prepare(`
-    SELECT id, doc_title, content_clean as content, authority_level, uploaded_at
-    FROM chunks WHERE id = ?
-  `).get(chunkId);
+  const newChunk = ConflictRepo.getChunkForConflict(chunkId);
+  if (!newChunk) throw new Error(`Chunk not found: ${chunkId}`);
 
-  if (!newChunk) {
-    throw new Error(`Chunk not found: ${chunkId}`);
-  }
-
-  // Get existing active chunks in the same node
-  const existingChunks = db.prepare(`
-    SELECT id, doc_title, content_clean as content, authority_level, uploaded_at
-    FROM chunks
-    WHERE node_id = ? AND id != ? AND status = 'active'
-    ORDER BY uploaded_at DESC
-    LIMIT ?
-  `).all(nodeId, chunkId, maxComparisons);
+  const existingChunks = ConflictRepo.getExistingChunks(nodeId, chunkId, maxComparisons);
 
   const conflicts = [];
 
@@ -216,32 +203,21 @@ export function recordConflict(conflictData) {
   } = conflictData;
 
   return runTransaction(() => {
-    // Check if conflict already exists
-    const existing = db.prepare(`
-      SELECT id FROM conflicts
-      WHERE node_id = ? AND chunk_a_id = ? AND chunk_b_id = ? AND resolution = 'human_review'
-    `).get(node_id, chunk_a_id, chunk_b_id);
+    const existing = ConflictRepo.findExisting(node_id, chunk_a_id, chunk_b_id);
+    if (existing) return existing.id;
 
-    if (existing) {
-      return existing.id;
-    }
-
-    // Insert conflict
-    const result = db.prepare(`
-      INSERT INTO conflicts (node_id, chunk_a_id, chunk_b_id, conflict_type, reason_json, resolution, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(node_id, chunk_a_id, chunk_b_id, conflict_type, JSON.stringify(details), resolution);
+    const result = ConflictRepo.insert({
+      nodeId: node_id,
+      chunkAId: chunk_a_id,
+      chunkBId: chunk_b_id,
+      conflictType: conflict_type,
+      reasonJson: JSON.stringify(details),
+      resolution
+    });
 
     const conflictId = result.lastInsertRowid;
-
-    // Update node's conflict score
-    db.prepare(`
-      UPDATE nodes SET conflict_score = conflict_score + 1 WHERE node_id = ?
-    `).run(node_id);
-
-    // Log audit
+    ConflictRepo.incrementNodeScore(node_id);
     logAudit("create", "conflicts", conflictId, null, conflictData);
-
     return Number(conflictId);
   });
 }
@@ -279,27 +255,7 @@ export async function processNewChunkConflicts(chunkId, nodeId) {
  * @returns {Array} Unresolved conflicts
  */
 export function getUnresolvedConflicts(nodeId = null) {
-  let query = `
-    SELECT c.*,
-           ca.content_clean as chunk_a_content, ca.doc_title as chunk_a_title,
-           cb.content_clean as chunk_b_content, cb.doc_title as chunk_b_title,
-           n.name as node_name
-    FROM conflicts c
-    JOIN chunks ca ON c.chunk_a_id = ca.id
-    JOIN chunks cb ON c.chunk_b_id = cb.id
-    JOIN nodes n ON c.node_id = n.node_id
-    WHERE c.resolution = 'human_review'
-  `;
-
-  const params = [];
-  if (nodeId) {
-    query += " AND c.node_id = ?";
-    params.push(nodeId);
-  }
-
-  query += " ORDER BY c.created_at DESC";
-
-  const rows = db.prepare(query).all(...params);
+  const rows = ConflictRepo.getUnresolved(nodeId);
 
   return rows.map(r => ({
     id: r.id,
@@ -332,29 +288,16 @@ export function resolveConflict(conflictId, resolution, options = {}) {
   const { keepChunkId = null, archiveChunkId = null, notes = "" } = options;
 
   return runTransaction(() => {
-    // Get conflict
-    const conflict = db.prepare("SELECT * FROM conflicts WHERE id = ?").get(conflictId);
-    if (!conflict) {
-      throw new Error(`Conflict not found: ${conflictId}`);
-    }
+    const conflict = ConflictRepo.findById(conflictId);
+    if (!conflict) throw new Error(`Conflict not found: ${conflictId}`);
 
-    // Update conflict record
-    db.prepare(`
-      UPDATE conflicts SET resolution = ?, resolved_at = datetime('now')
-      WHERE id = ?
-    `).run(`${resolution}: ${notes}`, conflictId);
+    ConflictRepo.resolve(conflictId, `${resolution}: ${notes}`);
 
-    // Archive the non-preferred chunk if specified
     if (archiveChunkId) {
-      db.prepare(`
-        UPDATE chunks SET status = 'archived' WHERE id = ?
-      `).run(archiveChunkId);
+      ConflictRepo.archiveChunk(archiveChunkId);
     }
 
-    // Decrease node's conflict score
-    db.prepare(`
-      UPDATE nodes SET conflict_score = MAX(0, conflict_score - 1) WHERE node_id = ?
-    `).run(conflict.node_id);
+    ConflictRepo.decrementNodeScore(conflict.node_id);
 
     // Log audit
     logAudit("update", "conflicts", conflictId, { resolution: "human_review" }, {
@@ -372,36 +315,12 @@ export function resolveConflict(conflictId, resolution, options = {}) {
  * @returns {object} Statistics
  */
 export function getConflictStats() {
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as total,
-      SUM(CASE WHEN resolution = 'human_review' THEN 1 ELSE 0 END) as unresolved,
-      SUM(CASE WHEN resolution != 'human_review' THEN 1 ELSE 0 END) as resolved
-    FROM conflicts
-  `).get();
-
-  const byType = db.prepare(`
-    SELECT conflict_type, COUNT(*) as count
-    FROM conflicts
-    WHERE resolution = 'human_review'
-    GROUP BY conflict_type
-  `).all();
-
-  const byNode = db.prepare(`
-    SELECT n.node_id, n.name, COUNT(c.id) as conflict_count
-    FROM conflicts c
-    JOIN nodes n ON c.node_id = n.node_id
-    WHERE c.resolution = 'human_review'
-    GROUP BY n.node_id
-    ORDER BY conflict_count DESC
-    LIMIT 10
-  `).all();
-
+  const stats = ConflictRepo.getStats();
   return {
     total: stats.total,
     unresolved: stats.unresolved,
     resolved: stats.resolved,
-    by_type: byType,
-    top_conflict_nodes: byNode
+    by_type: ConflictRepo.getByType(),
+    top_conflict_nodes: ConflictRepo.getByNode(10)
   };
 }

@@ -1,4 +1,5 @@
-import { db, safeJson } from "../db/db.js";
+import { safeJson } from "../db/db.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { hybridRecallNodes, hybridRecallChunks, searchNodesByName, getNodesByIds, hierarchicalRecallNodes, searchByAliases } from "../kg/recallNodes.js";
 
 /**
@@ -69,14 +70,7 @@ export async function retrieveByEntityNames(entityNames, options = {}) {
  * Get chunks for a specific node
  */
 function getChunksForNode(nodeId, limit = 10) {
-  const rows = db.prepare(`
-    SELECT id, doc_title, content_clean, chunk_type, keywords_json,
-           authority_level, uploaded_at
-    FROM chunks
-    WHERE node_id = ? AND status = 'active'
-    ORDER BY authority_level ASC, uploaded_at DESC
-    LIMIT ?
-  `).all(nodeId, limit);
+  const rows = ChunkRepo.getForNodeLimited(nodeId, limit);
 
   return rows.map(r => ({
     id: r.id,

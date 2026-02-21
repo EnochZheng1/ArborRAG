@@ -222,6 +222,20 @@ function initTokenTrackingTable(conn) {
   `);
 }
 
+function initQueryHistoryTable(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS query_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      query_type TEXT,
+      result_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_query_history_query ON query_history(query);
+    CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at);
+  `);
+}
+
 function initFeedbackTables(conn) {
   conn.exec(`
     CREATE TABLE IF NOT EXISTS feedback (
@@ -272,4 +286,5 @@ export function initDatasetDb(connection) {
   initEntityFactTables(connection);
   initTokenTrackingTable(connection);
   initFeedbackTables(connection);
+  initQueryHistoryTable(connection);
 }

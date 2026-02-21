@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
-import { db, safeJson } from "../db/db.js";
+import { safeJson } from "../db/db.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
 import { generateSnippet, generateSnippetsForChunks, extractKeySentences } from "../utils/snippetGenerator.js";
 import { rankNodes, decideNode } from "./nodeScoring.js";
@@ -127,13 +128,7 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
 
 // Get chunks for a node
 function getChunksForNode(nodeId) {
-  const rows = db.prepare(`
-    SELECT id, doc_title, content_clean, chunk_type, keywords_json,
-           fields_json, scope_json, authority_level, uploaded_at
-    FROM chunks
-    WHERE node_id = ? AND status = 'active'
-    ORDER BY authority_level ASC, uploaded_at DESC
-  `).all(nodeId);
+  const rows = ChunkRepo.getForNode(nodeId);
 
   return rows.map(r => ({
     id: r.id,

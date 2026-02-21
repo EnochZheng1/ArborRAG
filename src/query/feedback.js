@@ -1,4 +1,4 @@
-import { db, safeJson } from "../db/db.js";
+import { FeedbackRepo } from "../db/repositories/FeedbackRepo.js";
 
 /**
  * Feedback Loop Module
@@ -31,22 +31,16 @@ export function recordFeedback(feedbackData) {
   try {
     const normalizedRating = normalizeRating(rating);
 
-    const result = db.prepare(`
-      INSERT INTO feedback (
-        query, query_type, answer_preview, rating, comment,
-        node_ids_json, chunk_ids_json, session_id, created_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(
+    const result = FeedbackRepo.insert({
       query,
-      queryType || 'unknown',
-      answer ? answer.slice(0, 500) : null,
-      normalizedRating,
-      comment || null,
-      JSON.stringify(nodeIds),
-      JSON.stringify(chunkIds),
-      sessionId || null
-    );
+      queryType: queryType || 'unknown',
+      answerPreview: answer ? answer.slice(0, 500) : null,
+      rating: normalizedRating,
+      comment: comment || null,
+      nodeIdsJson: JSON.stringify(nodeIds),
+      chunkIdsJson: JSON.stringify(chunkIds),
+      sessionId: sessionId || null
+    });
 
     // Update chunk quality scores based on feedback
     if (chunkIds.length > 0) {
@@ -87,12 +81,7 @@ function updateChunkQualityScores(chunkIds, rating) {
     const adjustment = (rating - 3) * 0.1; // -0.2 to +0.2
 
     for (const chunkId of chunkIds) {
-      db.prepare(`
-        UPDATE chunks
-        SET feedback_score = COALESCE(feedback_score, 0) + ?,
-            feedback_count = COALESCE(feedback_count, 0) + 1
-        WHERE id = ?
-      `).run(adjustment, chunkId);
+      FeedbackRepo.updateChunkScore(chunkId, adjustment);
     }
   } catch (error) {
     // Non-critical, log and continue
@@ -104,26 +93,13 @@ function updateChunkQualityScores(chunkIds, rating) {
  * Update node relevance tracking
  */
 function updateNodeRelevanceTracking(nodeIds, query, rating) {
-  try {
-    for (const nodeId of nodeIds) {
-      db.prepare(`
-        INSERT INTO node_query_relevance (node_id, query_pattern, positive_count, negative_count, last_feedback)
-        VALUES (?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(node_id, query_pattern) DO UPDATE SET
-          positive_count = positive_count + ?,
-          negative_count = negative_count + ?,
-          last_feedback = datetime('now')
-      `).run(
-        nodeId,
-        extractQueryPattern(query),
-        rating >= 4 ? 1 : 0,
-        rating <= 2 ? 1 : 0,
-        rating >= 4 ? 1 : 0,
-        rating <= 2 ? 1 : 0
-      );
-    }
-  } catch (error) {
-    // Non-critical
+  if (rating === 3) return; // neutral — no meaningful update
+  const isPositive = rating >= 4;
+  const queryPattern = extractQueryPattern(query);
+  for (const nodeId of nodeIds) {
+    try {
+      FeedbackRepo.upsertNodeRelevance({ nodeId, queryPattern, isPositive });
+    } catch (_) { }
   }
 }
 
@@ -150,48 +126,18 @@ export function getFeedbackStats(filters = {}) {
   const { days = 30, queryType } = filters;
 
   try {
-    let whereClause = `created_at > datetime('now', '-${days} days')`;
-    if (queryType) {
-      whereClause += ` AND query_type = '${queryType}'`;
-    }
-
-    const stats = db.prepare(`
-      SELECT
-        COUNT(*) as total_feedback,
-        AVG(rating) as avg_rating,
-        SUM(CASE WHEN rating >= 4 THEN 1 ELSE 0 END) as positive_count,
-        SUM(CASE WHEN rating <= 2 THEN 1 ELSE 0 END) as negative_count,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) as neutral_count
-      FROM feedback
-      WHERE ${whereClause}
-    `).get();
-
-    const byType = db.prepare(`
-      SELECT query_type, COUNT(*) as count, AVG(rating) as avg_rating
-      FROM feedback
-      WHERE ${whereClause}
-      GROUP BY query_type
-      ORDER BY count DESC
-    `).all();
-
-    const recentNegative = db.prepare(`
-      SELECT query, rating, comment, created_at
-      FROM feedback
-      WHERE ${whereClause} AND rating <= 2
-      ORDER BY created_at DESC
-      LIMIT 10
-    `).all();
+    const { overview, byType, recentNegative } = FeedbackRepo.getStats({ days, queryType });
 
     return {
       overview: {
-        total: stats.total_feedback || 0,
-        average_rating: Math.round((stats.avg_rating || 0) * 100) / 100,
-        positive_rate: stats.total_feedback > 0
-          ? Math.round((stats.positive_count / stats.total_feedback) * 100)
+        total: overview.total_feedback || 0,
+        average_rating: Math.round((overview.avg_rating || 0) * 100) / 100,
+        positive_rate: overview.total_feedback > 0
+          ? Math.round((overview.positive_count / overview.total_feedback) * 100)
           : 0,
-        positive: stats.positive_count || 0,
-        negative: stats.negative_count || 0,
-        neutral: stats.neutral_count || 0
+        positive: overview.positive_count || 0,
+        negative: overview.negative_count || 0,
+        neutral: overview.neutral_count || 0
       },
       by_type: byType,
       recent_negative: recentNegative
@@ -209,20 +155,8 @@ export function getFeedbackStats(filters = {}) {
  */
 export function getPoorlyPerformingQueries(limit = 20) {
   try {
-    return db.prepare(`
-      SELECT
-        query,
-        COUNT(*) as feedback_count,
-        AVG(rating) as avg_rating,
-        GROUP_CONCAT(DISTINCT query_type) as query_types
-      FROM feedback
-      WHERE created_at > datetime('now', '-30 days')
-      GROUP BY query
-      HAVING AVG(rating) < 3 AND COUNT(*) >= 2
-      ORDER BY AVG(rating) ASC, COUNT(*) DESC
-      LIMIT ?
-    `).all(limit);
-  } catch (error) {
+    return FeedbackRepo.getPoorlyPerforming(limit);
+  } catch (_) {
     return [];
   }
 }
@@ -234,22 +168,8 @@ export function getPoorlyPerformingQueries(limit = 20) {
  */
 export function getChunksNeedingReview(limit = 20) {
   try {
-    return db.prepare(`
-      SELECT
-        c.id,
-        c.doc_title,
-        c.content_clean,
-        c.feedback_score,
-        c.feedback_count,
-        c.node_id,
-        n.name as node_name
-      FROM chunks c
-      LEFT JOIN nodes n ON c.node_id = n.node_id
-      WHERE c.feedback_score < -0.3 AND c.feedback_count >= 2
-      ORDER BY c.feedback_score ASC
-      LIMIT ?
-    `).all(limit);
-  } catch (error) {
+    return FeedbackRepo.getChunksNeedingReview(limit);
+  } catch (_) {
     return [];
   }
 }
@@ -285,12 +205,7 @@ export function applyFeedbackBoost(chunks) {
 export function checkKnownIssues(query, nodeId) {
   try {
     const pattern = extractQueryPattern(query);
-
-    const relevance = db.prepare(`
-      SELECT positive_count, negative_count
-      FROM node_query_relevance
-      WHERE node_id = ? AND query_pattern = ?
-    `).get(nodeId, pattern);
+    const relevance = FeedbackRepo.getNodeRelevance(nodeId, pattern);
 
     if (!relevance) return null;
 
@@ -308,7 +223,7 @@ export function checkKnownIssues(query, nodeId) {
     }
 
     return null;
-  } catch (error) {
+  } catch (_) {
     return null;
   }
 }
@@ -317,50 +232,7 @@ export function checkKnownIssues(query, nodeId) {
  * Initialize feedback tables
  */
 export function initFeedbackTables() {
-  try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS feedback (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT NOT NULL,
-        query_type TEXT,
-        answer_preview TEXT,
-        rating INTEGER NOT NULL,
-        comment TEXT,
-        node_ids_json TEXT,
-        chunk_ids_json TEXT,
-        session_id TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_feedback_query ON feedback(query);
-      CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback(rating);
-      CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
-
-      CREATE TABLE IF NOT EXISTS node_query_relevance (
-        node_id TEXT NOT NULL,
-        query_pattern TEXT NOT NULL,
-        positive_count INTEGER DEFAULT 0,
-        negative_count INTEGER DEFAULT 0,
-        last_feedback TEXT,
-        PRIMARY KEY (node_id, query_pattern)
-      );
-
-      -- Add feedback columns to chunks if not exist
-      -- SQLite doesn't support IF NOT EXISTS for columns, so we handle errors
-    `);
-
-    // Try to add feedback columns to chunks
-    try {
-      db.exec(`ALTER TABLE chunks ADD COLUMN feedback_score REAL DEFAULT 0`);
-    } catch (e) { /* Column might already exist */ }
-
-    try {
-      db.exec(`ALTER TABLE chunks ADD COLUMN feedback_count INTEGER DEFAULT 0`);
-    } catch (e) { /* Column might already exist */ }
-
-  } catch (error) {
-    console.error('Error initializing feedback tables:', error.message);
-  }
+  // Tables are initialized by initDatasetDb() for each dataset connection.
 }
 
 // Note: initFeedbackTables() is called by initDatasetDb() for each dataset connection.

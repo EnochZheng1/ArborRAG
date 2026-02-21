@@ -4,30 +4,12 @@
  * Tracks token consumption across all LLM API calls.
  */
 
-import { db } from "../db/db.js";
-
-// Initialize token tracking table
-export function initTokenTrackingTable() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS token_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      timestamp TEXT DEFAULT (datetime('now')),
-      model TEXT NOT NULL,
-      operation TEXT NOT NULL,
-      input_tokens INTEGER DEFAULT 0,
-      output_tokens INTEGER DEFAULT 0,
-      total_tokens INTEGER DEFAULT 0,
-      cached_tokens INTEGER DEFAULT 0,
-      cost_estimate REAL DEFAULT 0,
-      metadata_json TEXT DEFAULT '{}'
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_token_usage_operation ON token_usage(operation);
-  `);
-}
+import { TokenRepo } from "../db/repositories/TokenRepo.js";
 
 // Note: initTokenTrackingTable() is called by initDatasetDb() for each dataset connection.
+export function initTokenTrackingTable() {
+  // Table is initialized by initDatasetDb() for each dataset connection.
+}
 
 /**
  * Record token usage from an API response
@@ -50,19 +32,7 @@ export function recordTokenUsage(response, operation, metadata = {}) {
     // Estimate cost (approximate pricing)
     const costEstimate = estimateCost(model, inputTokens, outputTokens, cachedTokens);
 
-    db.prepare(`
-      INSERT INTO token_usage (model, operation, input_tokens, output_tokens, total_tokens, cached_tokens, cost_estimate, metadata_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      model,
-      operation,
-      inputTokens,
-      outputTokens,
-      totalTokens,
-      cachedTokens,
-      costEstimate,
-      JSON.stringify(metadata)
-    );
+    TokenRepo.record({ model, operation, inputTokens, outputTokens, totalTokens, cachedTokens, costEstimate, metadata });
 
     return {
       input_tokens: inputTokens,
@@ -107,91 +77,7 @@ function estimateCost(model, inputTokens, outputTokens, cachedTokens = 0) {
  */
 export function getTokenStats(options = {}) {
   const { since, operation, model } = options;
-
-  let whereClause = '1=1';
-  const params = [];
-
-  if (since) {
-    whereClause += ' AND timestamp >= ?';
-    params.push(since);
-  }
-  if (operation) {
-    whereClause += ' AND operation = ?';
-    params.push(operation);
-  }
-  if (model) {
-    whereClause += ' AND model = ?';
-    params.push(model);
-  }
-
-  // Overall totals
-  const totals = db.prepare(`
-    SELECT
-      COUNT(*) as total_calls,
-      SUM(input_tokens) as total_input_tokens,
-      SUM(output_tokens) as total_output_tokens,
-      SUM(total_tokens) as total_tokens,
-      SUM(cached_tokens) as total_cached_tokens,
-      SUM(cost_estimate) as total_cost
-    FROM token_usage
-    WHERE ${whereClause}
-  `).get(...params);
-
-  // By operation
-  const byOperation = db.prepare(`
-    SELECT
-      operation,
-      COUNT(*) as calls,
-      SUM(input_tokens) as input_tokens,
-      SUM(output_tokens) as output_tokens,
-      SUM(total_tokens) as total_tokens,
-      SUM(cost_estimate) as cost
-    FROM token_usage
-    WHERE ${whereClause}
-    GROUP BY operation
-    ORDER BY total_tokens DESC
-  `).all(...params);
-
-  // By model
-  const byModel = db.prepare(`
-    SELECT
-      model,
-      COUNT(*) as calls,
-      SUM(input_tokens) as input_tokens,
-      SUM(output_tokens) as output_tokens,
-      SUM(total_tokens) as total_tokens,
-      SUM(cost_estimate) as cost
-    FROM token_usage
-    WHERE ${whereClause}
-    GROUP BY model
-    ORDER BY total_tokens DESC
-  `).all(...params);
-
-  // Recent usage (last 24 hours by hour)
-  const recentUsage = db.prepare(`
-    SELECT
-      strftime('%Y-%m-%d %H:00', timestamp) as hour,
-      SUM(total_tokens) as tokens,
-      SUM(cost_estimate) as cost,
-      COUNT(*) as calls
-    FROM token_usage
-    WHERE timestamp >= datetime('now', '-24 hours')
-    GROUP BY hour
-    ORDER BY hour DESC
-    LIMIT 24
-  `).all();
-
-  // Today's usage
-  const today = db.prepare(`
-    SELECT
-      SUM(input_tokens) as input_tokens,
-      SUM(output_tokens) as output_tokens,
-      SUM(total_tokens) as total_tokens,
-      SUM(cost_estimate) as cost,
-      COUNT(*) as calls
-    FROM token_usage
-    WHERE date(timestamp) = date('now')
-  `).get();
+  const { totals, byOperation, byModel, recentUsage, today } = TokenRepo.getStats({ since, operation, model });
 
   return {
     totals: {
@@ -220,12 +106,7 @@ export function getTokenStats(options = {}) {
  * @param {number} daysToKeep - Number of days of history to retain
  */
 export function cleanupTokenHistory(daysToKeep = 30) {
-  const result = db.prepare(`
-    DELETE FROM token_usage
-    WHERE timestamp < datetime('now', '-' || ? || ' days')
-  `).run(daysToKeep);
-
-  return result.changes;
+  return TokenRepo.cleanup(daysToKeep);
 }
 
 /**

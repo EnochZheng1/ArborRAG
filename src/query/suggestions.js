@@ -1,5 +1,6 @@
-import { db, safeJson } from "../db/db.js";
+import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
+import { getActiveDb } from "../db/activeDb.js";
 
 /**
  * Query Suggestions Module
@@ -10,15 +11,19 @@ import { isChineseLang } from "../utils/langDetect.js";
  * - Document titles
  */
 
-// In-memory cache for fast suggestions
-let suggestionCache = {
-  nodes: [],
-  aliases: [],
-  titles: [],
-  lastRefresh: 0
-};
-
 const CACHE_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+// Per-connection cache so switching datasets returns the correct node/alias data.
+const cachesByConn = new Map(); // Map<conn, { nodes, aliases, titles, lastRefresh }>
+
+function getCache() {
+  const conn = getActiveDb();
+  if (!conn) return { nodes: [], aliases: [], titles: [], lastRefresh: 0 };
+  if (!cachesByConn.has(conn)) {
+    cachesByConn.set(conn, { nodes: [], aliases: [], titles: [], lastRefresh: 0 });
+  }
+  return cachesByConn.get(conn);
+}
 
 /**
  * Get query suggestions for autocomplete
@@ -40,11 +45,12 @@ export function getSuggestions(prefix, options = {}) {
   // Refresh cache if needed
   refreshCacheIfNeeded();
 
+  const cache = getCache();
   const normalizedPrefix = prefix.toLowerCase().trim();
   const suggestions = [];
 
   // Match against node names
-  for (const node of suggestionCache.nodes) {
+  for (const node of cache.nodes) {
     if (matchesPrefix(node.name, normalizedPrefix)) {
       suggestions.push({
         text: node.name,
@@ -56,7 +62,7 @@ export function getSuggestions(prefix, options = {}) {
   }
 
   // Match against aliases
-  for (const alias of suggestionCache.aliases) {
+  for (const alias of cache.aliases) {
     if (matchesPrefix(alias.alias, normalizedPrefix)) {
       suggestions.push({
         text: alias.alias,
@@ -69,7 +75,7 @@ export function getSuggestions(prefix, options = {}) {
   }
 
   // Match against document titles
-  for (const title of suggestionCache.titles) {
+  for (const title of cache.titles) {
     if (matchesPrefix(title.title, normalizedPrefix)) {
       suggestions.push({
         text: title.title,
@@ -122,34 +128,26 @@ function matchesPrefix(text, prefix) {
  * Refresh suggestion cache if needed
  */
 function refreshCacheIfNeeded() {
+  const cache = getCache();
   const now = Date.now();
-  if (now - suggestionCache.lastRefresh < CACHE_REFRESH_INTERVAL) {
+  if (now - cache.lastRefresh < CACHE_REFRESH_INTERVAL) {
     return;
   }
 
   try {
-    // Load nodes
-    suggestionCache.nodes = db.prepare(`
-      SELECT node_id, name
-      FROM nodes
-      ORDER BY name
-    `).all();
+    const allNodes = SuggestionRepo.getAllNodes();
+    cache.nodes = allNodes;
 
-    // Load aliases (stored as JSON array in aliases_json column)
-    const nodesWithAliases = db.prepare(`
-      SELECT node_id, name, aliases_json
-      FROM nodes
-      WHERE aliases_json IS NOT NULL AND aliases_json != '[]' AND aliases_json != ''
-    `).all();
-
-    suggestionCache.aliases = [];
-    for (const node of nodesWithAliases) {
+    // Build aliases from aliases_json
+    cache.aliases = [];
+    for (const node of allNodes) {
+      if (!node.aliases_json || node.aliases_json === '[]' || node.aliases_json === '') continue;
       try {
-        const aliases = JSON.parse(node.aliases_json || '[]');
+        const aliases = JSON.parse(node.aliases_json);
         if (Array.isArray(aliases)) {
           for (const alias of aliases) {
             if (alias && typeof alias === 'string') {
-              suggestionCache.aliases.push({
+              cache.aliases.push({
                 alias: alias.trim(),
                 node_id: node.node_id,
                 node_name: node.name
@@ -157,21 +155,13 @@ function refreshCacheIfNeeded() {
             }
           }
         }
-      } catch (e) {
+      } catch (_) {
         // Skip invalid JSON
       }
     }
 
-    // Load document titles
-    suggestionCache.titles = db.prepare(`
-      SELECT id as doc_id, original_name as title
-      FROM documents
-      WHERE status != 'deleted' AND original_name IS NOT NULL
-      ORDER BY uploaded_at DESC
-      LIMIT 100
-    `).all();
-
-    suggestionCache.lastRefresh = now;
+    cache.titles = SuggestionRepo.getRecentDocumentTitles(100);
+    cache.lastRefresh = now;
   } catch (error) {
     console.error('Error refreshing suggestion cache:', error.message);
   }
@@ -182,22 +172,13 @@ function refreshCacheIfNeeded() {
  */
 function getPopularQueries(limit = 10) {
   try {
-    const rows = db.prepare(`
-      SELECT query, COUNT(*) as count
-      FROM query_history
-      WHERE created_at > datetime('now', '-7 days')
-      GROUP BY query
-      ORDER BY count DESC
-      LIMIT ?
-    `).all(limit);
-
-    return rows.map(r => ({
+    return SuggestionRepo.getPopularQueries(limit).map(r => ({
       text: r.query,
       type: 'popular',
       count: r.count,
       score: 0.5 + Math.min(0.4, r.count * 0.05)
     }));
-  } catch (error) {
+  } catch (_) {
     // Table might not exist yet
     return [];
   }
@@ -208,22 +189,13 @@ function getPopularQueries(limit = 10) {
  */
 function getPopularQueriesMatching(prefix) {
   try {
-    const rows = db.prepare(`
-      SELECT query, COUNT(*) as count
-      FROM query_history
-      WHERE query LIKE ? || '%' OR query LIKE '%' || ? || '%'
-      GROUP BY query
-      ORDER BY count DESC
-      LIMIT 5
-    `).all(prefix, prefix);
-
-    return rows.map(r => ({
+    return SuggestionRepo.getPopularQueriesMatching(prefix).map(r => ({
       text: r.query,
       type: 'history',
       count: r.count,
       score: 0.6 + Math.min(0.3, r.count * 0.03)
     }));
-  } catch (error) {
+  } catch (_) {
     return [];
   }
 }
@@ -253,15 +225,12 @@ export function recordQuery(query, metadata = {}) {
   if (!query || query.length < 2) return;
 
   try {
-    db.prepare(`
-      INSERT INTO query_history (query, query_type, result_count, created_at)
-      VALUES (?, ?, ?, datetime('now'))
-    `).run(
-      query.trim(),
-      metadata.queryType || 'unknown',
-      metadata.resultCount || 0
-    );
-  } catch (error) {
+    SuggestionRepo.insertQuery({
+      query: query.trim(),
+      queryType: metadata.queryType || 'unknown',
+      resultCount: metadata.resultCount || 0
+    });
+  } catch (_) {
     // Silently fail - history is not critical
   }
 }
@@ -273,35 +242,12 @@ export function recordQuery(query, metadata = {}) {
  */
 export function getTrendingQueries(limit = 5) {
   try {
-    // Queries that are increasing in frequency
-    const rows = db.prepare(`
-      WITH recent AS (
-        SELECT query, COUNT(*) as recent_count
-        FROM query_history
-        WHERE created_at > datetime('now', '-1 day')
-        GROUP BY query
-      ),
-      older AS (
-        SELECT query, COUNT(*) as older_count
-        FROM query_history
-        WHERE created_at BETWEEN datetime('now', '-7 days') AND datetime('now', '-1 day')
-        GROUP BY query
-      )
-      SELECT r.query, r.recent_count,
-             COALESCE(o.older_count, 0) as older_count,
-             (r.recent_count * 1.0 / COALESCE(o.older_count, 1)) as trend_score
-      FROM recent r
-      LEFT JOIN older o ON r.query = o.query
-      ORDER BY trend_score DESC, r.recent_count DESC
-      LIMIT ?
-    `).all(limit);
-
-    return rows.map(r => ({
+    return SuggestionRepo.getTrending(limit).map(r => ({
       query: r.query,
       recent_count: r.recent_count,
       trend: r.trend_score > 1 ? 'rising' : 'steady'
     }));
-  } catch (error) {
+  } catch (_) {
     return [];
   }
 }
@@ -331,7 +277,7 @@ export function getExampleQueries(lang = 'en') {
 
   // Mix with actual node names for relevance
   refreshCacheIfNeeded();
-  const nodeExamples = suggestionCache.nodes
+  const nodeExamples = getCache().nodes
     .slice(0, 3)
     .map(n => isChineseLang(lang) ? `介绍一下${n.name}` : `Tell me about ${n.name}`);
 
@@ -342,23 +288,7 @@ export function getExampleQueries(lang = 'en') {
  * Initialize query history table if not exists
  */
 export function initQueryHistoryTable() {
-  try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS query_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT NOT NULL,
-        query_type TEXT,
-        result_count INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_query_history_query ON query_history(query);
-      CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at);
-    `);
-  } catch (error) {
-    console.error('Error initializing query history table:', error.message);
-  }
+  // Table is initialized by initDatasetDb() for each dataset connection.
 }
 
-// Initialize table on module load
-initQueryHistoryTable();
+// Note: initQueryHistoryTable() is called by initDatasetDb() for each dataset connection.

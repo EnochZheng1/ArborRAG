@@ -1,4 +1,5 @@
-import { db, initDb } from "../db/db.js";
+import { initDb } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
 
 initDb();
 
@@ -10,20 +11,11 @@ const nodes = [
   { node_id: "product.pricing", name: "定价", parent_id: "product", level: 2, summary: "产品价格、折扣、报价规则" },
 ];
 
-const insertNode = db.prepare(`
-  INSERT OR REPLACE INTO nodes(node_id,name,parent_id,level,node_summary,updated_at)
-  VALUES (@node_id,@name,@parent_id,@level,@summary,datetime('now'))
-`);
-const insertFts = db.prepare(`
-  INSERT INTO nodes_fts(node_id,text) VALUES (?,?)
-`);
-
-db.prepare("DELETE FROM nodes_fts").run();
+NodeRepo.clearFts();
 
 for (const n of nodes) {
-  insertNode.run(n);
-  const text = `${n.name} ${n.summary}`;
-  insertFts.run(n.node_id, text);
+  NodeRepo.upsert(n);
+  NodeRepo.insertFtsText(n.node_id, `${n.name} ${n.summary}`);
 }
 
 console.log("Seeded nodes.");

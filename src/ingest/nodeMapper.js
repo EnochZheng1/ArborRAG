@@ -1,4 +1,6 @@
-import { db, safeJson, logAudit, runTransaction } from "../db/db.js";
+import { safeJson, logAudit, runTransaction } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
 import { GoogleGenAI } from "@google/genai";
 import { ingestLogger as logger } from "../utils/logger.js";
@@ -120,33 +122,29 @@ export function createNode(nodeData) {
   const { node_id, name, parent_id = null, level = 1, summary = "", scope = {} } = nodeData;
 
   // Validate parent exists if specified
-  if (parent_id) {
-    const parent = db.prepare("SELECT * FROM nodes WHERE node_id = ?").get(parent_id);
-    if (!parent) {
-      throw new Error(`Parent node not found: ${parent_id}`);
-    }
+  if (parent_id && !NodeRepo.existsById(parent_id)) {
+    throw new Error(`Parent node not found: ${parent_id}`);
   }
 
   // Calculate level from parent
   let calculatedLevel = level;
   if (parent_id) {
-    const parent = db.prepare("SELECT level FROM nodes WHERE node_id = ?").get(parent_id);
-    calculatedLevel = (parent?.level || 0) + 1;
+    const parentLevel = NodeRepo.getLevel(parent_id);
+    calculatedLevel = (Number(parentLevel) || 0) + 1;
   }
 
   return runTransaction(() => {
-    // Insert node
-    db.prepare(`
-      INSERT INTO nodes (node_id, name, parent_id, level, node_summary, scope_json, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(node_id, name, parent_id, calculatedLevel, summary, JSON.stringify(scope));
+    NodeRepo.insert({
+      node_id,
+      name,
+      parent_id,
+      level: calculatedLevel,
+      node_summary: summary,
+      scope_json: JSON.stringify(scope)
+    });
 
-    // Add to FTS index
-    db.prepare(`
-      INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)
-    `).run(node_id, `${name} ${summary}`);
+    NodeRepo.insertFtsText(node_id, `${name} ${summary}`);
 
-    // Log audit
     logAudit("create", "nodes", node_id, null, { node_id, name, parent_id, level: calculatedLevel });
 
     return {
@@ -180,39 +178,24 @@ export function assignChunkToNode(chunk, nodeId, documentId) {
   } = chunk;
 
   return runTransaction(() => {
-    // Insert chunk
-    const result = db.prepare(`
-      INSERT INTO chunks (
-        doc_title, content_clean, chunk_type, keywords_json, fields_json,
-        scope_json, authority_level, node_id, document_id, chunk_index,
-        uploaded_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'active')
-    `).run(
+    const result = ChunkRepo.insert({
       doc_title,
       content,
       chunk_type,
-      JSON.stringify(keywords),
-      JSON.stringify(fields),
-      JSON.stringify(scope),
+      keywords,
+      fields,
+      scope,
       authority_level,
       nodeId,
       documentId,
       index
-    );
+    });
 
     const chunkId = result.lastInsertRowid;
 
-    // Add to FTS index
-    db.prepare(`
-      INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)
-    `).run(String(chunkId), content);
+    ChunkRepo.insertFts(chunkId, content);
+    NodeRepo.touch(nodeId);
 
-    // Update node's updated_at
-    db.prepare(`
-      UPDATE nodes SET updated_at = datetime('now') WHERE node_id = ?
-    `).run(nodeId);
-
-    // Log audit
     logAudit("create", "chunks", chunkId, null, { node_id: nodeId, doc_title, chunk_index: index });
 
     return Number(chunkId);
@@ -223,11 +206,7 @@ export function assignChunkToNode(chunk, nodeId, documentId) {
  * Get all root nodes (no parent)
  */
 export function getRootNodes() {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE parent_id IS NULL ORDER BY name
-  `).all();
-
-  return rows.map(r => ({
+  return NodeRepo.findRoots().map(r => ({
     node_id: r.node_id,
     name: r.name,
     level: r.level,
@@ -240,11 +219,7 @@ export function getRootNodes() {
  * Get children of a node
  */
 export function getChildNodes(parentId) {
-  const rows = db.prepare(`
-    SELECT * FROM nodes WHERE parent_id = ? ORDER BY name
-  `).all(parentId);
-
-  return rows.map(r => ({
+  return NodeRepo.findByParent(parentId).map(r => ({
     node_id: r.node_id,
     name: r.name,
     parent_id: r.parent_id,
@@ -258,9 +233,7 @@ export function getChildNodes(parentId) {
  * Get full tree structure
  */
 export function getTreeStructure() {
-  const allNodes = db.prepare(`
-    SELECT * FROM nodes ORDER BY level, name
-  `).all();
+  const allNodes = NodeRepo.getAllSortedByLevel();
 
   const nodeMap = new Map();
   const roots = [];
@@ -580,17 +553,7 @@ function updateNodeSummaries(nodes, chunks, mappings, lang = 'en') {
 
     // Update node in database
     try {
-      db.prepare(`
-        UPDATE nodes SET node_summary = ?, updated_at = datetime('now')
-        WHERE node_id = ?
-      `).run(summary, node.node_id);
-
-      // Update FTS
-      db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(node.node_id);
-      db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
-        node.node_id,
-        `${node.name} ${summary}`
-      );
+      NodeRepo.updateSummaryAndFts(node.node_id, summary, node.name);
     } catch (err) {
       logger.warn(`Failed to update summary for node ${node.node_id}: ${err.message}`);
     }
@@ -602,23 +565,11 @@ function updateNodeSummaries(nodes, chunks, mappings, lang = 'en') {
  * @returns {object} Root node
  */
 function ensureRootNode() {
-  let root = db.prepare("SELECT * FROM nodes WHERE parent_id IS NULL LIMIT 1").get();
+  const root = NodeRepo.findAnyRoot();
+  if (root) return root;
 
-  if (!root) {
-    logger.info("No root node found, creating default root node");
-    const result = db.prepare(`
-      INSERT INTO nodes (node_id, name, parent_id, level, node_summary, updated_at)
-      VALUES ('root', 'Knowledge Base', NULL, 0, 'Root node of the knowledge base', datetime('now'))
-    `).run();
-
-    db.prepare(`
-      INSERT INTO nodes_fts (node_id, text) VALUES ('root', 'Knowledge Base Root node of the knowledge base')
-    `).run();
-
-    root = db.prepare("SELECT * FROM nodes WHERE node_id = 'root'").get();
-  }
-
-  return root;
+  logger.info("No root node found, creating default root node");
+  return NodeRepo.insertRoot();
 }
 
 /**
@@ -817,7 +768,7 @@ export async function generateNodeAliases(nodeId, options = {}) {
   const { includeChunks = true, maxAliases = 10 } = options;
 
   // Get the node
-  const node = db.prepare("SELECT * FROM nodes WHERE node_id = ?").get(nodeId);
+  const node = NodeRepo.findById(nodeId);
   if (!node) {
     throw new Error(`Node not found: ${nodeId}`);
   }
@@ -829,11 +780,7 @@ export async function generateNodeAliases(nodeId, options = {}) {
   }
 
   if (includeChunks) {
-    const chunks = db.prepare(`
-      SELECT content_clean, keywords_json FROM chunks
-      WHERE node_id = ? AND status = 'active'
-      LIMIT 5
-    `).all(nodeId);
+    const chunks = ChunkRepo.getWithKeywords(nodeId, 5);
 
     if (chunks.length > 0) {
       const keywords = new Set();
@@ -938,25 +885,18 @@ function generateSimpleAliases(nodeName) {
  */
 export function updateNodeAliases(nodeId, aliases) {
   try {
-    // Get existing aliases
-    const node = db.prepare("SELECT aliases_json FROM nodes WHERE node_id = ?").get(nodeId);
-    if (!node) return false;
+    if (!NodeRepo.existsById(nodeId)) return false;
 
-    const existingAliases = safeJson(node.aliases_json, []);
+    const existingAliasesJson = NodeRepo.getAliasesJson(nodeId);
+    const existingAliases = safeJson(existingAliasesJson, []);
     const mergedAliases = [...new Set([...existingAliases, ...aliases])];
 
-    db.prepare(`
-      UPDATE nodes SET aliases_json = ?, updated_at = datetime('now')
-      WHERE node_id = ?
-    `).run(JSON.stringify(mergedAliases), nodeId);
+    const nodeData = NodeRepo.getNameAndSummary(nodeId);
+    const ftsText = nodeData
+      ? `${nodeData.name} ${nodeData.node_summary || ""} ${mergedAliases.join(" ")}`
+      : mergedAliases.join(" ");
 
-    // Update FTS to include aliases
-    const nodeData = db.prepare("SELECT name, node_summary FROM nodes WHERE node_id = ?").get(nodeId);
-    if (nodeData) {
-      const ftsText = `${nodeData.name} ${nodeData.node_summary || ""} ${mergedAliases.join(" ")}`;
-      db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
-      db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(nodeId, ftsText);
-    }
+    NodeRepo.updateAliasesAndFts(nodeId, JSON.stringify(mergedAliases), ftsText);
 
     logger.info(`Updated aliases for node ${nodeId}: ${mergedAliases.length} total`);
     return true;
@@ -989,11 +929,7 @@ export async function generateAliasesForAllNodes(options = {}) {
   const { limit = 50, onProgress = null } = options;
 
   // Find nodes without aliases
-  const nodes = db.prepare(`
-    SELECT node_id, name FROM nodes
-    WHERE aliases_json IS NULL OR aliases_json = '[]' OR aliases_json = 'null'
-    LIMIT ?
-  `).all(limit);
+  const nodes = NodeRepo.findWithoutAliases(limit);
 
   const results = {
     processed: 0,

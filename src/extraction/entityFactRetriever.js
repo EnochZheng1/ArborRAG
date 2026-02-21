@@ -1,4 +1,4 @@
-import { db, safeJson } from "../db/db.js";
+import { EntityRepo } from "../db/repositories/EntityRepo.js";
 import { getEntityFacts, searchFacts } from "./entityFactExtractor.js";
 
 /**
@@ -47,14 +47,7 @@ export function retrieveFactsForQuery(query, options = {}) {
   // Get facts for matched entities
   const entityFactIds = new Set();
   for (const entity of result.matched_entities) {
-    const facts = db.prepare(`
-      SELECT f.*, ef.role
-      FROM facts f
-      JOIN entity_facts ef ON f.id = ef.fact_id
-      WHERE ef.entity_id = ? AND f.status = 'active'
-      ORDER BY f.confidence DESC
-      LIMIT 10
-    `).all(entity.id);
+    const facts = EntityRepo.getFactsByEntityId(entity.id, 10);
 
     for (const fact of facts) {
       if (!entityFactIds.has(fact.id)) {
@@ -84,15 +77,7 @@ export function retrieveFactsForQuery(query, options = {}) {
   if (includeEvidence) {
     const factIds = result.relevant_facts.map(f => f.id);
     if (factIds.length > 0) {
-      const placeholders = factIds.map(() => '?').join(',');
-      result.evidence_chunks = db.prepare(`
-        SELECT DISTINCT c.id, c.content_clean, c.doc_title, c.node_id,
-               fe.fact_id, fe.extraction_confidence
-        FROM fact_evidence fe
-        JOIN chunks c ON fe.chunk_id = c.id
-        WHERE fe.fact_id IN (${placeholders})
-        ORDER BY fe.extraction_confidence DESC
-      `).all(...factIds);
+      result.evidence_chunks = EntityRepo.getEvidenceForFacts(factIds);
     }
   }
 
@@ -104,32 +89,9 @@ export function retrieveFactsForQuery(query, options = {}) {
  */
 function findEntity(name) {
   const normalized = name.toLowerCase().trim();
-
-  // Exact match
-  let entity = db.prepare(`
-    SELECT * FROM entities WHERE normalized_name = ?
-  `).get(normalized);
-
-  if (entity) return entity;
-
-  // Partial match
-  entity = db.prepare(`
-    SELECT * FROM entities
-    WHERE normalized_name LIKE ? OR name LIKE ?
-    ORDER BY LENGTH(name)
-    LIMIT 1
-  `).get(`%${normalized}%`, `%${name}%`);
-
-  if (entity) return entity;
-
-  // Alias match
-  entity = db.prepare(`
-    SELECT * FROM entities
-    WHERE aliases_json LIKE ?
-    LIMIT 1
-  `).get(`%${name}%`);
-
-  return entity;
+  return EntityRepo.findByNormalized(normalized)
+    ?? EntityRepo.findByLike(normalized, name)
+    ?? EntityRepo.findByAlias(name);
 }
 
 /**

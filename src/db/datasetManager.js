@@ -22,6 +22,7 @@ import {
   getDefaultDatasetId,
   datasetNameExists
 } from "./registry.js";
+import { JobRepo } from "./repositories/JobRepo.js";
 import { dbLogger as logger } from "../utils/logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,6 +35,8 @@ const pool = new Map();
 
 function openConnection(dbPath) {
   const conn = new Database(dbPath);
+  conn.pragma("journal_mode = WAL");   // concurrent reads during writes
+  conn.pragma("synchronous = NORMAL"); // safe with WAL, faster than FULL
   conn.pragma("foreign_keys = ON");
   conn.pragma("busy_timeout = 5000");
   return conn;
@@ -178,6 +181,12 @@ export function deleteDataset(id) {
 
   const conn = pool.get(id);
   if (conn) {
+    // Cancel queued jobs so the pump doesn't pick them up after the connection closes.
+    // In-flight jobs will naturally fail when their next DB call throws on the closed conn.
+    try {
+      const cancelled = JobRepo.cancelAllQueued(conn);
+      if (cancelled > 0) logger.warn(`Cancelled ${cancelled} queued job(s) for deleted dataset '${dataset.name}'`);
+    } catch (_) {}
     try { conn.close(); } catch (_) {}
     pool.delete(id);
   }

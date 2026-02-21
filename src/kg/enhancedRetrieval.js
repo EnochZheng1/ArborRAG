@@ -8,7 +8,8 @@
  * 4. Multi-hop retrieval - follows entity relationships
  */
 
-import { db, safeJson } from "../db/db.js";
+import { EntityRepo } from "../db/repositories/EntityRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { queryLogger as logger } from "../utils/logger.js";
 import { generateQueryEmbedding } from "../embedding/embedder.js";
 import { cosineSimilarity } from "../embedding/embedder.js";
@@ -99,14 +100,7 @@ export function findMatchingEntities(queryEntities, options = {}) {
 
   for (const entityName of queryEntities) {
     // Exact match
-    const exactMatches = db.prepare(`
-      SELECT e.*,
-             (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = e.id) as mention_count
-      FROM entities e
-      WHERE e.name = ? OR e.normalized_name = ?
-    `).all(entityName, entityName.toLowerCase());
-
-    for (const e of exactMatches) {
+    for (const e of EntityRepo.searchExact(entityName, entityName.toLowerCase())) {
       if (!seenIds.has(e.id)) {
         seenIds.add(e.id);
         results.push({ ...e, entity_type: e.type, match_score: 1.0, match_type: 'exact' });
@@ -115,18 +109,9 @@ export function findMatchingEntities(queryEntities, options = {}) {
 
     // Fuzzy match (LIKE)
     if (fuzzyMatch) {
-      const fuzzyMatches = db.prepare(`
-        SELECT e.*,
-               (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = e.id) as mention_count
-        FROM entities e
-        WHERE e.name LIKE ? OR e.normalized_name LIKE ?
-        LIMIT ?
-      `).all(`%${entityName}%`, `%${entityName.toLowerCase()}%`, limit);
-
-      for (const e of fuzzyMatches) {
+      for (const e of EntityRepo.searchFuzzy(entityName, limit)) {
         if (!seenIds.has(e.id)) {
           seenIds.add(e.id);
-          // Score based on how close the match is
           const score = entityName.length / Math.max(e.name.length, entityName.length);
           results.push({ ...e, entity_type: e.type, match_score: score * 0.8, match_type: 'fuzzy' });
         }
@@ -134,15 +119,7 @@ export function findMatchingEntities(queryEntities, options = {}) {
     }
 
     // Check aliases
-    const aliasMatches = db.prepare(`
-      SELECT e.*,
-             (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = e.id) as mention_count
-      FROM entities e
-      WHERE e.aliases_json LIKE ?
-      LIMIT ?
-    `).all(`%${entityName}%`, limit);
-
-    for (const e of aliasMatches) {
+    for (const e of EntityRepo.searchByAliasWithCount(entityName, limit)) {
       if (!seenIds.has(e.id)) {
         seenIds.add(e.id);
         results.push({ ...e, entity_type: e.type, match_score: 0.7, match_type: 'alias' });
@@ -171,26 +148,7 @@ export function retrieveChunksByEntities(entityIds, options = {}) {
 
   if (!entityIds.length) return [];
 
-  const placeholders = entityIds.map(() => '?').join(',');
-
-  const chunks = db.prepare(`
-    SELECT DISTINCT c.*,
-           em.context_snippet as mention_context,
-           em.mention_count,
-           e.name as entity_name,
-           e.type as entity_type,
-           n.name as node_name,
-           n.node_id,
-           n.level as node_level
-    FROM entity_mentions em
-    JOIN entities e ON em.entity_id = e.id
-    JOIN chunks c ON em.chunk_id = c.id
-    LEFT JOIN nodes n ON c.node_id = n.node_id
-    WHERE em.entity_id IN (${placeholders})
-      AND c.status = 'active'
-    ORDER BY em.mention_count DESC, c.authority_level ASC
-    LIMIT ?
-  `).all(...entityIds, limit);
+  const chunks = EntityRepo.getChunksByEntityIds(entityIds, limit);
 
   return chunks.map(c => ({
     id: c.id,
@@ -225,38 +183,13 @@ export function searchFacts(query, options = {}) {
   const conditions = queryTerms.map(() => 'f.content LIKE ?').join(' OR ');
   const params = queryTerms.map(t => `%${t}%`);
 
-  const facts = db.prepare(`
-    SELECT f.*,
-           e.name as subject_name,
-           e.type as subject_type,
-           (SELECT COUNT(*) FROM fact_evidence WHERE fact_id = f.id) as evidence_count
-    FROM facts f
-    LEFT JOIN entity_facts ef ON f.id = ef.fact_id
-    LEFT JOIN entities e ON ef.entity_id = e.id
-    WHERE (${conditions})
-      AND f.confidence >= ?
-    ORDER BY f.confidence DESC, evidence_count DESC
-    LIMIT ?
-  `).all(...params, minConfidence, limit);
+  const facts = EntityRepo.searchFacts(conditions, params, minConfidence, limit);
 
-  // Get evidence for each fact
-  return facts.map(fact => {
-    const evidence = db.prepare(`
-      SELECT c.id, c.content_clean, c.doc_title, c.node_id,
-             fe.relevance_score
-      FROM fact_evidence fe
-      JOIN chunks c ON fe.chunk_id = c.id
-      WHERE fe.fact_id = ?
-      ORDER BY fe.relevance_score DESC
-      LIMIT 3
-    `).all(fact.id);
-
-    return {
-      ...fact,
-      evidence,
-      source: 'fact_search'
-    };
-  });
+  return facts.map(fact => ({
+    ...fact,
+    evidence: EntityRepo.getEvidenceForFact(fact.id, 3),
+    source: 'fact_search'
+  }));
 }
 
 /**
@@ -290,14 +223,7 @@ export function expandWithHierarchy(chunks, options = {}) {
 
     // Add parent context
     if (includeParent && node.parent_id) {
-      const parentChunks = db.prepare(`
-        SELECT c.*, n.name as node_name, n.level as node_level
-        FROM chunks c
-        JOIN nodes n ON c.node_id = n.node_id
-        WHERE c.node_id = ? AND c.status = 'active'
-        ORDER BY c.authority_level ASC, c.chunk_index ASC
-        LIMIT ?
-      `).all(node.parent_id, maxParentChunks);
+      const parentChunks = ChunkRepo.getForNodeFullByIndex(node.parent_id, maxParentChunks);
 
       for (const pc of parentChunks) {
         if (!seenChunkIds.has(pc.id)) {
@@ -321,14 +247,7 @@ export function expandWithHierarchy(chunks, options = {}) {
     if (includeSiblings && node.parent_id) {
       const siblingNodes = getSiblings(chunk.node_id);
       for (const sibling of siblingNodes.slice(0, 3)) {
-        const siblingChunks = db.prepare(`
-          SELECT c.*, n.name as node_name, n.level as node_level
-          FROM chunks c
-          JOIN nodes n ON c.node_id = n.node_id
-          WHERE c.node_id = ? AND c.status = 'active'
-          ORDER BY c.authority_level ASC
-          LIMIT ?
-        `).all(sibling.node_id, maxSiblingChunks);
+        const siblingChunks = ChunkRepo.getForNodeFullByIndex(sibling.node_id, maxSiblingChunks);
 
         for (const sc of siblingChunks) {
           if (!seenChunkIds.has(sc.id)) {
@@ -353,14 +272,7 @@ export function expandWithHierarchy(chunks, options = {}) {
     if (includeChildren) {
       const children = getChildren(chunk.node_id);
       for (const child of children.slice(0, 5)) {
-        const childChunks = db.prepare(`
-          SELECT c.*, n.name as node_name, n.level as node_level
-          FROM chunks c
-          JOIN nodes n ON c.node_id = n.node_id
-          WHERE c.node_id = ? AND c.status = 'active'
-          ORDER BY c.authority_level ASC
-          LIMIT ?
-        `).all(child.node_id, maxChildChunks);
+        const childChunks = ChunkRepo.getForNodeFullByIndex(child.node_id, maxChildChunks);
 
         for (const cc of childChunks) {
           if (!seenChunkIds.has(cc.id)) {
@@ -403,20 +315,7 @@ export function multiHopRetrieval(query, seedEntityIds, options = {}) {
 
   for (let hop = 0; hop < maxHops; hop++) {
     // Find related entities through shared facts
-    const placeholders = currentEntities.map(() => '?').join(',');
-
-    const relatedEntities = db.prepare(`
-      SELECT DISTINCT e2.id, e2.name, e2.entity_type,
-             COUNT(*) as shared_facts
-      FROM entity_facts ef1
-      JOIN entity_facts ef2 ON ef1.fact_id = ef2.fact_id
-      JOIN entities e2 ON ef2.entity_id = e2.id
-      WHERE ef1.entity_id IN (${placeholders})
-        AND e2.id NOT IN (${placeholders})
-      GROUP BY e2.id
-      ORDER BY shared_facts DESC
-      LIMIT ?
-    `).all(...currentEntities, ...currentEntities, maxEntitiesPerHop);
+    const relatedEntities = EntityRepo.getRelatedEntities(currentEntities, maxEntitiesPerHop);
 
     if (!relatedEntities.length) break;
 

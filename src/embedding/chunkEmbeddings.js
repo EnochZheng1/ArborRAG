@@ -1,4 +1,6 @@
-import { db } from "../db/db.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
+import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
+import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
 import { generateEmbedding, generateEmbeddingBatch } from "./embedder.js";
 import { storeEmbedding, storeEmbeddingBatch, getPendingEmbeddings, hasEmbedding } from "./vectorStore.js";
 import { embedLogger as logger } from "../utils/logger.js";
@@ -13,9 +15,7 @@ import { embedLogger as logger } from "../utils/logger.js";
  * @returns {Promise<boolean>} Success
  */
 export async function embedNode(nodeId) {
-  const node = db.prepare(`
-    SELECT node_id, name, node_summary FROM nodes WHERE node_id = ?
-  `).get(nodeId);
+  const node = NodeRepo.findById(nodeId);
 
   if (!node) {
     throw new Error(`Node not found: ${nodeId}`);
@@ -40,11 +40,9 @@ export async function embedNode(nodeId) {
  * @returns {Promise<boolean>} Success
  */
 export async function embedChunk(chunkId) {
-  const chunk = db.prepare(`
-    SELECT id, content_clean FROM chunks WHERE id = ? AND status = 'active'
-  `).get(chunkId);
+  const chunk = ChunkRepo.getById(chunkId);
 
-  if (!chunk) {
+  if (!chunk || chunk.status !== 'active') {
     throw new Error(`Chunk not found or inactive: ${chunkId}`);
   }
 
@@ -87,13 +85,13 @@ export async function embedAllNodes(options = {}) {
       if (embeddings[i]) {
         toStore.push({
           refType: "node",
-          refId: pending[i].ref_id,
+          refId: pending[i].refId,
           embedding: embeddings[i]
         });
         results.success++;
       } else {
         results.failed++;
-        results.errors.push(`Failed to embed node: ${pending[i].ref_id}`);
+        results.errors.push(`Failed to embed node: ${pending[i].refId}`);
       }
     }
 
@@ -198,17 +196,8 @@ export async function reembedNode(nodeId) {
  * @returns {object} Coverage statistics
  */
 export function getEmbeddingCoverage() {
-  const nodeStats = db.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM nodes) as total_nodes,
-      (SELECT COUNT(*) FROM embeddings WHERE ref_type = 'node') as embedded_nodes
-  `).get();
-
-  const chunkStats = db.prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM chunks WHERE status = 'active') as total_chunks,
-      (SELECT COUNT(*) FROM embeddings WHERE ref_type = 'chunk') as embedded_chunks
-  `).get();
+  const nodeStats = EmbeddingRepo.getNodeCoverage();
+  const chunkStats = EmbeddingRepo.getChunkCoverage();
 
   return {
     nodes: {

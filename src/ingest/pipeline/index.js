@@ -5,7 +5,9 @@
  * Handles rollback on failure and re-throws RateLimitErrors.
  */
 
-import { db, runTransaction, safeJson } from "../../db/db.js";
+import { runTransaction, safeJson } from "../../db/db.js";
+import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
+import { IngestRepo } from "../../db/repositories/IngestRepo.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import { RateLimitError } from "../../utils/rateLimitError.js";
 import { emitJobProgress } from "../../utils/progressEmitter.js";
@@ -31,10 +33,10 @@ function withStepProgress(progress) {
 function setDocumentProcessingStep(docId, step, message, progress, status = "processing") {
   if (!docId) return;
   try {
-    const row = db.prepare("SELECT metadata_json FROM documents WHERE id = ?").get(docId);
-    if (!row) return;
+    const metadataJson = DocumentRepo.getMetadataJson(docId);
+    if (metadataJson === null) return;
 
-    const metadata = safeJson(row.metadata_json, {});
+    const metadata = safeJson(metadataJson, {});
     const existing = metadata.processing && typeof metadata.processing === "object"
       ? metadata.processing : {};
     const now = new Date().toISOString();
@@ -45,8 +47,7 @@ function setDocumentProcessingStep(docId, step, message, progress, status = "pro
 
     metadata.processing = { ...existing, step, message, progress: normalizedProgress, status, updated_at: now, history };
 
-    db.prepare("UPDATE documents SET status = ?, metadata_json = ? WHERE id = ?")
-      .run(status, JSON.stringify(metadata), docId);
+    DocumentRepo.updateStatusAndMetadata(docId, status, JSON.stringify(metadata));
 
     const progressSuffix = normalizedProgress === null ? "" : ` (${normalizedProgress}%)`;
     logger.info(`[doc:${docId}] ${step}${progressSuffix} - ${message}`);
@@ -59,38 +60,28 @@ function setDocumentProcessingStep(docId, step, message, progress, status = "pro
 
 function rollbackFailedDocument(docId) {
   return runTransaction(() => {
-    const chunks = db.prepare("SELECT id, node_id FROM chunks WHERE document_id = ?").all(docId);
+    const chunks = IngestRepo.getChunksForDoc(docId);
     const chunkIds = chunks.map(c => Number(c.id));
     const affectedNodeIds = new Set(chunks.map(c => c.node_id).filter(Boolean));
 
     if (chunkIds.length > 0) {
-      const ph = chunkIds.map(() => "?").join(",");
-
-      const conflictNodes = db.prepare(`
-        SELECT DISTINCT node_id FROM conflicts
-        WHERE chunk_a_id IN (${ph}) OR chunk_b_id IN (${ph})
-      `).all(...chunkIds, ...chunkIds);
+      const conflictNodes = IngestRepo.getConflictNodeIds(chunkIds);
       for (const row of conflictNodes) if (row.node_id) affectedNodeIds.add(row.node_id);
 
-      db.prepare(`DELETE FROM conflicts WHERE chunk_a_id IN (${ph}) OR chunk_b_id IN (${ph})`)
-        .run(...chunkIds, ...chunkIds);
+      IngestRepo.deleteConflictsForChunks(chunkIds);
 
-      const strPh = chunkIds.map(() => "?").join(",");
       const strIds = chunkIds.map(String);
-      db.prepare(`DELETE FROM embeddings WHERE ref_type = 'chunk' AND ref_id IN (${strPh})`).run(...strIds);
-      db.prepare(`DELETE FROM chunks_fts WHERE chunk_id IN (${strPh})`).run(...strIds);
-      db.prepare("DELETE FROM chunks WHERE document_id = ?").run(docId);
+      IngestRepo.deleteEmbeddingsForChunks(strIds);
+      IngestRepo.deleteChunkFtsForIds(strIds);
+      IngestRepo.deleteChunksForDoc(docId);
     }
 
     for (const nodeId of affectedNodeIds) {
-      const openConflicts = db.prepare(`
-        SELECT COUNT(*) as count FROM conflicts WHERE node_id = ? AND resolution = 'human_review'
-      `).get(nodeId).count;
-      db.prepare("UPDATE nodes SET conflict_score = ?, updated_at = datetime('now') WHERE node_id = ?")
-        .run(openConflicts, nodeId);
+      const openConflicts = IngestRepo.getOpenConflictCount(nodeId);
+      IngestRepo.updateNodeConflictScore(nodeId, openConflicts);
     }
 
-    db.prepare("UPDATE documents SET status = 'failed', chunk_count = 0 WHERE id = ?").run(docId);
+    IngestRepo.markDocumentFailed(docId);
   });
 }
 
@@ -114,7 +105,8 @@ export async function processDocument(filePath, options = {}) {
     extractEntities = true,
     chunkConfig     = {},
     originalName    = null,
-    jobId           = null
+    jobId           = null,
+    datasetId       = null
   } = options;
 
   const startTime = Date.now();
@@ -133,7 +125,7 @@ export async function processDocument(filePath, options = {}) {
   const setStep = (docId, step, message, progress, status = "processing") => {
     setDocumentProcessingStep(docId, step, message, progress, status);
     if (jobId) {
-      emitJobProgress(jobId, step, withStepProgress(progress), message, status);
+      emitJobProgress(jobId, step, withStepProgress(progress), message, status, datasetId);
     }
   };
 

@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
-import { db, safeJson } from "../db/db.js";
+import { safeJson } from "../db/db.js";
+import { EntityFactRepo } from "../db/repositories/EntityFactRepo.js";
 import { recordTokenUsage } from "../utils/tokenTracker.js";
 import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
@@ -11,89 +12,7 @@ import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
  * maintaining links back to source chunks as evidence.
  */
 
-// Initialize tables
-export function initEntityFactTables() {
-  db.exec(`
-    -- Entities table: stores extracted entities
-    CREATE TABLE IF NOT EXISTS entities (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      normalized_name TEXT NOT NULL,
-      type TEXT NOT NULL,  -- product, concept, person, organization, location, process, feature
-      description TEXT,
-      node_id TEXT,  -- optional link to tree node
-      aliases_json TEXT,  -- JSON array of alternative names
-      metadata_json TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(normalized_name, type)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(normalized_name);
-    CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
-    CREATE INDEX IF NOT EXISTS idx_entities_node ON entities(node_id);
-
-    -- Facts table: stores extracted factual statements
-    CREATE TABLE IF NOT EXISTS facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      content TEXT NOT NULL,
-      fact_type TEXT,  -- attribute, relationship, definition, procedure, comparison
-      confidence REAL DEFAULT 0.8,
-      status TEXT DEFAULT 'active',  -- active, superseded, disputed
-      superseded_by INTEGER,  -- reference to newer fact
-      metadata_json TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(fact_type);
-    CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
-
-    -- Entity-Fact relationships (many-to-many)
-    CREATE TABLE IF NOT EXISTS entity_facts (
-      entity_id INTEGER NOT NULL,
-      fact_id INTEGER NOT NULL,
-      role TEXT DEFAULT 'subject',  -- subject, object, related
-      PRIMARY KEY (entity_id, fact_id),
-      FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
-      FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_entity_facts_entity ON entity_facts(entity_id);
-    CREATE INDEX IF NOT EXISTS idx_entity_facts_fact ON entity_facts(fact_id);
-
-    -- Fact-Chunk evidence links (provenance)
-    CREATE TABLE IF NOT EXISTS fact_evidence (
-      fact_id INTEGER NOT NULL,
-      chunk_id INTEGER NOT NULL,
-      relevance_score REAL DEFAULT 1.0,
-      extraction_confidence REAL DEFAULT 0.8,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (fact_id, chunk_id),
-      FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE,
-      FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_fact_evidence_fact ON fact_evidence(fact_id);
-    CREATE INDEX IF NOT EXISTS idx_fact_evidence_chunk ON fact_evidence(chunk_id);
-
-    -- Entity mentions in chunks (for quick lookups)
-    CREATE TABLE IF NOT EXISTS entity_mentions (
-      entity_id INTEGER NOT NULL,
-      chunk_id INTEGER NOT NULL,
-      mention_count INTEGER DEFAULT 1,
-      context_snippet TEXT,  -- short context around mention
-      PRIMARY KEY (entity_id, chunk_id),
-      FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
-      FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity ON entity_mentions(entity_id);
-    CREATE INDEX IF NOT EXISTS idx_entity_mentions_chunk ON entity_mentions(chunk_id);
-  `);
-}
-
-// Note: initEntityFactTables() is called by initDatasetDb() for each dataset connection.
+// Note: entity/fact tables are initialized by initDatasetDb() for each dataset connection.
 
 /**
  * Extract entities and facts from a chunk
@@ -413,51 +332,32 @@ export function saveExtraction(extraction, chunkId, options = {}) {
   for (const entity of extraction.entities) {
     const normalizedName = normalizeEntityName(entity.name);
 
-    // Check if entity already exists
-    const existing = db.prepare(`
-      SELECT id, aliases_json FROM entities
-      WHERE normalized_name = ? AND type = ?
-    `).get(normalizedName, entity.type);
+    const existing = EntityFactRepo.findByNormalizedAndType(normalizedName, entity.type);
 
     let entityId;
     if (existing) {
       entityId = existing.id;
-
-      // Merge aliases
       const existingAliases = safeJson(existing.aliases_json, []);
       const newAliases = [...new Set([...existingAliases, ...entity.aliases])];
-
-      db.prepare(`
-        UPDATE entities SET aliases_json = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(JSON.stringify(newAliases), entityId);
+      EntityFactRepo.updateAliases(entityId, JSON.stringify(newAliases));
     } else {
-      // Insert new entity
-      const result = db.prepare(`
-        INSERT INTO entities (name, normalized_name, type, description, node_id, aliases_json)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        entity.name,
+      const result = EntityFactRepo.insertEntity({
+        name: entity.name,
         normalizedName,
-        entity.type,
-        entity.description,
+        type: entity.type,
+        description: entity.description,
         nodeId,
-        JSON.stringify(entity.aliases)
-      );
+        aliasesJson: JSON.stringify(entity.aliases)
+      });
       entityId = result.lastInsertRowid;
     }
 
     savedEntities.set(entity.name, entityId);
 
-    // Record entity mention in chunk - this is the key link for finding entities by node
+    // Record entity mention in chunk
     try {
       if (chunkId) {
-        db.prepare(`
-          INSERT INTO entity_mentions (entity_id, chunk_id, mention_count)
-          VALUES (?, ?, 1)
-          ON CONFLICT(entity_id, chunk_id) DO UPDATE SET
-            mention_count = mention_count + 1
-        `).run(entityId, chunkId);
+        EntityFactRepo.upsertMention(entityId, chunkId);
       }
     } catch (e) {
       console.warn(`Failed to record entity mention: entity=${entityId}, chunk=${chunkId}, error=${e.message}`);
@@ -466,19 +366,17 @@ export function saveExtraction(extraction, chunkId, options = {}) {
 
   // Save facts
   for (const fact of extraction.facts) {
-    // Check for duplicate facts
-    const existingFact = db.prepare(`
-      SELECT id FROM facts WHERE content = ?
-    `).get(fact.content);
+    const existingFact = EntityFactRepo.findFactByContent(fact.content);
 
     let factId;
     if (existingFact) {
       factId = existingFact.id;
     } else {
-      const result = db.prepare(`
-        INSERT INTO facts (content, fact_type, confidence)
-        VALUES (?, ?, ?)
-      `).run(fact.content, fact.type, fact.confidence);
+      const result = EntityFactRepo.insertFact({
+        content: fact.content,
+        factType: fact.type,
+        confidence: fact.confidence
+      });
       factId = result.lastInsertRowid;
     }
 
@@ -489,10 +387,7 @@ export function saveExtraction(extraction, chunkId, options = {}) {
       const entityId = savedEntities.get(entityName);
       if (entityId) {
         try {
-          db.prepare(`
-            INSERT OR IGNORE INTO entity_facts (entity_id, fact_id, role)
-            VALUES (?, ?, 'subject')
-          `).run(entityId, factId);
+          EntityFactRepo.insertEntityFactLink(entityId, factId);
         } catch (e) {
           // Ignore duplicates
         }
@@ -501,10 +396,7 @@ export function saveExtraction(extraction, chunkId, options = {}) {
 
     // Link fact to source chunk (evidence)
     try {
-      db.prepare(`
-        INSERT OR IGNORE INTO fact_evidence (fact_id, chunk_id, extraction_confidence)
-        VALUES (?, ?, ?)
-      `).run(factId, chunkId, fact.confidence);
+      EntityFactRepo.insertFactEvidence(factId, chunkId, fact.confidence);
     } catch (e) {
       // Ignore if chunk doesn't exist
     }
@@ -523,10 +415,7 @@ export function saveExtraction(extraction, chunkId, options = {}) {
  * @returns {Promise<object>} Extraction results
  */
 export async function processChunkForExtraction(chunk, options = {}) {
-  // Get existing entities for deduplication hints
-  const existingEntities = db.prepare(`
-    SELECT name, type FROM entities ORDER BY id DESC LIMIT 50
-  `).all();
+  const existingEntities = EntityFactRepo.getRecent(50);
 
   const extraction = await extractEntitiesAndFacts(chunk, {
     ...options,
@@ -568,12 +457,7 @@ export async function processDocumentForExtraction(docId, options = {}) {
     onProgress = null        // Optional progress callback
   } = options;
 
-  const chunks = db.prepare(`
-    SELECT id, content_clean, node_id, doc_title
-    FROM chunks
-    WHERE document_id = ? AND status = 'active'
-    ORDER BY chunk_index
-  `).all(docId);
+  const chunks = EntityFactRepo.getActiveChunksForDoc(docId);
 
   const results = {
     doc_id: docId,
@@ -696,49 +580,13 @@ function isChineseStopWord(word) {
  */
 export function getEntitiesWithFacts(filters = {}) {
   const { type, nodeId, limit = 50 } = filters;
+  const entities = EntityFactRepo.getEntitiesFiltered({ type, nodeId, limit });
 
-  let whereClause = '1=1';
-  const params = [];
-
-  if (type) {
-    whereClause += ' AND e.type = ?';
-    params.push(type);
-  }
-  if (nodeId) {
-    whereClause += ' AND e.node_id = ?';
-    params.push(nodeId);
-  }
-
-  const entities = db.prepare(`
-    SELECT e.*,
-           COUNT(DISTINCT ef.fact_id) as fact_count,
-           COUNT(DISTINCT em.chunk_id) as mention_count
-    FROM entities e
-    LEFT JOIN entity_facts ef ON e.id = ef.entity_id
-    LEFT JOIN entity_mentions em ON e.id = em.entity_id
-    WHERE ${whereClause}
-    GROUP BY e.id
-    ORDER BY mention_count DESC, fact_count DESC
-    LIMIT ?
-  `).all(...params, limit);
-
-  // Get facts for each entity
-  return entities.map(entity => {
-    const facts = db.prepare(`
-      SELECT f.*, fe.chunk_id, fe.extraction_confidence
-      FROM facts f
-      JOIN entity_facts ef ON f.id = ef.fact_id
-      LEFT JOIN fact_evidence fe ON f.id = fe.fact_id
-      WHERE ef.entity_id = ? AND f.status = 'active'
-      ORDER BY f.confidence DESC
-    `).all(entity.id);
-
-    return {
-      ...entity,
-      aliases: safeJson(entity.aliases_json, []),
-      facts
-    };
-  });
+  return entities.map(entity => ({
+    ...entity,
+    aliases: safeJson(entity.aliases_json, []),
+    facts: EntityFactRepo.getFactsForEntityWithEvidence(entity.id)
+  }));
 }
 
 /**
@@ -749,23 +597,10 @@ export function getEntitiesWithFacts(filters = {}) {
 export function getEntityFacts(entityName) {
   const normalizedName = normalizeEntityName(entityName);
 
-  const entity = db.prepare(`
-    SELECT * FROM entities WHERE normalized_name = ?
-  `).get(normalizedName);
+  const entity = EntityFactRepo.findByNormalized(normalizedName)
+    ?? EntityFactRepo.findByPartialMatch(normalizedName, entityName);
 
-  if (!entity) {
-    // Try partial match
-    const partialMatch = db.prepare(`
-      SELECT * FROM entities
-      WHERE normalized_name LIKE ? OR aliases_json LIKE ?
-      ORDER BY id
-      LIMIT 1
-    `).get(`%${normalizedName}%`, `%${entityName}%`);
-
-    if (!partialMatch) return null;
-    return getEntityFactsById(partialMatch.id);
-  }
-
+  if (!entity) return null;
   return getEntityFactsById(entity.id);
 }
 
@@ -773,47 +608,20 @@ export function getEntityFacts(entityName) {
  * Get facts by entity ID with evidence
  */
 function getEntityFactsById(entityId) {
-  const entity = db.prepare(`SELECT * FROM entities WHERE id = ?`).get(entityId);
+  const entity = EntityFactRepo.findById(entityId);
   if (!entity) return null;
 
-  const facts = db.prepare(`
-    SELECT f.*, ef.role
-    FROM facts f
-    JOIN entity_facts ef ON f.id = ef.fact_id
-    WHERE ef.entity_id = ? AND f.status = 'active'
-    ORDER BY f.confidence DESC
-  `).all(entityId);
-
-  // Get evidence for each fact
-  const factsWithEvidence = facts.map(fact => {
-    const evidence = db.prepare(`
-      SELECT fe.*, c.content_clean, c.doc_title
-      FROM fact_evidence fe
-      JOIN chunks c ON fe.chunk_id = c.id
-      WHERE fe.fact_id = ?
-    `).all(fact.id);
-
-    return {
-      ...fact,
-      evidence
-    };
-  });
-
-  // Get related entities
-  const relatedEntities = db.prepare(`
-    SELECT DISTINCT e2.*
-    FROM entity_facts ef1
-    JOIN entity_facts ef2 ON ef1.fact_id = ef2.fact_id
-    JOIN entities e2 ON ef2.entity_id = e2.id
-    WHERE ef1.entity_id = ? AND ef2.entity_id != ?
-    LIMIT 10
-  `).all(entityId, entityId);
+  const facts = EntityFactRepo.getEntityFullFacts(entityId);
+  const factsWithEvidence = facts.map(fact => ({
+    ...fact,
+    evidence: EntityFactRepo.getFactEvidenceWithChunks(fact.id)
+  }));
 
   return {
     ...entity,
     aliases: safeJson(entity.aliases_json, []),
     facts: factsWithEvidence,
-    related_entities: relatedEntities
+    related_entities: EntityFactRepo.getRelatedEntitiesForEntity(entityId)
   };
 }
 
@@ -824,32 +632,11 @@ function getEntityFactsById(entityId) {
  * @returns {Array} Matching facts with entities and evidence
  */
 export function searchFacts(query, limit = 20) {
-  const facts = db.prepare(`
-    SELECT f.*, GROUP_CONCAT(DISTINCT e.name) as entity_names
-    FROM facts f
-    LEFT JOIN entity_facts ef ON f.id = ef.fact_id
-    LEFT JOIN entities e ON ef.entity_id = e.id
-    WHERE f.content LIKE ? AND f.status = 'active'
-    GROUP BY f.id
-    ORDER BY f.confidence DESC
-    LIMIT ?
-  `).all(`%${query}%`, limit);
-
-  return facts.map(fact => {
-    const evidence = db.prepare(`
-      SELECT c.id, c.doc_title, c.content_clean
-      FROM fact_evidence fe
-      JOIN chunks c ON fe.chunk_id = c.id
-      WHERE fe.fact_id = ?
-      LIMIT 3
-    `).all(fact.id);
-
-    return {
-      ...fact,
-      entities: fact.entity_names ? fact.entity_names.split(',') : [],
-      evidence
-    };
-  });
+  return EntityFactRepo.searchFactsByContent(query, limit).map(fact => ({
+    ...fact,
+    entities: fact.entity_names ? fact.entity_names.split(',') : [],
+    evidence: EntityFactRepo.getEvidenceForFact(fact.id)
+  }));
 }
 
 /**
@@ -857,23 +644,7 @@ export function searchFacts(query, limit = 20) {
  * @returns {Array} Potential conflicts
  */
 export function findConflictingFacts() {
-  // Find facts about the same entity that might conflict
-  const potentialConflicts = db.prepare(`
-    SELECT
-      e.name as entity_name,
-      f1.id as fact1_id, f1.content as fact1_content,
-      f2.id as fact2_id, f2.content as fact2_content
-    FROM entity_facts ef1
-    JOIN entity_facts ef2 ON ef1.entity_id = ef2.entity_id AND ef1.fact_id < ef2.fact_id
-    JOIN entities e ON ef1.entity_id = e.id
-    JOIN facts f1 ON ef1.fact_id = f1.id
-    JOIN facts f2 ON ef2.fact_id = f2.id
-    WHERE f1.fact_type = f2.fact_type
-      AND f1.status = 'active' AND f2.status = 'active'
-    LIMIT 50
-  `).all();
-
-  return potentialConflicts;
+  return EntityFactRepo.findConflictingFacts();
 }
 
 /**
@@ -882,41 +653,22 @@ export function findConflictingFacts() {
  * @param {string} nodeId - Node ID
  */
 export function linkEntityToNode(entityId, nodeId) {
-  db.prepare(`
-    UPDATE entities SET node_id = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(nodeId, entityId);
+  EntityFactRepo.linkToNode(entityId, nodeId);
 }
 
 /**
  * Get extraction statistics
  */
 export function getExtractionStats() {
-  const stats = {
-    entities: db.prepare(`SELECT COUNT(*) as count FROM entities`).get().count,
-    facts: db.prepare(`SELECT COUNT(*) as count FROM facts WHERE status = 'active'`).get().count,
-    entity_fact_links: db.prepare(`SELECT COUNT(*) as count FROM entity_facts`).get().count,
-    fact_evidence_links: db.prepare(`SELECT COUNT(*) as count FROM fact_evidence`).get().count,
-
-    entities_by_type: db.prepare(`
-      SELECT type, COUNT(*) as count FROM entities GROUP BY type ORDER BY count DESC
-    `).all(),
-
-    facts_by_type: db.prepare(`
-      SELECT fact_type, COUNT(*) as count FROM facts WHERE status = 'active' GROUP BY fact_type ORDER BY count DESC
-    `).all(),
-
-    top_entities: db.prepare(`
-      SELECT e.name, e.type, COUNT(ef.fact_id) as fact_count
-      FROM entities e
-      LEFT JOIN entity_facts ef ON e.id = ef.entity_id
-      GROUP BY e.id
-      ORDER BY fact_count DESC
-      LIMIT 10
-    `).all()
+  return {
+    entities: EntityFactRepo.getEntityCount(),
+    facts: EntityFactRepo.getActiveFactCount(),
+    entity_fact_links: EntityFactRepo.getEntityFactLinkCount(),
+    fact_evidence_links: EntityFactRepo.getFactEvidenceLinkCount(),
+    entities_by_type: EntityFactRepo.getEntitiesByType(),
+    facts_by_type: EntityFactRepo.getFactsByType(),
+    top_entities: EntityFactRepo.getTopEntities(10)
   };
-
-  return stats;
 }
 
 /**
@@ -924,21 +676,7 @@ export function getExtractionStats() {
  * @returns {Array} Documents without entity extraction
  */
 export function getDocumentsNeedingExtraction() {
-  // Find documents that have chunks but no fact_evidence links
-  const docs = db.prepare(`
-    SELECT DISTINCT d.id, d.original_name, d.filename, d.status,
-           COUNT(DISTINCT c.id) as chunk_count,
-           COUNT(DISTINCT fe.chunk_id) as extracted_chunks
-    FROM documents d
-    JOIN chunks c ON c.document_id = d.id AND c.status = 'active'
-    LEFT JOIN fact_evidence fe ON fe.chunk_id = c.id
-    WHERE d.status = 'processed'
-    GROUP BY d.id
-    HAVING extracted_chunks < chunk_count * 0.5
-    ORDER BY d.uploaded_at DESC
-  `).all();
-
-  return docs.map(d => ({
+  return EntityFactRepo.getDocsNeedingExtraction().map(d => ({
     ...d,
     title: d.original_name || d.filename,
     needs_extraction: d.extracted_chunks < d.chunk_count * 0.5,
@@ -1026,11 +764,7 @@ export async function extractFromChunks(chunkIds, options = {}) {
   };
 
   for (const chunkId of chunkIds) {
-    const chunk = db.prepare(`
-      SELECT id, content_clean, node_id, doc_title
-      FROM chunks
-      WHERE id = ? AND status = 'active'
-    `).get(chunkId);
+    const chunk = EntityFactRepo.getActiveChunk(chunkId);
 
     if (!chunk) {
       results.errors.push({ chunk_id: chunkId, error: 'Chunk not found' });
@@ -1065,169 +799,57 @@ export async function extractFromChunks(chunkIds, options = {}) {
 export function getNodeEntitiesAndFacts(nodeId, options = {}) {
   const { limit = 50, debug = false } = options;
 
-  // Debug: Check what data exists
   if (debug) {
-    const totalEntities = db.prepare(`SELECT COUNT(*) as c FROM entities`).get();
-    const totalMentions = db.prepare(`SELECT COUNT(*) as c FROM entity_mentions`).get();
-    const entitiesWithNodeId = db.prepare(`SELECT COUNT(*) as c FROM entities WHERE node_id = ?`).get(nodeId);
-    const chunksInNode = db.prepare(`SELECT COUNT(*) as c FROM chunks WHERE node_id = ? AND status = 'active'`).get(nodeId);
-    console.log(`[getNodeEntitiesAndFacts] Debug: totalEntities=${totalEntities.c}, totalMentions=${totalMentions.c}, entitiesWithNodeId=${entitiesWithNodeId.c}, chunksInNode=${chunksInNode.c}`);
+    console.log(`[getNodeEntitiesAndFacts] Debug: totalEntities=${EntityFactRepo.countEntities()}, totalMentions=${EntityFactRepo.countMentions()}, entitiesWithNodeId=${EntityFactRepo.countEntitiesWithNodeId(nodeId)}, chunksInNode=${EntityFactRepo.countChunksInNode(nodeId)}`);
   }
 
-  // Get entities for this node using multiple approaches:
-  // 1. Entities with direct node_id match
-  // 2. Entities linked via entity_mentions -> chunks
-  let entities = db.prepare(`
-    SELECT e.*,
-           COALESCE(mention_stats.mention_count, 0) as mention_count,
-           COALESCE(fact_stats.fact_count, 0) as fact_count
-    FROM entities e
-    LEFT JOIN (
-      SELECT em.entity_id, COUNT(DISTINCT em.chunk_id) as mention_count
-      FROM entity_mentions em
-      JOIN chunks c ON em.chunk_id = c.id
-      WHERE c.node_id = ? AND c.status = 'active'
-      GROUP BY em.entity_id
-    ) mention_stats ON e.id = mention_stats.entity_id
-    LEFT JOIN (
-      SELECT ef.entity_id, COUNT(DISTINCT ef.fact_id) as fact_count
-      FROM entity_facts ef
-      GROUP BY ef.entity_id
-    ) fact_stats ON e.id = fact_stats.entity_id
-    WHERE e.node_id = ? OR mention_stats.entity_id IS NOT NULL
-    ORDER BY mention_count DESC, fact_count DESC
-    LIMIT ?
-  `).all(nodeId, nodeId, limit);
+  // Get entities via mention_stats + fact_stats (primary)
+  let entities = EntityFactRepo.getEntitiesForNodePrimary(nodeId, limit);
 
-  // Fallback 1: If no entities found, try simpler query via entity_mentions
+  // Fallback 1: simpler entity_mentions join
   if (entities.length === 0) {
-    entities = db.prepare(`
-      SELECT DISTINCT e.*,
-             SUM(em.mention_count) as mention_count,
-             0 as fact_count
-      FROM entities e
-      JOIN entity_mentions em ON e.id = em.entity_id
-      JOIN chunks c ON em.chunk_id = c.id
-      WHERE c.node_id = ? AND c.status = 'active'
-      GROUP BY e.id
-      ORDER BY mention_count DESC
-      LIMIT ?
-    `).all(nodeId, limit);
+    entities = EntityFactRepo.getEntitiesForNodeFallback1(nodeId, limit);
   }
 
-  // Fallback 2: Try getting entities via fact_evidence -> chunks
+  // Fallback 2: via fact_evidence → chunks
   if (entities.length === 0) {
-    const chunkIds = db.prepare(`
-      SELECT id FROM chunks WHERE node_id = ? AND status = 'active'
-    `).all(nodeId).map(c => c.id);
-
+    const chunkIds = EntityFactRepo.getChunkIdsForNode(nodeId);
     if (chunkIds.length > 0) {
-      const placeholders = chunkIds.map(() => '?').join(',');
-      entities = db.prepare(`
-        SELECT DISTINCT e.*, 1 as mention_count,
-               COUNT(DISTINCT ef.fact_id) as fact_count
-        FROM entities e
-        JOIN entity_facts ef ON e.id = ef.entity_id
-        JOIN fact_evidence fe ON ef.fact_id = fe.fact_id
-        WHERE fe.chunk_id IN (${placeholders})
-        GROUP BY e.id
-        ORDER BY fact_count DESC
-        LIMIT ?
-      `).all(...chunkIds, limit);
+      entities = EntityFactRepo.getEntitiesForNodeFallback2(chunkIds, limit);
     }
   }
 
-  // Fallback 3: If still nothing, just get all entities for debugging
+  // Fallback 3 (debug only): all entities
   if (entities.length === 0 && debug) {
-    entities = db.prepare(`
-      SELECT e.*, 0 as mention_count, 0 as fact_count
-      FROM entities e
-      LIMIT 10
-    `).all();
+    entities = EntityFactRepo.getAllEntitiesForDebug(10);
     console.log(`[getNodeEntitiesAndFacts] Fallback to all entities: found ${entities.length}`);
   }
 
-  // Get facts from multiple sources:
-  // 1. Facts linked via fact_evidence -> chunks in this node
-  // 2. Facts linked via entity_facts -> entities in this node
-  const facts = db.prepare(`
-    SELECT DISTINCT f.*,
-           COALESCE(fe.extraction_confidence, 0.5) as extraction_confidence,
-           c.doc_title as source_doc,
-           SUBSTR(c.content_clean, 1, 200) as source_excerpt
-    FROM facts f
-    LEFT JOIN fact_evidence fe ON f.id = fe.fact_id
-    LEFT JOIN chunks c ON fe.chunk_id = c.id
-    LEFT JOIN entity_facts ef ON f.id = ef.fact_id
-    LEFT JOIN entities e ON ef.entity_id = e.id
-    WHERE f.status = 'active' AND (
-      (c.node_id = ? AND c.status = 'active')
-      OR e.node_id = ?
-    )
-    ORDER BY f.confidence DESC, extraction_confidence DESC
-    LIMIT ?
-  `).all(nodeId, nodeId, limit);
+  const facts = EntityFactRepo.getFactsForNode(nodeId, limit);
 
-  // Enrich entities with their facts
-  const enrichedEntities = entities.map(entity => {
-    const entityFacts = db.prepare(`
-      SELECT f.content, f.fact_type, f.confidence
-      FROM facts f
-      JOIN entity_facts ef ON f.id = ef.fact_id
-      WHERE ef.entity_id = ? AND f.status = 'active'
-      ORDER BY f.confidence DESC
-      LIMIT 5
-    `).all(entity.id);
+  const enrichedEntities = entities.map(entity => ({
+    id: entity.id,
+    name: entity.name,
+    type: entity.type,
+    description: entity.description,
+    mention_count: entity.mention_count,
+    fact_count: entity.fact_count,
+    aliases: safeJson(entity.aliases_json, []),
+    facts: EntityFactRepo.getTopFactsForEntity(entity.id)
+  }));
 
-    return {
-      id: entity.id,
-      name: entity.name,
-      type: entity.type,
-      description: entity.description,
-      mention_count: entity.mention_count,
-      fact_count: entity.fact_count,
-      aliases: safeJson(entity.aliases_json, []),
-      facts: entityFacts
-    };
-  });
-
-  // Build debug info if requested
   let debugInfo = null;
   if (debug) {
-    const totalEntities = db.prepare(`SELECT COUNT(*) as c FROM entities`).get();
-    const totalMentions = db.prepare(`SELECT COUNT(*) as c FROM entity_mentions`).get();
-    const totalFacts = db.prepare(`SELECT COUNT(*) as c FROM facts`).get();
-    const totalEvidence = db.prepare(`SELECT COUNT(*) as c FROM fact_evidence`).get();
-    const entitiesWithNodeId = db.prepare(`SELECT COUNT(*) as c FROM entities WHERE node_id = ?`).get(nodeId);
-    const chunksInNode = db.prepare(`SELECT COUNT(*) as c FROM chunks WHERE node_id = ? AND status = 'active'`).get(nodeId);
-
-    // Check entity_mentions for this node's chunks
-    const mentionsForNodeChunks = db.prepare(`
-      SELECT COUNT(*) as c
-      FROM entity_mentions em
-      JOIN chunks c ON em.chunk_id = c.id
-      WHERE c.node_id = ? AND c.status = 'active'
-    `).get(nodeId);
-
-    // Show distinct node_ids that have entities
-    const nodesWithEntities = db.prepare(`
-      SELECT DISTINCT e.node_id, COUNT(*) as entity_count
-      FROM entities e
-      WHERE e.node_id IS NOT NULL
-      GROUP BY e.node_id
-      LIMIT 10
-    `).all();
-
     debugInfo = {
-      total_entities_in_db: totalEntities.c,
-      total_mentions_in_db: totalMentions.c,
-      total_facts_in_db: totalFacts.c,
-      total_evidence_in_db: totalEvidence.c,
-      entities_with_this_node_id: entitiesWithNodeId.c,
-      chunks_in_this_node: chunksInNode.c,
-      mentions_for_node_chunks: mentionsForNodeChunks.c,
+      total_entities_in_db: EntityFactRepo.countEntities(),
+      total_mentions_in_db: EntityFactRepo.countMentions(),
+      total_facts_in_db: EntityFactRepo.countFacts(),
+      total_evidence_in_db: EntityFactRepo.countEvidence(),
+      entities_with_this_node_id: EntityFactRepo.countEntitiesWithNodeId(nodeId),
+      chunks_in_this_node: EntityFactRepo.countChunksInNode(nodeId),
+      mentions_for_node_chunks: EntityFactRepo.countMentionsForNodeChunks(nodeId),
       queried_node_id: nodeId,
-      nodes_with_entities: nodesWithEntities
+      nodes_with_entities: EntityFactRepo.getNodesWithEntities()
     };
   }
 

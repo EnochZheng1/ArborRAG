@@ -2,7 +2,8 @@
  * Hierarchy-based enrichment and chunk retrieval strategies.
  */
 
-import { db, safeJson } from "../../db/db.js";
+import { safeJson } from "../../db/db.js";
+import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { getAncestors, getChildren, getSiblings } from "../graphTraversal.js";
 
@@ -87,13 +88,7 @@ export function enrichWithHierarchy(results, options = {}) {
 export function getHierarchicalChunks(nodeId, maxChunks = 20) {
   const chunks = [];
 
-  const nodeChunks = db.prepare(`
-    SELECT c.*, n.name as node_name FROM chunks c
-    JOIN nodes n ON n.node_id = c.node_id
-    WHERE c.node_id = ? AND c.status = 'active'
-    ORDER BY c.authority_level ASC, c.uploaded_at DESC
-    LIMIT ?
-  `).all(nodeId, Math.ceil(maxChunks / 2));
+  const nodeChunks = ChunkRepo.getForNodeWithNodeName(nodeId, Math.ceil(maxChunks / 2));
 
   for (const c of nodeChunks) {
     chunks.push({ ...c, source: "direct", keywords: safeJson(c.keywords_json, []) });
@@ -104,13 +99,7 @@ export function getHierarchicalChunks(nodeId, maxChunks = 20) {
 
   for (const child of children) {
     if (chunks.length >= maxChunks) break;
-    const childChunks = db.prepare(`
-      SELECT c.*, n.name as node_name FROM chunks c
-      JOIN nodes n ON n.node_id = c.node_id
-      WHERE c.node_id = ? AND c.status = 'active'
-      ORDER BY c.authority_level ASC, c.uploaded_at DESC
-      LIMIT ?
-    `).all(child.node_id, chunksPerChild);
+    const childChunks = ChunkRepo.getForNodeWithNodeName(child.node_id, chunksPerChild);
 
     for (const c of childChunks) {
       chunks.push({ ...c, source: "child", keywords: safeJson(c.keywords_json, []) });
