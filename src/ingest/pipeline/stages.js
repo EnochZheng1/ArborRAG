@@ -106,6 +106,7 @@ export async function stageExtractKPs(ctx) {
   const { content, fileMetadata, options, documentId } = ctx;
   const { useLLM } = options;
 
+  ctx.enrichedChunks = []; // ensure downstream never sees undefined on early throw
   ctx.setStep(documentId, "kp_extraction", "Extracting knowledge points…", 25);
 
   const kps = await extractKnowledgePoints(content, fileMetadata.filename, {

@@ -6,6 +6,7 @@ import { GoogleGenAI } from "@google/genai";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
+import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 
 /**
  * Map chunks to appropriate tree nodes
@@ -576,48 +577,7 @@ function ensureRootNode() {
 
 const TOPIC_MATCH_THRESHOLD = 0.55;
 const DEDUP_THRESHOLD       = 0.85;
-
-/**
- * Dice coefficient similarity over word bigrams (CJK-aware).
- * Exported from knowledgeExtractor — re-imported here to avoid circular deps.
- */
-function wordDiceSimilarity(a, b) {
-  function tokenize(str) {
-    const tokens = [];
-    const re = /[\u4e00-\u9fa5]|[a-zA-Z0-9]+/g;
-    let m;
-    while ((m = re.exec(str)) !== null) tokens.push(m[0].toLowerCase());
-    return tokens;
-  }
-  function bigrams(tokens) {
-    if (tokens.length < 2) return new Set(tokens);
-    const s = new Set();
-    for (let i = 0; i < tokens.length - 1; i++) s.add(`${tokens[i]}|${tokens[i + 1]}`);
-    return s;
-  }
-  const ta = tokenize(a);
-  const tb = tokenize(b);
-  if (ta.length === 0 && tb.length === 0) return 1;
-  if (ta.length === 0 || tb.length === 0) return 0;
-
-  // Unigram Dice (good for short phrases)
-  const ua = new Set(ta);
-  const ub = new Set(tb);
-  let uIntersect = 0;
-  for (const tok of ua) if (ub.has(tok)) uIntersect++;
-  const unigramDice = (2 * uIntersect) / (ua.size + ub.size);
-
-  // Bigram Dice (better precision for longer texts)
-  const ga = bigrams(ta);
-  const gb = bigrams(tb);
-  let bIntersect = 0;
-  for (const gram of ga) if (gb.has(gram)) bIntersect++;
-  const bigramDice = ga.size + gb.size > 0 ? (2 * bIntersect) / (ga.size + gb.size) : 0;
-
-  // Weight unigrams more for short phrases
-  const shortText = ta.length < 4 || tb.length < 4;
-  return shortText ? unigramDice : (unigramDice * 0.3 + bigramDice * 0.7);
-}
+// wordDiceSimilarity imported from knowledgeExtractor.js
 
 /**
  * Find or create a topical node under a given parent.
@@ -744,7 +704,9 @@ async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
     }
   }
 
-  return { nodeMap, newNodes };
+  // Strip internal _created flag before returning
+  const cleanNodes = newNodes.map(({ _created: _, ...rest }) => rest);
+  return { nodeMap, newNodes: cleanNodes };
 }
 
 /**
@@ -775,19 +737,30 @@ async function deduplicateKP(kp, nodeId, sourceDocInfo, options = {}) {
       }
 
       if (useLLM && sim >= 0.65) {
-        // Borderline — ask LLM
+        // Borderline — ask LLM with a direct yes/no prompt
         try {
-          const suggestion = await suggestNodeWithLLM(
-            { content: `Are these two statements the same fact?\nA: ${kp.content}\nB: ${candidate.content_clean}`, keywords: [] },
-            []
-          );
-          if (suggestion.confidence >= 0.75 && suggestion.selected_index === 0) {
-            const existing = safeJson(candidate.source_documents_json, []);
-            const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
-            if (!alreadyHasDoc) {
-              ChunkRepo.updateSourceDocuments(candidate.id, JSON.stringify([...existing, sourceDocInfo]));
+          const apiKey = process.env.GEMINI_API_KEY;
+          if (apiKey) {
+            const ai = new GoogleGenAI({ apiKey });
+            const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+            const prompt = `Are these two knowledge statements expressing the same fact? Answer with JSON only.
+A: "${kp.content.slice(0, 300)}"
+B: "${(candidate.content_clean || "").slice(0, 300)}"
+Return: {"same_fact": true|false, "confidence": 0.0-1.0}`;
+
+            const resp = await ai.models.generateContent({ model, contents: prompt,
+              config: { temperature: 0.1, maxOutputTokens: 50 } });
+            const text = (resp.text || "{}").replace(/```(?:json)?|```/g, "").trim();
+            const parsed = JSON.parse(text);
+            if (parsed.same_fact === true && (parsed.confidence ?? 0) >= 0.75) {
+              const existing = safeJson(candidate.source_documents_json, []);
+              const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
+              if (!alreadyHasDoc) {
+                ChunkRepo.updateSourceDocuments(candidate.id, JSON.stringify([...existing, sourceDocInfo]));
+              }
+              logger.debug(`KP borderline merge confirmed by LLM: chunk ${candidate.id}`);
+              return candidate.id;
             }
-            return candidate.id;
           }
         } catch (_) { /* non-fatal */ }
       }

@@ -235,7 +235,14 @@ export const ChunkRepo = {
    * Returns chunks with content_clean and source_documents_json.
    */
   findSimilarInNode(nodeId, queryText, limit = 5) {
-    const safeQ = queryText.slice(0, 500).replace(/["'`]/g, ' ').trim();
+    // Strip FTS5 special characters: operators (AND OR NOT), phrase quotes,
+    // wildcards, boost markers, and NEAR/column filters.
+    const safeQ = queryText
+      .slice(0, 500)
+      .replace(/["'`*^:()-]/g, ' ')
+      .replace(/\b(AND|OR|NOT|NEAR)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!safeQ) return [];
     return db.prepare(`
       SELECT c.id, c.content_clean, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
