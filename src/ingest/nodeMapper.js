@@ -572,6 +572,264 @@ function ensureRootNode() {
   return NodeRepo.insertRoot();
 }
 
+// ── KP topical hierarchy helpers ──────────────────────────────────────────────
+
+const TOPIC_MATCH_THRESHOLD = 0.55;
+const DEDUP_THRESHOLD       = 0.85;
+
+/**
+ * Dice coefficient similarity over word bigrams (CJK-aware).
+ * Exported from knowledgeExtractor — re-imported here to avoid circular deps.
+ */
+function wordDiceSimilarity(a, b) {
+  function tokenize(str) {
+    const tokens = [];
+    const re = /[\u4e00-\u9fa5]|[a-zA-Z0-9]+/g;
+    let m;
+    while ((m = re.exec(str)) !== null) tokens.push(m[0].toLowerCase());
+    return tokens;
+  }
+  function bigrams(tokens) {
+    if (tokens.length < 2) return new Set(tokens);
+    const s = new Set();
+    for (let i = 0; i < tokens.length - 1; i++) s.add(`${tokens[i]}|${tokens[i + 1]}`);
+    return s;
+  }
+  const ta = tokenize(a);
+  const tb = tokenize(b);
+  if (ta.length === 0 && tb.length === 0) return 1;
+  if (ta.length === 0 || tb.length === 0) return 0;
+
+  // Unigram Dice (good for short phrases)
+  const ua = new Set(ta);
+  const ub = new Set(tb);
+  let uIntersect = 0;
+  for (const tok of ua) if (ub.has(tok)) uIntersect++;
+  const unigramDice = (2 * uIntersect) / (ua.size + ub.size);
+
+  // Bigram Dice (better precision for longer texts)
+  const ga = bigrams(ta);
+  const gb = bigrams(tb);
+  let bIntersect = 0;
+  for (const gram of ga) if (gb.has(gram)) bIntersect++;
+  const bigramDice = ga.size + gb.size > 0 ? (2 * bIntersect) / (ga.size + gb.size) : 0;
+
+  // Weight unigrams more for short phrases
+  const shortText = ta.length < 4 || tb.length < 4;
+  return shortText ? unigramDice : (unigramDice * 0.3 + bigramDice * 0.7);
+}
+
+/**
+ * Find or create a topical node under a given parent.
+ * Uses BM25 search + Dice similarity to reuse existing nodes when possible.
+ * Returns { ...nodeObject, _created: boolean }.
+ */
+async function findOrCreateTopicNode(topicName, parentId, options = {}) {
+  const { useLLM = true } = options;
+
+  if (!topicName || topicName.trim().length === 0) {
+    return { ...ensureRootNode(), _created: false };
+  }
+
+  // Search for existing nodes with similar name
+  try {
+    const candidates = searchNodesByName(topicName, 10);
+
+    // Filter to same parent and score each by name similarity
+    const sameParent = candidates.filter(c => {
+      const node = c.node || c;
+      return node.parent_id === parentId;
+    });
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const c of sameParent) {
+      const node = c.node || c;
+      const score = wordDiceSimilarity(topicName.toLowerCase(), (node.name || "").toLowerCase());
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = node;
+      }
+    }
+
+    if (bestScore >= TOPIC_MATCH_THRESHOLD) {
+      logger.debug(`Topic node reused: "${bestMatch.name}" (score=${bestScore.toFixed(2)}) for "${topicName}"`);
+      return { ...bestMatch, _created: false };
+    }
+
+    // Borderline match — ask LLM
+    if (useLLM && bestScore >= 0.35 && bestMatch) {
+      try {
+        const suggestion = await suggestNodeWithLLM(
+          { content: topicName, keywords: [topicName] },
+          [{ node: bestMatch }]
+        );
+        if (suggestion.confidence >= 0.65 && suggestion.selected_index === 1) {
+          logger.debug(`LLM confirmed topic node reuse: "${bestMatch.name}" for "${topicName}"`);
+          return { ...bestMatch, _created: false };
+        }
+      } catch (_) { /* non-fatal */ }
+    }
+  } catch (err) {
+    logger.warn(`Topic node search failed for "${topicName}": ${err.message}`);
+  }
+
+  // Create new topical node
+  const parentLevel = parentId ? (NodeRepo.getLevel(parentId) ?? 0) : 0;
+  const node = createNode({
+    node_id:   generateNodeId(topicName),
+    name:      topicName,
+    parent_id: parentId,
+    level:     Number(parentLevel) + 1,
+    summary:   ""
+  });
+  logger.info(`Created topical node: ${node.node_id} (${node.name}) under ${parentId || "root"}`);
+  return { ...node, _created: true };
+}
+
+/**
+ * Group KPs into a 2–3 level topical hierarchy and return a map of
+ * kp.index → nodeId for every KP, plus a list of newly created nodes.
+ */
+async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
+  const { useLLM = true } = options;
+
+  ensureRootNode();
+
+  const nodeMap  = new Map();    // kp.index → nodeId
+  const newNodes = [];
+
+  // Group by topic_hint
+  const byTopic = new Map();
+  for (const kp of kps) {
+    const topic = (kp.topic_hint || "General").trim();
+    if (!byTopic.has(topic)) byTopic.set(topic, []);
+    byTopic.get(topic).push(kp);
+  }
+
+  for (const [topicName, topicKPs] of byTopic) {
+    const domainNode = await findOrCreateTopicNode(topicName, "root", { useLLM });
+    if (domainNode._created) newNodes.push(domainNode);
+
+    // Decide whether to add a subtopic level
+    const bySubtopic = new Map();
+    for (const kp of topicKPs) {
+      const sub = (kp.subtopic_hint || "").trim();
+      const key = sub || "__none__";
+      if (!bySubtopic.has(key)) bySubtopic.set(key, []);
+      bySubtopic.get(key).push(kp);
+    }
+
+    const uniqueSubs = [...bySubtopic.keys()].filter(k => k !== "__none__");
+
+    // Use a subtopic level only when there are ≥2 distinct, dissimilar subtopics
+    let useSubtopic = false;
+    if (uniqueSubs.length >= 2) {
+      const [s1, s2] = uniqueSubs;
+      useSubtopic = wordDiceSimilarity(s1, s2) < 0.6;
+    }
+
+    if (useSubtopic) {
+      for (const [subKey, subKPs] of bySubtopic) {
+        let targetNode = domainNode;
+        if (subKey !== "__none__") {
+          targetNode = await findOrCreateTopicNode(subKey, domainNode.node_id, { useLLM });
+          if (targetNode._created) newNodes.push(targetNode);
+        }
+        for (const kp of subKPs) nodeMap.set(kp.index, targetNode.node_id);
+      }
+    } else {
+      for (const kp of topicKPs) nodeMap.set(kp.index, domainNode.node_id);
+    }
+  }
+
+  return { nodeMap, newNodes };
+}
+
+/**
+ * Check for a near-duplicate KP in the same node and either merge source
+ * tracking or signal that a new row should be inserted.
+ *
+ * @returns {number|null} existing chunkId to update, or null → insert new row
+ */
+async function deduplicateKP(kp, nodeId, sourceDocInfo, options = {}) {
+  const { useLLM = true } = options;
+
+  try {
+    const candidates = ChunkRepo.findSimilarInNode(nodeId, kp.content, 5);
+
+    for (const candidate of candidates) {
+      const sim = wordDiceSimilarity(kp.content, candidate.content_clean || "");
+
+      if (sim >= DEDUP_THRESHOLD) {
+        // Definite duplicate — merge source tracking
+        const existing = safeJson(candidate.source_documents_json, []);
+        const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
+        if (!alreadyHasDoc) {
+          const merged = JSON.stringify([...existing, sourceDocInfo]);
+          ChunkRepo.updateSourceDocuments(candidate.id, merged);
+        }
+        logger.debug(`KP deduplicated: "${kp.content.slice(0, 60)}…" merged into chunk ${candidate.id}`);
+        return candidate.id;
+      }
+
+      if (useLLM && sim >= 0.65) {
+        // Borderline — ask LLM
+        try {
+          const suggestion = await suggestNodeWithLLM(
+            { content: `Are these two statements the same fact?\nA: ${kp.content}\nB: ${candidate.content_clean}`, keywords: [] },
+            []
+          );
+          if (suggestion.confidence >= 0.75 && suggestion.selected_index === 0) {
+            const existing = safeJson(candidate.source_documents_json, []);
+            const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
+            if (!alreadyHasDoc) {
+              ChunkRepo.updateSourceDocuments(candidate.id, JSON.stringify([...existing, sourceDocInfo]));
+            }
+            return candidate.id;
+          }
+        } catch (_) { /* non-fatal */ }
+      }
+    }
+  } catch (err) {
+    logger.warn(`KP deduplication check failed: ${err.message}`);
+  }
+
+  return null; // insert new row
+}
+
+/**
+ * Insert a KP into the DB and update the FTS index.
+ * @returns {number} new chunk ID
+ */
+function assignKPToNode(kp, nodeId, documentId) {
+  return runTransaction(() => {
+    const result = ChunkRepo.insertKP({
+      doc_title:            kp.doc_title,
+      content:              kp.content,
+      chunk_type:           kp.chunk_type || kp.kp_type || "fact",
+      kp_type:              kp.kp_type || "fact",
+      keywords:             kp.keywords || [],
+      fields:               kp.fields || {},
+      scope:                kp.scope || {},
+      authority_level:      kp.authority_level || "sop",
+      source_excerpt:       kp.source_excerpt || "",
+      source_documents_json: kp.source_documents_json || "[]",
+      nodeId,
+      documentId,
+      index: kp.index
+    });
+
+    const chunkId = result.lastInsertRowid;
+    ChunkRepo.insertFts(chunkId, kp.content);
+    NodeRepo.touch(nodeId);
+    logAudit("create", "chunks", chunkId, null, { node_id: nodeId, doc_title: kp.doc_title, kp_type: kp.kp_type });
+
+    return Number(chunkId);
+  });
+}
+
 /**
  * Auto-map multiple chunks to nodes
  * @param {Array} chunks - Chunks to map
@@ -592,6 +850,45 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
   ensureRootNode();
 
   if (chunks.length === 0) {
+    return results;
+  }
+
+  // ── KP topical mapping path ──────────────────────────────────────────────────
+  // Detected by the presence of a topic_hint field set by knowledgeExtractor.
+  const isKPMode = chunks.some(c => c.topic_hint !== undefined);
+
+  if (isKPMode) {
+    const docTitle = chunks[0]?.doc_title || "Untitled";
+    logger.info(`KP mapping mode: ${chunks.length} KPs from "${docTitle}"`);
+
+    const { nodeMap, newNodes } = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });
+    results.newNodes.push(...newNodes);
+
+    for (const kp of chunks) {
+      const targetNodeId = nodeMap.get(kp.index) || "root";
+      const sourceDocInfo = { doc_id: documentId, doc_title: docTitle, excerpt: kp.source_excerpt || "" };
+
+      const existingId = await deduplicateKP(kp, targetNodeId, sourceDocInfo, { useLLM });
+      if (existingId) {
+        results.mapped.push({ chunkIndex: kp.index, chunkId: existingId, nodeId: targetNodeId, deduplicated: true });
+      } else {
+        const chunkId = assignKPToNode(kp, targetNodeId, documentId);
+        results.mapped.push({ chunkIndex: kp.index, chunkId, nodeId: targetNodeId });
+      }
+    }
+
+    // Generate aliases for new nodes
+    if (useLLM && results.newNodes.length > 0) {
+      for (const node of results.newNodes) {
+        try {
+          await generateAndSaveAliases(node.node_id, { includeChunks: true, maxAliases: 8 });
+        } catch (err) {
+          logger.warn(`Failed to generate aliases for KP node ${node.node_id}: ${err.message}`);
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
     return results;
   }
 

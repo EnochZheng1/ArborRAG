@@ -17,8 +17,8 @@
 import { logAudit, runTransaction } from "../../db/db.js";
 import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
 import { parseFile, isSupportedFileType } from "../fileParser.js";
-import { chunkText, getChunkStats } from "../chunker.js";
-import { extractKeywords, extractMetadataWithLLM, extractScope, detectChunkType, detectAuthorityLevel } from "../metadataExtractor.js";
+import { extractKnowledgePoints } from "../knowledgeExtractor.js";
+import { detectAuthorityLevel } from "../metadataExtractor.js";
 import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
 import { processNewChunkConflicts } from "../conflictDetector.js";
 import { processDocumentForExtraction } from "../../extraction/entityFactExtractor.js";
@@ -100,54 +100,26 @@ export function stageRegister(ctx) {
   }
 }
 
-// ── Stage 3: Chunk content and enrich each chunk with metadata ────────────────
+// ── Stage 3: Extract Knowledge Points from document content ───────────────────
 
-export async function stageEnrichChunks(ctx) {
+export async function stageExtractKPs(ctx) {
   const { content, fileMetadata, options, documentId } = ctx;
-  const { useLLM, chunkConfig = {} } = options;
+  const { useLLM } = options;
 
-  ctx.setStep(documentId, "chunking", "Splitting content into chunks.", 25);
-  const chunks = chunkText(content, chunkConfig);
-  ctx.results.stats.chunkCount = chunks.length;
-  ctx.results.stats.chunkStats = getChunkStats(chunks);
-  logger.info(`Created ${chunks.length} chunks`);
+  ctx.setStep(documentId, "kp_extraction", "Extracting knowledge points…", 25);
 
-  ctx.setStep(documentId, "metadata_extraction", `Extracting chunk metadata (0/${chunks.length}).`, 40);
-  const enrichedChunks = [];
+  const kps = await extractKnowledgePoints(content, fileMetadata.filename, {
+    useLLM,
+    authorityLevel: detectAuthorityLevel(content, fileMetadata.filename),
+    documentId,
+    maxKPs: 150
+  });
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    let chunkMeta;
+  ctx.results.stats.chunkCount = kps.length;
+  ctx.enrichedChunks = kps;
 
-    if (useLLM && chunk.content.length > 100) {
-      chunkMeta = await extractMetadataWithLLM(chunk.content, fileMetadata.filename);
-    } else {
-      chunkMeta = {
-        keywords: extractKeywords(chunk.content),
-        chunk_type: detectChunkType(chunk.content),
-        authority_level: detectAuthorityLevel(chunk.content, fileMetadata.filename)
-      };
-    }
-
-    const scope = extractScope(chunk.content, fileMetadata.filename);
-    enrichedChunks.push({
-      ...chunk,
-      doc_title: fileMetadata.filename,
-      keywords: chunkMeta.keywords || [],
-      chunk_type: chunkMeta.chunk_type || "other",
-      authority_level: chunkMeta.authority_level || "sop",
-      scope: { ...scope, ...(chunkMeta.entities || {}) },
-      fields: chunkMeta.entities || {}
-    });
-
-    if (i === 0 || (i + 1) % 10 === 0 || i === chunks.length - 1) {
-      const progress = 40 + ((i + 1) / chunks.length) * 25;
-      ctx.setStep(documentId, "metadata_extraction",
-        `Extracting chunk metadata (${i + 1}/${chunks.length}).`, progress);
-    }
-  }
-
-  ctx.enrichedChunks = enrichedChunks;
+  ctx.setStep(documentId, "kp_extraction", `Extracted ${kps.length} knowledge points.`, 65);
+  logger.info(`Extracted ${kps.length} KPs from "${fileMetadata.filename}"`);
 }
 
 // ── Stage 4: Map chunks to nodes, detect conflicts, generate aliases ──────────

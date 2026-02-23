@@ -130,28 +130,39 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
 function getChunksForNode(nodeId) {
   const rows = ChunkRepo.getForNode(nodeId);
 
-  return rows.map(r => ({
-    id: r.id,
-    doc_title: r.doc_title,
-    content: r.content_clean,
-    chunk_type: r.chunk_type,
-    keywords: safeJson(r.keywords_json, []),
-    fields: safeJson(r.fields_json, {}),
-    scope: safeJson(r.scope_json, {}),
-    authority_level: r.authority_level,
-    uploaded_at: r.uploaded_at
-  }));
+  return rows.map(r => {
+    const sourceDocs = safeJson(r.source_documents_json, []);
+    return {
+      id: r.id,
+      doc_title: r.doc_title,
+      content: r.content_clean,
+      chunk_type: r.chunk_type,
+      kp_type: r.kp_type || 'legacy_chunk',
+      source_documents_json: r.source_documents_json || '[]',
+      source_count: sourceDocs.length || 1,
+      keywords: safeJson(r.keywords_json, []),
+      fields: safeJson(r.fields_json, {}),
+      scope: safeJson(r.scope_json, {}),
+      authority_level: r.authority_level,
+      uploaded_at: r.uploaded_at
+    };
+  });
 }
 
 // Format chunks as context string
 function formatChunksAsContext(chunks) {
   if (!chunks.length) return "(No relevant content found)";
 
-  return chunks.map((c, i) => {
+  return chunks.map((c) => {
+    const sourceDocs = safeJson(c.source_documents_json || '[]', []);
+    const sourceLabel = sourceDocs.length > 1
+      ? `Sources: ${sourceDocs.map(s => s.doc_title).join(', ')} [${sourceDocs.length} docs]`
+      : `Source: ${c.doc_title}`;
+
     const meta = [
-      c.doc_title && `Source: ${c.doc_title}`,
+      sourceLabel,
       c.authority_level && `Authority: ${c.authority_level}`,
-      c.chunk_type && `Type: ${c.chunk_type}`
+      c.kp_type && c.kp_type !== 'legacy_chunk' && `Type: ${c.kp_type}`
     ].filter(Boolean).join(" | ");
 
     return `[Chunk ${c.id}] ${meta}\n${c.content}`;

@@ -226,5 +226,52 @@ export const ChunkRepo = {
   /** id and node_id for all chunks of a document (for delete / rollback). */
   getForDoc(docId) {
     return db.prepare("SELECT id, node_id FROM chunks WHERE document_id = ?").all(docId);
+  },
+
+  // ── KP-specific operations ───────────────────────────────────────────────────
+
+  /**
+   * BM25 search within a specific node (for KP deduplication).
+   * Returns chunks with content_clean and source_documents_json.
+   */
+  findSimilarInNode(nodeId, queryText, limit = 5) {
+    const safeQ = queryText.slice(0, 500).replace(/["'`]/g, ' ').trim();
+    if (!safeQ) return [];
+    return db.prepare(`
+      SELECT c.id, c.content_clean, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
+      FROM chunks_fts
+      JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
+      WHERE chunks_fts MATCH ? AND c.node_id = ? AND c.status = 'active'
+      ORDER BY bm25(chunks_fts) ASC
+      LIMIT ?
+    `).all(safeQ, nodeId, Math.max(1, Math.floor(Number(limit))));
+  },
+
+  /** Update source_documents_json for a chunk (used when merging duplicate KPs). */
+  updateSourceDocuments(chunkId, sourceDocsJson) {
+    return db.prepare(
+      "UPDATE chunks SET source_documents_json = ? WHERE id = ?"
+    ).run(sourceDocsJson, chunkId);
+  },
+
+  /** INSERT a Knowledge Point row (includes KP-specific columns). */
+  insertKP({ doc_title, content, chunk_type, kp_type, keywords, fields, scope,
+             authority_level, source_excerpt, source_documents_json, nodeId, documentId, index }) {
+    return db.prepare(`
+      INSERT INTO chunks
+        (doc_title, content_clean, chunk_type, kp_type, keywords_json, fields_json,
+         scope_json, authority_level, source_excerpt, source_documents_json,
+         node_id, document_id, chunk_index, uploaded_at, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),'active')
+    `).run(
+      doc_title, content, chunk_type, kp_type,
+      JSON.stringify(keywords || []),
+      JSON.stringify(fields || {}),
+      JSON.stringify(scope || {}),
+      authority_level,
+      source_excerpt || '',
+      source_documents_json || '[]',
+      nodeId, documentId, index
+    );
   }
 };

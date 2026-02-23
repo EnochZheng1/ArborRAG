@@ -14,7 +14,7 @@ import { emitJobProgress } from "../../utils/progressEmitter.js";
 import {
   stageParseFile,
   stageRegister,
-  stageEnrichChunks,
+  stageExtractKPs,
   stageMapChunks,
   stageExtractEntities,
   stageFinalize,
@@ -61,19 +61,38 @@ function setDocumentProcessingStep(docId, step, message, progress, status = "pro
 function rollbackFailedDocument(docId) {
   return runTransaction(() => {
     const chunks = IngestRepo.getChunksForDoc(docId);
-    const chunkIds = chunks.map(c => Number(c.id));
     const affectedNodeIds = new Set(chunks.map(c => c.node_id).filter(Boolean));
 
-    if (chunkIds.length > 0) {
-      const conflictNodes = IngestRepo.getConflictNodeIds(chunkIds);
+    // Separate shared KP chunks (source_documents_json has >1 entry) from unique ones.
+    // Shared KPs must not be deleted — only remove this doc's source entry.
+    const toDelete  = [];
+    const toShrink  = [];
+
+    for (const chunk of chunks) {
+      const sourceDocs = safeJson(chunk.source_documents_json, []);
+      if (sourceDocs.length > 1) {
+        toShrink.push({ id: chunk.id, sourceDocs });
+      } else {
+        toDelete.push(Number(chunk.id));
+      }
+    }
+
+    // Remove this document's source entry from shared KPs (keep the row)
+    for (const { id, sourceDocs } of toShrink) {
+      const remaining = sourceDocs.filter(d => d.doc_id !== docId);
+      IngestRepo.updateChunkSourceDocuments(id, JSON.stringify(remaining));
+    }
+
+    if (toDelete.length > 0) {
+      const conflictNodes = IngestRepo.getConflictNodeIds(toDelete);
       for (const row of conflictNodes) if (row.node_id) affectedNodeIds.add(row.node_id);
 
-      IngestRepo.deleteConflictsForChunks(chunkIds);
+      IngestRepo.deleteConflictsForChunks(toDelete);
 
-      const strIds = chunkIds.map(String);
+      const strIds = toDelete.map(String);
       IngestRepo.deleteEmbeddingsForChunks(strIds);
       IngestRepo.deleteChunkFtsForIds(strIds);
-      IngestRepo.deleteChunksForDoc(docId);
+      IngestRepo.deleteChunksByIds(toDelete);
     }
 
     for (const nodeId of affectedNodeIds) {
@@ -90,7 +109,7 @@ function rollbackFailedDocument(docId) {
 const STAGES = [
   { name: "parse",    fn: stageParseFile,      skip: () => false },
   { name: "register", fn: stageRegister,       skip: () => false },
-  { name: "enrich",   fn: stageEnrichChunks,   skip: ctx => ctx.isDuplicate },
+  { name: "enrich",   fn: stageExtractKPs,     skip: ctx => ctx.isDuplicate },
   { name: "map",      fn: stageMapChunks,      skip: ctx => ctx.isDuplicate },
   { name: "entities", fn: stageExtractEntities,skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
   { name: "finalize", fn: stageFinalize,       skip: ctx => ctx.isDuplicate }

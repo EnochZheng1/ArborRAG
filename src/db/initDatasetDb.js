@@ -51,6 +51,9 @@ function runMigrations(conn) {
   ensureColumn(conn, "chunks", "chunk_index", "chunk_index INTEGER");
   ensureColumn(conn, "chunks", "feedback_score", "feedback_score REAL DEFAULT 0");
   ensureColumn(conn, "chunks", "feedback_count", "feedback_count INTEGER DEFAULT 0");
+  ensureColumn(conn, "chunks", "kp_type",              "kp_type TEXT DEFAULT 'legacy_chunk'");
+  ensureColumn(conn, "chunks", "source_excerpt",        "source_excerpt TEXT DEFAULT ''");
+  ensureColumn(conn, "chunks", "source_documents_json", "source_documents_json TEXT DEFAULT '[]'");
 
   // Documents
   ensureColumn(conn, "documents", "filename", "filename TEXT");
@@ -120,6 +123,7 @@ function ensureIndexes(conn) {
     { name: "idx_ingestion_jobs_created", sql: "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_created ON ingestion_jobs(created_at)" },
     { name: "idx_conflicts_node", sql: "CREATE INDEX IF NOT EXISTS idx_conflicts_node ON conflicts(node_id)" },
     { name: "idx_conflicts_resolution", sql: "CREATE INDEX IF NOT EXISTS idx_conflicts_resolution ON conflicts(resolution)" },
+    { name: "idx_chunks_kp_type", sql: "CREATE INDEX IF NOT EXISTS idx_chunks_kp_type ON chunks(kp_type, node_id)" },
   ];
 
   for (const idx of indexes) {

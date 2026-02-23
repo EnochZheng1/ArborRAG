@@ -2109,6 +2109,52 @@ select:focus {
   color: var(--text-secondary);
 }
 
+/* ── KP type badges ─────────────────────────────────────────────────────────── */
+.kp-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #fff;
+  letter-spacing: 0.03em;
+}
+.kp-type-fact        { background: #2563eb; }
+.kp-type-rule        { background: #7c3aed; }
+.kp-type-definition  { background: #0891b2; }
+.kp-type-procedure   { background: #059669; }
+.kp-type-example     { background: #d97706; }
+.kp-type-context     { background: #6b7280; }
+.kp-type-legacy_chunk { background: #94a3b8; font-style: italic; }
+.kp-type-content     { background: #94a3b8; }
+.kp-type-other       { background: #94a3b8; }
+
+.kp-source-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--primary);
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 12px;
+  padding: 2px 8px;
+  cursor: help;
+}
+
+[data-theme="dark"] .kp-type-fact        { background: #1d4ed8; }
+[data-theme="dark"] .kp-type-rule        { background: #6d28d9; }
+[data-theme="dark"] .kp-type-definition  { background: #0e7490; }
+[data-theme="dark"] .kp-type-procedure   { background: #047857; }
+[data-theme="dark"] .kp-type-example     { background: #b45309; }
+[data-theme="dark"] .kp-type-context     { background: #4b5563; }
+[data-theme="dark"] .kp-type-legacy_chunk { background: #64748b; }
+[data-theme="dark"] .kp-source-count {
+  background: rgba(96, 165, 250, 0.1);
+  border-color: rgba(96, 165, 250, 0.25);
+}
+
 .chunk-preview {
   font-size: 0.9rem;
   line-height: 1.5;

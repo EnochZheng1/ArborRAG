@@ -9,9 +9,9 @@ import { db } from "../db.js";
 export const IngestRepo = {
   // ── Chunk reads ───────────────────────────────────────────────────────────────
 
-  /** id and node_id for every chunk belonging to a document (for cascading deletes). */
+  /** id, node_id, and source_documents_json for every chunk belonging to a document. */
   getChunksForDoc(docId) {
-    return db.prepare("SELECT id, node_id FROM chunks WHERE document_id = ?").all(docId);
+    return db.prepare("SELECT id, node_id, source_documents_json FROM chunks WHERE document_id = ?").all(docId);
   },
 
   // ── Conflict cleanup ──────────────────────────────────────────────────────────
@@ -106,6 +106,18 @@ export const IngestRepo = {
   /** Delete all chunks for a document. */
   deleteChunksForDoc(docId) {
     db.prepare("DELETE FROM chunks WHERE document_id = ?").run(docId);
+  },
+
+  /** Delete specific chunk rows by ID array (for KP-aware rollback). */
+  deleteChunksByIds(ids) {
+    if (!ids.length) return;
+    const ph = ids.map(() => "?").join(",");
+    db.prepare(`DELETE FROM chunks WHERE id IN (${ph})`).run(...ids);
+  },
+
+  /** Update source_documents_json on a chunk (for KP shared-source shrink during rollback). */
+  updateChunkSourceDocuments(chunkId, sourceDocsJson) {
+    db.prepare("UPDATE chunks SET source_documents_json = ? WHERE id = ?").run(sourceDocsJson, chunkId);
   },
 
   /** Delete all chunks (emptyTree). */

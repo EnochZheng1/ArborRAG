@@ -487,6 +487,47 @@ Return ONLY a JSON array of scores: [score1, score2, ...]
 JSON:`
   },
 
+  // Knowledge Point extraction prompt
+  kpExtraction: {
+    zh: (docTitle, textSegment) => `你是知识库构建助手。从以下文档中提取所有原子知识点（KP）。
+
+文档标题：${docTitle}
+文本：
+"""
+${textSegment}
+"""
+
+规则：
+1. 每个知识点必须独立完整，无需上下文即可理解。
+2. 粒度要细：一条事实、规则、定义、步骤或示例对应一个知识点。
+3. 保留原文中的数字、条件和限定词。
+4. source_excerpt为原文逐字摘录（最多200字）。
+5. topic_hint和subtopic_hint为简短主题标签（3-8字），代表知识域。
+6. kp_type必须为以下之一：fact | rule | definition | procedure | example | context
+
+仅返回JSON数组（无markdown，无说明）：
+[{"statement":"...","kp_type":"...","topic_hint":"...","subtopic_hint":"...","tags":[...],"confidence":0.9,"source_excerpt":"..."}]`,
+
+    en: (docTitle, textSegment) => `You are a knowledge base assistant. Extract all atomic Knowledge Points (KPs) from the document text.
+
+Document title: ${docTitle}
+Text:
+"""
+${textSegment}
+"""
+
+Rules:
+1. Each KP must be a complete, self-contained statement understandable without surrounding context.
+2. Granularity: exactly one fact, rule, definition, procedure step, or example per KP.
+3. Preserve exact numbers, conditions, and qualifiers from the source.
+4. source_excerpt is a verbatim quote from the original text (max 200 chars).
+5. topic_hint and subtopic_hint: short topic labels (2-5 words) representing the knowledge domain.
+6. kp_type must be one of: fact | rule | definition | procedure | example | context
+
+Return a JSON array only (no markdown, no explanation):
+[{"statement":"...","kp_type":"...","topic_hint":"...","subtopic_hint":"...","tags":[...],"confidence":0.9,"source_excerpt":"..."}]`
+  },
+
   // Alias generation prompt
   aliasGeneration: {
     zh: (context, maxAliases) => `给定以下来自知识库的节点信息,生成${maxAliases}个用户可能用于搜索此内容的替代名称/别名。包括:

@@ -2098,11 +2098,16 @@ async function loadNodeDetail(nodeId) {
       `;
     }
 
-    // Show chunks
+    // Show chunks / KPs
     if (chunks.length > 0) {
+      const hasKPs = chunks.some(c => c.kp_type && c.kp_type !== 'legacy_chunk');
+      const sectionLabel = hasKPs
+        ? `🧠 Knowledge Points (${chunks.length} KP${chunks.length > 1 ? 's' : ''})`
+        : `📄 Content (${chunks.length} chunk${chunks.length > 1 ? 's' : ''})`;
+
       html += `
         <div class="node-chunks">
-          <h4>📄 Content (${chunks.length} chunk${chunks.length > 1 ? 's' : ''})</h4>
+          <h4>${escapeHtml(sectionLabel)}</h4>
           <div class="chunks-list">
       `;
 
@@ -2110,15 +2115,23 @@ async function loadNodeDetail(nodeId) {
         const fullContent = (chunk.content_clean || chunk.content || '').trim();
         const keywords = chunk.keywords_json ?
           (typeof chunk.keywords_json === 'string' ? JSON.parse(chunk.keywords_json) : chunk.keywords_json) : [];
+        const kpType = chunk.kp_type || chunk.chunk_type || 'content';
+        let sourceDocs = [];
+        try { sourceDocs = JSON.parse(chunk.source_documents_json || '[]'); } catch (_) {}
+        const sourceCount = sourceDocs.length;
+        const sourceTitle = sourceCount > 1
+          ? sourceDocs.map(d => escapeHtml(d.doc_title || '')).join(', ')
+          : escapeHtml(chunk.doc_title || 'Unknown source');
 
         html += `
           <div class="chunk-item">
             <div class="chunk-header">
-              <span class="chunk-type">${chunk.chunk_type || 'content'}</span>
-              <span class="chunk-source">${chunk.doc_title || 'Unknown source'}</span>
+              <span class="kp-type-badge kp-type-${escapeHtml(kpType)}">${escapeHtml(kpType)}</span>
+              <span class="chunk-source">${escapeHtml(chunk.doc_title || 'Unknown source')}</span>
+              ${sourceCount > 1 ? `<span class="kp-source-count" title="${sourceTitle}">📄 ${sourceCount} sources</span>` : ''}
             </div>
-            <p class="chunk-preview">${fullContent.replace(/\n/g, '<br>')}</p>
-            ${keywords.length ? `<div class="chunk-keywords">${keywords.map(k => `<span class="keyword-tag">${k}</span>`).join('')}</div>` : ''}
+            <p class="chunk-preview">${escapeHtml(fullContent).replace(/\n/g, '<br>')}</p>
+            ${keywords.length ? `<div class="chunk-keywords">${keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
           </div>
         `;
       }
