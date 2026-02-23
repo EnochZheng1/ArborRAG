@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import { initDb } from "./db/db.js";
-import { getConnection } from "./db/datasetManager.js";
+import { getConnection, getAllConnections } from "./db/datasetManager.js";
 import { getDefaultDatasetId } from "./db/registry.js";
 import { runWithDb } from "./db/activeDb.js";
 import { logger, requestLogger } from "./utils/logger.js";
@@ -93,3 +93,19 @@ const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   logger.info(`TreeKB server running on http://localhost:${PORT}`);
 });
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+function gracefulShutdown(signal) {
+  logger.info(`${signal} received — shutting down`);
+  httpServer.close(() => {
+    for (const { connection } of getAllConnections()) {
+      try { connection.close(); } catch (_) {}
+    }
+    logger.info("All DB connections closed");
+    process.exit(0);
+  });
+  // Force exit after 10 seconds if graceful shutdown stalls
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));

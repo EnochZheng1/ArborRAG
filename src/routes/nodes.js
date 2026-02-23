@@ -50,9 +50,10 @@ router.get("/nodes/:id/children", (req, res) => {
 // Get entities and facts for a node
 router.get("/nodes/:id/entities", (req, res) => {
   try {
-    const { limit = 50, debug = "false" } = req.query;
+    const { debug = "false" } = req.query;
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const result = getNodeEntitiesAndFacts(req.params.id, {
-      limit: parseInt(limit),
+      limit,
       debug: debug === "true"
     });
     res.json(result);

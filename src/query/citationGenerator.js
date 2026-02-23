@@ -7,6 +7,15 @@
 import { GoogleGenAI } from "@google/genai";
 import { detectLanguage } from "../utils/langDetect.js";
 
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Generate answer with inline citations
  * @param {string} query - Original query
@@ -148,13 +157,16 @@ function extractCitationsFromAnswer(text) {
  * Format answer with clickable citation links
  */
 function formatAnswerWithCitationLinks(text, citations) {
-  let html = text;
+  // Escape LLM-generated text first to prevent XSS via injected HTML
+  let html = escapeHtml(text);
 
-  // Replace [n] with clickable spans
+  // Replace [n] with clickable cite elements (safe after escaping — brackets are not HTML-special)
   html = html.replace(/\[(\d+)\]/g, (match, num) => {
     const citation = citations.find(c => c.number === parseInt(num, 10));
     if (citation) {
-      return `<cite data-citation="${num}" data-chunk-id="${citation.chunk_id}" title="${citation.title}">[${num}]</cite>`;
+      const safeChunkId = escapeHtml(citation.chunk_id);
+      const safeTitle = escapeHtml(citation.title);
+      return `<cite data-citation="${num}" data-chunk-id="${safeChunkId}" title="${safeTitle}">[${num}]</cite>`;
     }
     return match;
   });
@@ -294,13 +306,15 @@ function isBoilerplate(sentence) {
 export function formatCitationsAsFootnotes(citations) {
   if (!citations || citations.length === 0) return '';
 
-  const footnotes = citations.map(c =>
-    `<div class="footnote" id="cite-${c.number}">
+  const footnotes = citations.map(c => {
+    const safeTitle = escapeHtml(c.title);
+    const safeNodeName = c.node_name ? escapeHtml(c.node_name) : null;
+    return `<div class="footnote" id="cite-${c.number}">
       <span class="footnote-number">[${c.number}]</span>
-      <span class="footnote-title">${c.title}</span>
-      ${c.node_name ? `<span class="footnote-node">(${c.node_name})</span>` : ''}
-    </div>`
-  ).join('');
+      <span class="footnote-title">${safeTitle}</span>
+      ${safeNodeName ? `<span class="footnote-node">(${safeNodeName})</span>` : ''}
+    </div>`;
+  }).join('');
 
   return `<div class="footnotes"><h4>Sources</h4>${footnotes}</div>`;
 }

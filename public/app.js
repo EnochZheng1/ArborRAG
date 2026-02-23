@@ -5,6 +5,9 @@ const API_BASE = '';
 // ── WebSocket (real-time job progress) ───────────────────────────────────────
 let _ws = null;
 const _wsQueue = [];
+let _wsRetries = 0;
+const _WS_MAX_RETRIES = 10;
+const _WS_BASE_DELAY_MS = 1000;
 
 function _wsSend(msg) {
   const raw = JSON.stringify(msg);
@@ -20,6 +23,7 @@ function initWebSocket() {
   _ws = new WebSocket(`${proto}//${location.host}`);
 
   _ws.addEventListener('open', () => {
+    _wsRetries = 0; // reset backoff on successful connection
     _wsQueue.splice(0).forEach(msg => _ws.send(msg));
   });
 
@@ -36,10 +40,13 @@ function initWebSocket() {
 
   _ws.addEventListener('close', () => {
     _ws = null;
-    setTimeout(initWebSocket, 4000);
+    if (_wsRetries >= _WS_MAX_RETRIES) return; // give up after max retries
+    const delay = Math.min(_WS_BASE_DELAY_MS * Math.pow(2, _wsRetries), 30000);
+    _wsRetries++;
+    setTimeout(initWebSocket, delay);
   });
 
-  _ws.addEventListener('error', () => { /* close will fire */ });
+  _ws.addEventListener('error', () => { /* close will fire next */ });
 }
 
 function _handleJobProgress({ jobId, step, progress, message, status }) {
@@ -1929,7 +1936,7 @@ function attachTreeEvents() {
       }
 
       // Show node detail
-      loadNodeDetail(nodeId);
+      loadNodeDetail(nodeId).catch(console.error);
 
       // Update selected state
       document.querySelectorAll('.tree-node-item').forEach(i => i.classList.remove('selected'));
@@ -2131,7 +2138,7 @@ async function loadNodeDetail(nodeId) {
         document.querySelectorAll('.tree-node-item').forEach(n => n.classList.remove('selected'));
         const treeItem = document.querySelector(`.tree-node-item[data-node-id="${childId}"]`);
         if (treeItem) treeItem.classList.add('selected');
-        loadNodeDetail(childId);
+        loadNodeDetail(childId).catch(console.error);
       });
     });
   } catch (error) {
@@ -2314,7 +2321,7 @@ async function handleUpload() {
     selectedFiles = [];
     document.getElementById('file-list').classList.add('hidden');
     document.getElementById('file-input').value = '';
-    loadDocuments();
+    loadDocuments().catch(console.error);
   } catch (error) {
     showToast(error.message, 'error');
   } finally {
@@ -2470,13 +2477,16 @@ async function loadRateLimitedJobs() {
         <span class="rate-limit-hint">Resume after your Gemini quota resets (usually within a minute or an hour).</span>
       </div>
       <div class="rate-limit-jobs">
-        ${jobs.map(job => `
+        ${jobs.map(job => {
+          const jobName = escapeHtml(job.original_name || job.file_path || '');
+          const errMsg = escapeHtml((job.error_message || '').replace(/^Rate limit hit \(429\) — resume when quota resets: /, ''));
+          return `
           <div class="rate-limit-job">
-            <span class="rate-limit-job-name">${job.original_name || job.file_path}</span>
-            <span class="rate-limit-job-err">${job.error_message ? job.error_message.replace(/^Rate limit hit \(429\) — resume when quota resets: /, '') : ''}</span>
+            <span class="rate-limit-job-name">${jobName}</span>
+            <span class="rate-limit-job-err">${errMsg}</span>
             <button class="btn btn-sm btn-warning resume-job-btn" data-job-id="${job.id}">Resume</button>
-          </div>
-        `).join('')}
+          </div>`;
+        }).join('')}
       </div>
     `;
   } catch {
@@ -2496,7 +2506,7 @@ window.resumeRateLimitedJob = async function(jobId) {
 };
 
 async function loadDocuments() {
-  loadRateLimitedJobs();
+  loadRateLimitedJobs().catch(console.error);
   const tbody = document.getElementById('documents-tbody');
   if (documentsPollTimer) {
     clearTimeout(documentsPollTimer);
@@ -2521,9 +2531,9 @@ async function loadDocuments() {
     tbody.innerHTML = data.documents.map(doc => `
       <tr>
         <td>${doc.id}</td>
-        <td>${doc.original_name || doc.filename}</td>
-        <td>${doc.file_type || '-'}</td>
-        <td><span class="status-badge status-${doc.status}">${doc.status}</span></td>
+        <td>${escapeHtml(doc.original_name || doc.filename || '')}</td>
+        <td>${escapeHtml(doc.file_type || '-')}</td>
+        <td><span class="status-badge status-${escapeHtml(doc.status || '')}">${escapeHtml(doc.status || '')}</span></td>
         <td>${formatDocumentStep(doc)}</td>
         <td>${Math.max(0, doc.chunk_count || 0)}</td>
         <td>${doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleDateString() : '-'}</td>

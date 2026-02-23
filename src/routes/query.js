@@ -53,8 +53,9 @@ router.post("/classify", async (req, res) => {
 // Get autocomplete suggestions
 router.get("/suggestions", (req, res) => {
   try {
-    const { q, limit = 10, lang = "auto" } = req.query;
-    const suggestions = getSuggestions(q, { limit: parseInt(limit), lang });
+    const { q, lang = "auto" } = req.query;
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const suggestions = getSuggestions(q, { limit, lang });
     res.json({ suggestions });
   } catch (err) {
     apiLogger.error("Get suggestions error:", err.message);
@@ -65,8 +66,8 @@ router.get("/suggestions", (req, res) => {
 // Get trending queries
 router.get("/suggestions/trending", (req, res) => {
   try {
-    const { limit = 5 } = req.query;
-    const trending = getTrendingQueries(parseInt(limit));
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 5));
+    const trending = getTrendingQueries(limit);
     res.json({ trending });
   } catch (err) {
     apiLogger.error("Get trending error:", err.message);
@@ -118,8 +119,8 @@ router.get("/feedback/stats", (req, res) => {
 // Get poorly performing queries
 router.get("/feedback/needs-improvement", (req, res) => {
   try {
-    const { limit = 20 } = req.query;
-    const queries = getPoorlyPerformingQueries(parseInt(limit));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const queries = getPoorlyPerformingQueries(limit);
     res.json({ queries });
   } catch (err) {
     apiLogger.error("Get poorly performing queries error:", err.message);

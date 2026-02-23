@@ -136,7 +136,7 @@ export const ConflictRepo = {
   /** Decrement the conflict_score (floor 0) for a node. */
   decrementNodeScore(nodeId) {
     return db.prepare(
-      "UPDATE nodes SET conflict_score = MAX(0, conflict_score - 1) WHERE node_id = ?"
+      "UPDATE nodes SET conflict_score = CASE WHEN conflict_score > 0 THEN conflict_score - 1 ELSE 0 END WHERE node_id = ?"
     ).run(nodeId);
   },
 

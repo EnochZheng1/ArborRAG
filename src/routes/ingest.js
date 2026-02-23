@@ -138,8 +138,10 @@ router.post("/upload/batch", upload.array("files", 20), (req, res) => {
 
 router.get("/ingest/jobs", (req, res) => {
   try {
-    const { status, limit = 50, offset = 0 } = req.query;
-    const jobs = listIngestionJobs({ status, limit: parseInt(limit), offset: parseInt(offset) });
+    const { status } = req.query;
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const jobs = listIngestionJobs({ status, limit, offset });
     res.json({ jobs, count: jobs.length });
   } catch (err) {
     apiLogger.error("List ingestion jobs error:", err.message);
