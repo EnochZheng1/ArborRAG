@@ -692,7 +692,7 @@ export async function bulkExtractEntities(options = {}) {
 
   for (const doc of docs) {
     try {
-      logger.info(`Bulk entity extraction: processing document ${doc.id} (${doc.filename || doc.title})`);
+      logger.info(`Bulk entity extraction: processing document ${doc.id} (${doc.original_name || doc.filename})`);
 
       const docResult = await processDocumentForExtraction(doc.id, { useLLM });
 

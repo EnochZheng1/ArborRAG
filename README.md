@@ -1,6 +1,6 @@
 # TreeKB — Tree-Based Knowledge Graph
 
-**v2.1.0** · Node.js · SQLite · OpenAI / Gemini
+**v2.2.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -71,19 +71,25 @@ INGEST_CLEANUP_ON_SUCCESS=true
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/ingest` | Upload and ingest a document |
-| `GET` | `/ingest/jobs` | List ingestion jobs |
+| `POST` | `/upload` | Upload and ingest a single document |
+| `POST` | `/upload/batch` | Upload and ingest multiple documents |
+| `GET` | `/upload/status/:jobId` | Check ingestion job status |
+| `GET` | `/jobs` | List all background jobs |
 | `POST` | `/ask` | Ask a question |
 | `GET` | `/documents` | List documents |
 | `DELETE` | `/documents/:id` | Delete document and its knowledge |
 | `GET` | `/nodes` | Get knowledge tree |
 | `GET` | `/conflicts` | List detected conflicts |
 | `GET` | `/decisions` | List pending KP decisions |
+| `GET` | `/entities` | List extracted entities |
+| `GET` | `/facts` | List extracted facts |
+| `GET` | `/datasets` | List datasets |
+| `POST` | `/datasets` | Create a dataset |
 | `GET` | `/settings/llm` | Get LLM configuration |
 | `POST` | `/settings/llm` | Update LLM provider / model |
 | `POST` | `/embeddings/sync` | Re-generate all embeddings |
 | `GET` | `/stats` | System statistics |
-| `GET` | `/datasets` | List datasets |
+| `GET` | `/health` | Health check |
 
 ---
 
@@ -106,6 +112,13 @@ public/            Single-page web UI
 ---
 
 ## Changelog
+
+### v2.2.0
+- **Node scope isolation** — simple lookup now uses only node-scoped (hierarchical) chunks; global direct chunks used only as fallback when tree localization fails entirely, with a user-visible fallback message
+- **BM25 scoring fix** — replaced dynamic `normalize01` with absolute cap (`MAX_EXPECTED_BM25 = 15.0`) to prevent low-quality nodes from being inflated to a false perfect score
+- **Superseded chunk filtering** — all 6 node-scoped `ChunkRepo` read methods now enforce `superseded_by IS NULL` in addition to `status = 'active'`
+- **Aggregation query UI** — fixed raw JSON being displayed for aggregation queries; answer, conditions, and missing-info now rendered properly
+- **Entity field name fix** — bulk entity extraction log now uses `doc.original_name` (was `doc.title`, always undefined)
 
 ### v2.1.0
 - Multi-provider LLM support (OpenAI + Gemini) with runtime switching

@@ -12,7 +12,7 @@ export const ChunkRepo = {
   getForNode(nodeId) {
     return db.prepare(`
       SELECT * FROM chunks
-      WHERE node_id = ? AND status = 'active'
+      WHERE node_id = ? AND status = 'active' AND superseded_by IS NULL
       ORDER BY authority_level ASC, uploaded_at DESC
     `).all(nodeId);
   },
@@ -21,7 +21,7 @@ export const ChunkRepo = {
   getForNodeLimited(nodeId, limit) {
     return db.prepare(`
       SELECT * FROM chunks
-      WHERE node_id = ? AND status = 'active'
+      WHERE node_id = ? AND status = 'active' AND superseded_by IS NULL
       ORDER BY authority_level ASC, uploaded_at DESC
       LIMIT ?
     `).all(nodeId, Math.max(1, Math.floor(Number(limit))));
@@ -32,7 +32,7 @@ export const ChunkRepo = {
     return db.prepare(`
       SELECT c.*, n.name as node_name FROM chunks c
       JOIN nodes n ON n.node_id = c.node_id
-      WHERE c.node_id = ? AND c.status = 'active'
+      WHERE c.node_id = ? AND c.status = 'active' AND c.superseded_by IS NULL
       ORDER BY c.authority_level ASC, c.uploaded_at DESC
       LIMIT ?
     `).all(nodeId, Math.max(1, Math.floor(Number(limit))));
@@ -44,7 +44,7 @@ export const ChunkRepo = {
       SELECT c.*, n.name as node_name, n.level as node_level
       FROM chunks c
       JOIN nodes n ON c.node_id = n.node_id
-      WHERE c.node_id = ? AND c.status = 'active'
+      WHERE c.node_id = ? AND c.status = 'active' AND c.superseded_by IS NULL
       ORDER BY c.authority_level ASC, c.uploaded_at DESC
       LIMIT ?
     `).all(nodeId, Math.max(1, Math.floor(Number(limit))));
@@ -56,7 +56,7 @@ export const ChunkRepo = {
       SELECT c.*, n.name as node_name, n.level as node_level
       FROM chunks c
       JOIN nodes n ON c.node_id = n.node_id
-      WHERE c.node_id = ? AND c.status = 'active'
+      WHERE c.node_id = ? AND c.status = 'active' AND c.superseded_by IS NULL
       ORDER BY c.authority_level ASC, c.chunk_index ASC
       LIMIT ?
     `).all(nodeId, Math.max(1, Math.floor(Number(limit))));
@@ -66,7 +66,7 @@ export const ChunkRepo = {
   getActiveForNode(nodeId) {
     return db.prepare(`
       SELECT * FROM chunks
-      WHERE node_id = ? AND status = 'active'
+      WHERE node_id = ? AND status = 'active' AND superseded_by IS NULL
       ORDER BY uploaded_at DESC
     `).all(nodeId);
   },

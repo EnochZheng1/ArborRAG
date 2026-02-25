@@ -1,7 +1,4 @@
-function normalize01(x, min, max) {
-  if (max <= min) return 0;
-  return Math.max(0, Math.min(1, (x - min) / (max - min)));
-}
+const MAX_EXPECTED_BM25 = 15.0;
 
 function authorityScore(level) {
   const map = { policy: 1.0, sop: 0.8, training: 0.6, personal: 0.4 };
@@ -32,11 +29,8 @@ function conflictRiskScore(conflictScore) {
 }
 
 export function rankNodes(candidates, queryScope) {
-  const bm25Vals = candidates.map(c => c.bm25);
-  const min = Math.min(...bm25Vals), max = Math.max(...bm25Vals);
-
   const scored = candidates.map(c => {
-    const sim = normalize01(c.bm25, min, max);
+    const sim = Math.min(1.0, (c.bm25 || 0) / MAX_EXPECTED_BM25);
     const scopeFit = scopeFitScore(queryScope, c.node.scope_json);
     const authFit = authorityScore(c.node.authority_level_mode);
     const recent = recencyScore(c.node.updated_at);

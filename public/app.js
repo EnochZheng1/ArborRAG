@@ -1182,9 +1182,17 @@ function displayAskResult(result, showTrace = false) {
       contentHtml = `${executionSummaryHtml}${renderComparisonTable(result.data)}`;
     } else if (result.query_type === 'recommendation' && result.data.recommendations) {
       contentHtml = `${executionSummaryHtml}${renderRecommendations(result.data)}`;
-    } else if (result.data.answer) {
-      plainAnswer = result.data.answer;
-      contentHtml = `${executionSummaryHtml}<div class="answer-text">${renderMarkdown(result.data.answer)}</div>
+    } else if (result.data.answer || result.data.final_answer) {
+      const answer = result.data.final_answer || result.data.answer;
+      plainAnswer = answer;
+      const conditionsHtml = result.data.conditions?.length
+        ? `<h4>Conditions</h4><ul>${result.data.conditions.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>`
+        : '';
+      const missingHtml = result.data.missing_info?.length
+        ? `<h4>Missing Information</h4><ul>${result.data.missing_info.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>`
+        : '';
+      contentHtml = `${executionSummaryHtml}<div class="answer-text">${renderMarkdown(answer)}</div>
+        ${conditionsHtml}${missingHtml}
         <div class="answer-actions">
           <button class="copy-answer-btn" id="copy-answer-btn" title="Copy answer"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>
         </div>`;

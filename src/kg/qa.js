@@ -892,38 +892,36 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     trace?.addStep('Hierarchical Retrieval', `Failed: ${err.message}`, null, 'error');
   }
 
-  // STEP 2: Merge direct chunks with hierarchical chunks
-  // Direct chunks catch content without tree structure, hierarchical catches structured content
+  // STEP 2: Strict Fallback — node-scope isolation first, global only when tree fails entirely
+  let usedFallback = false;
   const allChunks = [];
   const seenChunkIds = new Set();
 
-  // Add hierarchical chunks first (they have tree context)
-  for (const chunk of hierarchicalChunks) {
-    if (!seenChunkIds.has(chunk.id)) {
-      seenChunkIds.add(chunk.id);
-      allChunks.push({
-        ...chunk,
-        retrieval_source: 'hierarchical'
-      });
+  if (hierarchicalChunks.length > 0) {
+    // Primary: tree successfully located relevant nodes — use ONLY node-scoped chunks
+    for (const chunk of hierarchicalChunks) {
+      if (!seenChunkIds.has(chunk.id)) {
+        seenChunkIds.add(chunk.id);
+        allChunks.push({ ...chunk, retrieval_source: 'hierarchical' });
+      }
     }
-  }
-
-  // Add direct chunks that weren't found hierarchically
-  for (const chunk of directChunks) {
-    if (!seenChunkIds.has(chunk.id)) {
-      seenChunkIds.add(chunk.id);
-      allChunks.push({
-        ...chunk,
-        retrieval_source: 'direct'
-      });
+    trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
+      from_hierarchical: hierarchicalChunks.length,
+      direct_discarded: directChunks.length
+    });
+  } else {
+    // Fallback: tree localization failed entirely — use global direct chunks
+    usedFallback = true;
+    for (const chunk of directChunks) {
+      if (!seenChunkIds.has(chunk.id)) {
+        seenChunkIds.add(chunk.id);
+        allChunks.push({ ...chunk, retrieval_source: 'direct' });
+      }
     }
+    trace?.addStep('Chunk Selection', `Tree localization failed — falling back to ${allChunks.length} global chunks`, {
+      from_direct: directChunks.length
+    }, 'warn');
   }
-
-  trace?.addStep('Chunk Merge', `Combined ${allChunks.length} chunks`, {
-    from_hierarchical: hierarchicalChunks.length,
-    from_direct: directChunks.length,
-    unique_total: allChunks.length
-  });
 
   // If no chunks found at all
   if (allChunks.length === 0) {
@@ -1143,7 +1141,8 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
         hierarchical: hierarchicalChunks.length,
         direct: directChunks.length
       },
-      retrieval_options: { topK, maxChunks, minConfidence, hybridAlpha, rerankerThreshold, contextWindow, temperature }
+      retrieval_options: { topK, maxChunks, minConfidence, hybridAlpha, rerankerThreshold, contextWindow, temperature },
+      ...(usedFallback && { message: "Could not locate an exact node in the current knowledge structure. A global fuzzy search has been performed." })
     };
 }
 
