@@ -1,6 +1,51 @@
 /**
- * Simple Console Logger with levels and formatting
+ * Simple Console Logger with levels and formatting.
+ *
+ * All WARN and ERROR messages are also written to a daily log file under
+ * <project-root>/logs/error-YYYY-MM-DD.log so problems can be reviewed later.
  */
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// ── File logging setup ────────────────────────────────────────────────────────
+
+const LOGS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../logs');
+
+try {
+  fs.mkdirSync(LOGS_DIR, { recursive: true });
+} catch (_) { /* non-fatal */ }
+
+/** Strip ANSI escape codes so file output is plain text. */
+function stripAnsi(str) {
+  return str.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/** Append a plain-text line to today's error log file. Never throws. */
+function writeToFile(level, context, message, data) {
+  try {
+    const date   = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const filePath = path.join(LOGS_DIR, `error-${date}.log`);
+
+    const ctx  = context ? `[${context}] ` : '';
+    let line   = `${timestamp()} ${level.padEnd(5)} ${ctx}${message}`;
+
+    if (data !== undefined) {
+      if (data instanceof Error) {
+        line += `\n  ${data.stack || data.message}`;
+      } else if (typeof data === 'object') {
+        line += '\n' + JSON.stringify(data, null, 2);
+      } else {
+        line += ` ${stripAnsi(String(data))}`;
+      }
+    }
+
+    fs.appendFileSync(filePath, line + '\n', 'utf8');
+  } catch (_) { /* never let file I/O break the application */ }
+}
+
+// ── Log levels ────────────────────────────────────────────────────────────────
 
 const LOG_LEVELS = {
   DEBUG: 0,
@@ -77,12 +122,14 @@ class Logger {
     if (currentLevel <= LOG_LEVELS.WARN) {
       console.warn(formatMessage('WARN', this.context, message, data));
     }
+    writeToFile('WARN', this.context, message, data);
   }
 
   error(message, data) {
     if (currentLevel <= LOG_LEVELS.ERROR) {
       console.error(formatMessage('ERROR', this.context, message, data));
     }
+    writeToFile('ERROR', this.context, message, data);
   }
 
   // Create a child logger with sub-context
