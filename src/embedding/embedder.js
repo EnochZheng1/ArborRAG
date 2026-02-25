@@ -157,7 +157,7 @@ export async function generateEmbedding(text, options = {}) {
     const embedding = await generateEmbeddingVector(normalizedText, taskType);
 
     if (!embedding || !Array.isArray(embedding)) {
-      logger.error("Invalid embedding response format:", JSON.stringify(result));
+      logger.error("Invalid embedding response format:", JSON.stringify(embedding));
       throw new Error("Invalid embedding response from API");
     }
 

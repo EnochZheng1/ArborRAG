@@ -2,6 +2,7 @@ import { callLLM, llmConfig } from "../utils/llm.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getNode, getRelatedNodes, getPathToNode, getChildren, getAncestors } from "../kg/graphTraversal.js";
 import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Multi-Hop Reasoning System
@@ -230,7 +231,7 @@ Return JSON:
       }))
     };
   } catch (err) {
-    console.error("Reasoning failed:", err.message);
+    logger.warn(`Reasoning failed: ${err.message}`);
     return {
       success: false,
       error: err.message

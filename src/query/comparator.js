@@ -1,5 +1,6 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { retrieveForComparison, buildMultiNodeContext } from "./multiNodeRetriever.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Comparison Query Handler
@@ -106,7 +107,7 @@ Generate a structured comparison. Return JSON:
 
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
-    console.error("LLM comparison failed:", err.message);
+    logger.warn(`LLM comparison failed: ${err.message}`);
     return generateBasicComparison(comparisonData, aspects);
   }
 }

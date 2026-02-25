@@ -1,6 +1,7 @@
 import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
 import { getActiveDb } from "../db/activeDb.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Query Suggestions Module
@@ -163,7 +164,7 @@ function refreshCacheIfNeeded() {
     cache.titles = SuggestionRepo.getRecentDocumentTitles(100);
     cache.lastRefresh = now;
   } catch (error) {
-    console.error('Error refreshing suggestion cache:', error.message);
+    logger.warn(`Error refreshing suggestion cache: ${error.message}`);
   }
 }
 

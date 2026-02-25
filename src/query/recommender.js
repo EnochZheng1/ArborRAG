@@ -1,5 +1,6 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { retrieveForRecommendation, retrieveAndAggregate } from "./multiNodeRetriever.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Recommendation Query Handler
@@ -125,7 +126,7 @@ Generate recommendations. Return JSON:
 
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
-    console.error("LLM recommendation failed:", err.message);
+    logger.warn(`LLM recommendation failed: ${err.message}`);
     return generateBasicRecommendation(candidateData, criteria);
   }
 }

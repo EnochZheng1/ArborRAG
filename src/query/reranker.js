@@ -1,6 +1,7 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * LLM Re-ranking Module
@@ -88,7 +89,7 @@ export async function rerankerChunks(query, chunks, options = {}) {
 
     return results;
   } catch (error) {
-    console.error('Re-ranking error:', error.message);
+    logger.warn(`Re-ranking error: ${error.message}`);
     return candidates.slice(0, topK);
   }
 }
@@ -144,7 +145,7 @@ export async function rerankerNodes(query, nodes, options = {}) {
 
     return scored.slice(0, topK);
   } catch (error) {
-    console.error('Node re-ranking error:', error.message);
+    logger.warn(`Node re-ranking error: ${error.message}`);
     return nodes.slice(0, topK);
   }
 }

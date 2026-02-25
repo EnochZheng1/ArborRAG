@@ -1,4 +1,5 @@
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Contextual Chunk Expansion Module
@@ -116,7 +117,7 @@ function getNeighborChunks(docId, chunkIndex, windowBefore, windowAfter) {
       result.after = ChunkRepo.getNeighborsAfter(docId, chunkIndex, windowAfter);
     }
   } catch (error) {
-    console.error('Error getting neighbor chunks:', error.message);
+    logger.warn(`Error getting neighbor chunks: ${error.message}`);
   }
 
   return result;

@@ -4,6 +4,7 @@ import { EntityFactRepo } from "../db/repositories/EntityFactRepo.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Entity-Fact Extraction Module
@@ -61,7 +62,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     // Find JSON object
     const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      console.warn('No JSON found in LLM response, falling back to rules');
+      logger.warn('Entity extraction: no JSON found in LLM response, falling back to rules');
       return extractWithRules(content, chunk);
     }
 
@@ -75,7 +76,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
       // Try to repair common JSON issues
       extracted = tryRepairAndParseJSON(jsonStr);
       if (!extracted) {
-        console.warn('JSON repair failed, falling back to rules');
+        logger.warn('Entity extraction: JSON repair failed, falling back to rules');
         return extractWithRules(content, chunk);
       }
     }
@@ -99,7 +100,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     return { entities, facts };
   } catch (error) {
     rethrowIfRateLimit(error);
-    console.error('Entity-fact extraction error:', error.message);
+    logger.error(`Entity-fact extraction error: ${error.message}`);
     return extractWithRules(content, chunk);
   }
 }
@@ -344,7 +345,7 @@ export function saveExtraction(extraction, chunkId, options = {}) {
         EntityFactRepo.upsertMention(entityId, chunkId);
       }
     } catch (e) {
-      console.warn(`Failed to record entity mention: entity=${entityId}, chunk=${chunkId}, error=${e.message}`);
+      logger.warn(`Failed to record entity mention: entity=${entityId}, chunk=${chunkId}: ${e.message}`);
     }
   }
 
@@ -458,7 +459,7 @@ export async function processDocumentForExtraction(docId, options = {}) {
     return results;
   }
 
-  console.log(`[EntityExtraction] Processing ${chunks.length} chunks for document ${docId}`);
+  logger.info(`Entity extraction: processing ${chunks.length} chunks for document ${docId}`);
 
   // Process in batches to avoid rate limits
   for (let i = 0; i < chunks.length; i += batchSize) {
@@ -500,7 +501,7 @@ export async function processDocumentForExtraction(docId, options = {}) {
         }
       } catch (error) {
         results.errors.push({ chunk_id: chunk.id, error: error.message });
-        console.error(`[EntityExtraction] Error processing chunk ${chunk.id}:`, error.message);
+        logger.error(`Entity extraction: error on chunk ${chunk.id}: ${error.message}`);
       }
     }
 
@@ -511,7 +512,7 @@ export async function processDocumentForExtraction(docId, options = {}) {
 
     // Log progress every few batches
     if ((i / batchSize) % 5 === 0 || i + batchSize >= chunks.length) {
-      console.log(`[EntityExtraction] Progress: ${Math.min(i + batchSize, chunks.length)}/${chunks.length} chunks, ${results.total_entities} entities, ${results.total_facts} facts`);
+      logger.debug(`Entity extraction progress: ${Math.min(i + batchSize, chunks.length)}/${chunks.length} chunks, ${results.total_entities} entities, ${results.total_facts} facts`);
     }
   }
 
@@ -519,7 +520,7 @@ export async function processDocumentForExtraction(docId, options = {}) {
   results.unique_entity_count = results.unique_entities.size;
   delete results.unique_entities;
 
-  console.log(`[EntityExtraction] Complete: ${results.total_entities} entities, ${results.total_facts} facts from ${results.chunks_processed} chunks`);
+  logger.info(`Entity extraction complete: ${results.total_entities} entities, ${results.total_facts} facts from ${results.chunks_processed} chunks`);
 
   return results;
 }
@@ -687,11 +688,11 @@ export async function bulkExtractEntities(options = {}) {
     documents: []
   };
 
-  console.log(`[BulkExtraction] Starting extraction for ${docs.length} documents`);
+  logger.info(`Bulk entity extraction: starting for ${docs.length} documents`);
 
   for (const doc of docs) {
     try {
-      console.log(`[BulkExtraction] Processing document ${doc.id}: ${doc.filename || doc.title}`);
+      logger.info(`Bulk entity extraction: processing document ${doc.id} (${doc.filename || doc.title})`);
 
       const docResult = await processDocumentForExtraction(doc.id, { useLLM });
 
@@ -715,7 +716,7 @@ export async function bulkExtractEntities(options = {}) {
         });
       }
     } catch (error) {
-      console.error(`[BulkExtraction] Error processing document ${doc.id}:`, error.message);
+      logger.error(`Bulk entity extraction: error on document ${doc.id}: ${error.message}`);
       results.errors.push({ doc_id: doc.id, error: error.message });
       results.documents.push({
         doc_id: doc.id,
@@ -726,7 +727,7 @@ export async function bulkExtractEntities(options = {}) {
     }
   }
 
-  console.log(`[BulkExtraction] Complete: ${results.documents_processed} documents, ${results.total_entities} entities, ${results.total_facts} facts`);
+  logger.info(`Bulk entity extraction complete: ${results.documents_processed} documents, ${results.total_entities} entities, ${results.total_facts} facts`);
 
   return results;
 }
@@ -784,7 +785,7 @@ export function getNodeEntitiesAndFacts(nodeId, options = {}) {
   const { limit = 50, debug = false } = options;
 
   if (debug) {
-    console.log(`[getNodeEntitiesAndFacts] Debug: totalEntities=${EntityFactRepo.countEntities()}, totalMentions=${EntityFactRepo.countMentions()}, entitiesWithNodeId=${EntityFactRepo.countEntitiesWithNodeId(nodeId)}, chunksInNode=${EntityFactRepo.countChunksInNode(nodeId)}`);
+    logger.debug(`getNodeEntitiesAndFacts: totalEntities=${EntityFactRepo.countEntities()}, totalMentions=${EntityFactRepo.countMentions()}, entitiesWithNodeId=${EntityFactRepo.countEntitiesWithNodeId(nodeId)}, chunksInNode=${EntityFactRepo.countChunksInNode(nodeId)}`);
   }
 
   // Get entities via mention_stats + fact_stats (primary)
@@ -806,7 +807,7 @@ export function getNodeEntitiesAndFacts(nodeId, options = {}) {
   // Fallback 3 (debug only): all entities
   if (entities.length === 0 && debug) {
     entities = EntityFactRepo.getAllEntitiesForDebug(10);
-    console.log(`[getNodeEntitiesAndFacts] Fallback to all entities: found ${entities.length}`);
+    logger.debug(`getNodeEntitiesAndFacts: fallback to all entities, found ${entities.length}`);
   }
 
   const facts = EntityFactRepo.getFactsForNode(nodeId, limit);

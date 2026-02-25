@@ -2,6 +2,7 @@ import { callLLM, llmConfig } from "../utils/llm.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
+import { ingestLogger as logger } from "../utils/logger.js";
 
 /**
  * Extract metadata from text using TF-IDF and LLM
@@ -215,7 +216,7 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
   const lang = getEffectiveLang(text);
 
   if (!llmConfig[llmConfig.provider]?.apiKey) {
-    console.warn("LLM API key not set, using basic extraction only");
+    logger.debug("LLM API key not set, using basic extraction only");
     return {
       keywords: extractKeywords(text),
       entities: extractEntitiesBasic(text),
@@ -247,7 +248,7 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
     return result;
   } catch (err) {
     rethrowIfRateLimit(err);
-    console.error("LLM metadata extraction failed:", err.message);
+    logger.warn(`LLM metadata extraction failed: ${err.message}`);
     // Fallback to basic extraction
     return {
       keywords: extractKeywords(text),

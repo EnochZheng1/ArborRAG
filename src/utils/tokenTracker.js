@@ -26,8 +26,8 @@ export function recordTokenUsage(response, operation, metadata = {}) {
     const cachedTokens = usageMetadata.cachedContentTokenCount || 0;
     const totalTokens = usageMetadata.totalTokenCount || (inputTokens + outputTokens);
 
-    // Get model from metadata or default
-    const model = metadata.model || process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    // Get model from metadata (callers always supply this via callLLM)
+    const model = metadata.model || 'unknown';
 
     // Estimate cost (approximate pricing)
     const costEstimate = estimateCost(model, inputTokens, outputTokens, cachedTokens);
@@ -42,7 +42,7 @@ export function recordTokenUsage(response, operation, metadata = {}) {
       cost_estimate: costEstimate
     };
   } catch (error) {
-    console.error('Failed to record token usage:', error.message);
+    // Non-fatal — token tracking failure must never break the main call path
     return null;
   }
 }

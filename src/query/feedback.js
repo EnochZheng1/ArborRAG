@@ -1,4 +1,5 @@
 import { FeedbackRepo } from "../db/repositories/FeedbackRepo.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Feedback Loop Module
@@ -54,7 +55,7 @@ export function recordFeedback(feedbackData) {
 
     return { success: true, feedbackId: result.lastInsertRowid };
   } catch (error) {
-    console.error('Error recording feedback:', error.message);
+    logger.warn(`Error recording feedback: ${error.message}`);
     return { success: false, error: error.message };
   }
 }
@@ -85,7 +86,7 @@ function updateChunkQualityScores(chunkIds, rating) {
     }
   } catch (error) {
     // Non-critical, log and continue
-    console.error('Error updating chunk scores:', error.message);
+    logger.warn(`Error updating chunk scores: ${error.message}`);
   }
 }
 
@@ -143,7 +144,7 @@ export function getFeedbackStats(filters = {}) {
       recent_negative: recentNegative
     };
   } catch (error) {
-    console.error('Error getting feedback stats:', error.message);
+    logger.warn(`Error getting feedback stats: ${error.message}`);
     return { overview: {}, by_type: [], recent_negative: [] };
   }
 }

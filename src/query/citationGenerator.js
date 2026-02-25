@@ -6,6 +6,7 @@
 
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { detectLanguage, isChineseLang } from "../utils/langDetect.js";
+import { logger } from "../utils/logger.js";
 
 function escapeHtml(str) {
   return String(str ?? '')
@@ -117,7 +118,7 @@ Answer with citations:`;
       }))
     };
   } catch (error) {
-    console.error('Citation generation error:', error.message);
+    logger.warn(`Citation generation error: ${error.message}`);
     return {
       answer: 'Error generating answer',
       citations: [],
@@ -217,7 +218,7 @@ Return the annotated answer only:`;
       sources: numberedSources
     };
   } catch (error) {
-    console.error('Error adding citations:', error.message);
+    logger.warn(`Error adding citations: ${error.message}`);
     return { answer, citations: [], sources: numberedSources };
   }
 }

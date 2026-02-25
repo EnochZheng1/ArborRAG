@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Query Decomposition Module
@@ -111,7 +112,7 @@ JSON only:`;
 
     return result;
   } catch (error) {
-    console.error('Query decomposition error:', error.message);
+    logger.warn(`Query decomposition error: ${error.message}`);
     return {
       isComplex: false,
       original: query,

@@ -1,6 +1,7 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Related Questions Module
@@ -214,7 +215,7 @@ JSON only:`;
       score: 0.9
     }));
   } catch (error) {
-    console.error('LLM question generation error:', error.message);
+    logger.warn(`LLM question generation error: ${error.message}`);
     return [];
   }
 }

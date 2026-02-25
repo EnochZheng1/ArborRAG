@@ -9,7 +9,7 @@ const router = express.Router();
 router.get("/", (req, res) => {
   try {
     const { status, limit = 50, offset = 0 } = req.query;
-    const documents = listDocuments({ status, limit: parseInt(limit), offset: parseInt(offset) });
+    const documents = listDocuments({ status, limit: parseInt(limit, 10), offset: parseInt(offset, 10) });
     res.json({ documents, count: documents.length });
   } catch (err) {
     apiLogger.error("List documents error:", err.message);
@@ -20,7 +20,7 @@ router.get("/", (req, res) => {
 // Get document by ID
 router.get("/:id", (req, res) => {
   try {
-    const doc = getDocument(parseInt(req.params.id));
+    const doc = getDocument(parseInt(req.params.id, 10));
     if (!doc) return res.status(404).json({ error: "Document not found" });
     res.json(doc);
   } catch (err) {
@@ -32,7 +32,7 @@ router.get("/:id", (req, res) => {
 // Delete document
 router.delete("/:id", (req, res) => {
   try {
-    const result = deleteDocument(parseInt(req.params.id));
+    const result = deleteDocument(parseInt(req.params.id, 10));
     res.json({ success: true, ...result });
   } catch (err) {
     apiLogger.error("Delete document error:", err.message);
@@ -43,7 +43,7 @@ router.delete("/:id", (req, res) => {
 // Trigger entity-fact extraction for a document
 router.post("/:id/extract", async (req, res) => {
   try {
-    const docId = parseInt(req.params.id);
+    const docId = parseInt(req.params.id, 10);
     const { useLLM = true } = req.body;
     apiLogger.info(`Starting entity-fact extraction for document ${docId}`);
     const result = await processDocumentForExtraction(docId, { useLLM });

@@ -4,6 +4,7 @@ import { callLLM, llmConfig } from "../utils/llm.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
+import { ingestLogger as logger } from "../utils/logger.js";
 
 /**
  * Detect and manage conflicts between chunks
@@ -136,7 +137,7 @@ export async function detectConflictWithLLM(chunkA, chunkB) {
     return null;
   } catch (err) {
     rethrowIfRateLimit(err);
-    console.error("LLM conflict detection failed:", err.message);
+    logger.warn(`LLM conflict detection failed: ${err.message}`);
     return compareChunks(chunkA, chunkB);
   }
 }

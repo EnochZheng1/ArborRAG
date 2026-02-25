@@ -1,5 +1,6 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { classifyQuery, QUERY_TYPES } from "./classifier.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Query Planning System
@@ -232,7 +233,7 @@ Return JSON only:
 
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
-    console.error("LLM planning failed:", err.message);
+    logger.warn(`LLM planning failed: ${err.message}`);
     return null;
   }
 }
