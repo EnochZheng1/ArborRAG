@@ -1,5 +1,6 @@
-import { GoogleGenAI } from "@google/genai";
-import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { callLLM, llmConfig } from "../utils/llm.js";
+import { getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 
 /**
  * LLM Re-ranking Module
@@ -23,9 +24,7 @@ export async function rerankerChunks(query, chunks, options = {}) {
   if (!chunks || chunks.length === 0) return [];
   if (chunks.length <= 3) return chunks; // Not worth re-ranking few items
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    // Fallback: return as-is
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return chunks.slice(0, topK);
   }
 
@@ -40,9 +39,6 @@ export async function rerankerChunks(query, chunks, options = {}) {
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     // Build prompt for batch scoring
     const chunkTexts = candidates.map((c, i) => {
       const content = c.content || c.chunk?.content || c.content_clean || '';
@@ -51,19 +47,10 @@ export async function rerankerChunks(query, chunks, options = {}) {
     }).join('\n\n');
 
     // Detect language from query and use appropriate prompt
-    const lang = detectLanguage(query);
+    const lang = getEffectiveLang(query);
     const prompt = getPrompt('reranking', lang, query, chunkTexts);
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 200
-      }
-    });
-
-    const text = response.text?.trim() || '';
+    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 200, taskName: 'reranking' }) || '';
 
     // Parse scores
     const jsonMatch = text.match(/\[[\d,\s.]+\]/);
@@ -119,17 +106,13 @@ export async function rerankerNodes(query, nodes, options = {}) {
   if (!nodes || nodes.length === 0) return [];
   if (nodes.length <= 2) return nodes;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return nodes.slice(0, topK);
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     // Detect language from query
-    const lang = detectLanguage(query);
+    const lang = getEffectiveLang(query);
     const aliasLabel = isChineseLang(lang) ? '别名' : 'aliases';
 
     const nodeTexts = nodes.map((n, i) => {
@@ -143,13 +126,7 @@ export async function rerankerNodes(query, nodes, options = {}) {
     // Use bilingual prompt
     const prompt = getPrompt('nodeReranking', lang, query, nodeTexts);
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: { temperature: 0.1, maxOutputTokens: 100 }
-    });
-
-    const text = response.text?.trim() || '';
+    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 100, taskName: 'node_reranking' }) || '';
     const jsonMatch = text.match(/\[[\d,\s.]+\]/);
 
     if (!jsonMatch) {

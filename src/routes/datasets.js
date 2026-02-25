@@ -9,6 +9,9 @@ import {
   getDatasetStats
 } from "../db/datasetManager.js";
 import { listDatasets } from "../db/registry.js";
+import { getConnection } from "../db/datasetManager.js";
+import { runWithDb } from "../db/activeDb.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { apiLogger } from "../utils/logger.js";
 
 const router = express.Router();
@@ -27,9 +30,19 @@ router.get("/", (req, res) => {
 // Create a new dataset
 router.post("/", (req, res) => {
   try {
-    const { name, description } = req.body || {};
+    const { name, description, language } = req.body || {};
     if (!name?.trim()) return res.status(400).json({ error: "name is required" });
     const dataset = createDataset(name.trim(), description || "");
+
+    if (language && language !== 'auto') {
+      try {
+        const conn = getConnection(dataset.id);
+        runWithDb(conn, () => DatasetConfigRepo.setLanguage(language));
+      } catch (langErr) {
+        apiLogger.warn(`Could not set language on new dataset: ${langErr.message}`);
+      }
+    }
+
     const { db_path: _omit, ...safe } = dataset;
     res.status(201).json({ dataset: safe });
   } catch (err) {
@@ -108,6 +121,37 @@ router.get("/:id/stats", (req, res) => {
     res.json(getDatasetStats(req.params.id));
   } catch (err) {
     apiLogger.error("Dataset stats error:", err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /datasets/:id/config/language
+router.get("/:id/config/language", (req, res) => {
+  try {
+    const conn = getConnection(req.params.id);
+    let language = 'auto';
+    runWithDb(conn, () => { language = DatasetConfigRepo.getLanguage(); });
+    res.json({ language, locked: language !== 'auto' });
+  } catch (err) {
+    apiLogger.error("Get dataset language error:", err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /datasets/:id/config/language — one-time lock, 403 if already locked
+router.post("/:id/config/language", (req, res) => {
+  try {
+    const { language } = req.body || {};
+    if (!language) return res.status(400).json({ error: "language is required" });
+    const conn = getConnection(req.params.id);
+    let result;
+    runWithDb(conn, () => {
+      DatasetConfigRepo.setLanguage(language);
+      result = { language, locked: language !== 'auto' };
+    });
+    res.json(result);
+  } catch (err) {
+    apiLogger.error("Set dataset language error:", err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

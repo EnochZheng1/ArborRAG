@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM } from "../utils/llm.js";
 import { safeJson } from "../db/db.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
@@ -20,32 +20,30 @@ import { generateRelatedQuestions, formatQuestionsForAPI } from "../query/relate
 import { getSuggestions, recordQuery } from "../query/suggestions.js";
 import { recordFeedback, applyFeedbackBoost } from "../query/feedback.js";
 import { getFactsForQuestion, retrieveFactsForQuery } from "../extraction/entityFactRetriever.js";
-import { recordTokenUsage } from "../utils/tokenTracker.js";
 import { enhancedRetrieval, buildEnhancedContext } from "./enhancedRetrieval.js";
 import { hierarchicalRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
 import { detectLanguage as detectLang, isChineseLang } from "../utils/langDetect.js";
+import { getDatasetLang, getEffectiveLang } from "../utils/datasetLang.js";
 
-// Detect language - wrapper that considers both query and context
+// Detect language - wrapper that considers both query and context (for text metadata only)
 function detectLanguage(text) {
   return detectLang(text);
 }
 
 /**
- * Detect best language for LLM prompt based on query and context
- * If context is heavily Chinese, use Chinese prompts even for English queries
- * This helps LLM understand Chinese content better
+ * Detect best language for LLM prompt based on query and context.
+ * Dataset language takes priority when explicitly set; otherwise favour
+ * Chinese context so the LLM understands Chinese docs better.
  */
 function detectPromptLanguage(query, context) {
-  const queryLang = detectLang(query);
+  // If dataset has an explicit language, always use it for prompts.
+  const dl = getDatasetLang();
+  if (dl !== 'auto') return dl;
+
+  // auto: favour Chinese context so LLM understands Chinese docs better.
   const contextLang = detectLang(context);
-
-  // If context is Chinese but query is English, prefer Chinese prompts
-  // The LLM will better understand Chinese context with Chinese instructions
-  if (isChineseLang(contextLang)) {
-    return 'zh';
-  }
-
-  return queryLang;
+  if (isChineseLang(contextLang)) return contextLang;
+  return detectLang(query);
 }
 
 // System prompts for both languages
@@ -64,22 +62,12 @@ Rules:
 4) Output strict JSON.`
 };
 
-// Get Gemini client
-function getGeminiClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
-  return new GoogleGenAI({ apiKey });
-}
-
 // Call LLM for answer generation
 export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "auto" }) {
-  const ai = getGeminiClient();
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
   // Use context-aware language detection - if context is Chinese, use Chinese prompts
   // This helps LLM understand Chinese documents even when query is in English
   const detectedLang = lang === "auto" ? detectPromptLanguage(query, context) : lang;
-  const system = SYSTEM_PROMPTS[detectedLang] || SYSTEM_PROMPTS.en;
+  const system = SYSTEM_PROMPTS[detectedLang] ?? (isChineseLang(detectedLang) ? SYSTEM_PROMPTS.zh : SYSTEM_PROMPTS.en);
 
   const userPrompt = isChineseLang(detectedLang)
     ? `【问题】\n${query}\n\n【限定节点】\n${nodeId} ${nodeName}\n\n【上下文 chunks】\n${context}`
@@ -95,17 +83,7 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
 
   const fullPrompt = `${system}\n\n${userPrompt}\n\n[Output JSON Schema]\n${schema}`;
 
-  const resp = await ai.models.generateContent({
-    model,
-    contents: [
-      { role: "user", parts: [{ text: fullPrompt }] }
-    ],
-  });
-
-  // Track token usage
-  recordTokenUsage(resp, 'qa_answer', { model });
-
-  const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+  const text = await callLLM({ prompt: fullPrompt, taskName: 'qa_answer' });
 
   // Try to extract JSON from response
   try {
@@ -265,7 +243,7 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
   if (useCitations) {
     trace?.addStep('LLM Generation', 'Generating answer with citations');
     const citationResult = await generateAnswerWithCitations(query, context, chunks, {
-      lang: detectLanguage(query),
+      lang: getEffectiveLang(query),
       temperature
     });
     llmResponse = {
@@ -312,7 +290,7 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
         chunks,
         queryType: QUERY_TYPES.SIMPLE_LOOKUP
       });
-      relatedQuestions = formatQuestionsForAPI(relatedQuestions, detectLanguage(query));
+      relatedQuestions = formatQuestionsForAPI(relatedQuestions, getEffectiveLang(query));
     } catch (err) {
       // Non-fatal
     }
@@ -1070,7 +1048,7 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     if (useCitations) {
       trace?.addStep('LLM Generation', `Generating answer with inline citations (temperature=${temperature})`);
       const citationResult = await generateAnswerWithCitations(query, context, chunks, {
-        lang: detectLanguage(query),
+        lang: getEffectiveLang(query),
         temperature
       });
       llmResponse = {
@@ -1125,7 +1103,7 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
           chunks,
           queryType: QUERY_TYPES.SIMPLE_LOOKUP
         });
-        relatedQuestions = formatQuestionsForAPI(relatedQuestions, detectLanguage(query));
+        relatedQuestions = formatQuestionsForAPI(relatedQuestions, getEffectiveLang(query));
         trace?.addStep('Related Questions', `Generated ${relatedQuestions.length} follow-up questions`);
       } catch (err) {
         trace?.addStep('Related Questions', `Error: ${err.message}`, null, 'error');

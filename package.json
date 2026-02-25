@@ -1,6 +1,6 @@
 {
   "name": "kg-mvp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Tree-based Knowledge Graph with intelligent retrieval and reasoning",
   "main": "src/server.js",
   "scripts": {
@@ -28,6 +28,7 @@
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
+    "openai": "^6.24.0",
     "pdf-parse": "^2.4.5",
     "ws": "^8.19.0",
     "xlsx": "^0.18.5"

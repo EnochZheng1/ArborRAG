@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
 
@@ -175,13 +175,9 @@ function extractQuestionsFromContent(chunks, originalQuery) {
  * Generate questions using LLM
  */
 async function generateLLMQuestions(query, answer, chunks, queryType) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return [];
+  if (!llmConfig[llmConfig.provider]?.apiKey) return [];
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     const contentPreview = chunks.slice(0, 3)
       .map(c => (c.content || c.content_clean || '').slice(0, 200))
       .join('\n');
@@ -204,13 +200,7 @@ Return JSON array with both English and Chinese versions:
 
 JSON only:`;
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: { temperature: 0.7, maxOutputTokens: 300 }
-    });
-
-    const text = response.text?.trim() || '';
+    const text = await callLLM({ prompt, temperature: 0.7, maxOutputTokens: 300, taskName: 'related_questions' }) || '';
     const jsonMatch = text.match(/\[[\s\S]*\]/);
 
     if (!jsonMatch) return [];

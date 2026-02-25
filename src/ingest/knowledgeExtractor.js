@@ -8,8 +8,9 @@
  * Falls back to paragraph splitting when no LLM key is available.
  */
 
-import { GoogleGenAI } from "@google/genai";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { callLLM, llmConfig } from "../utils/llm.js";
+import { getPrompt } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 import { extractKeywords, detectAuthorityLevel } from "./metadataExtractor.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { ingestLogger as logger } from "../utils/logger.js";
@@ -94,22 +95,26 @@ function splitIntoSegments(text, segmentSize, overlap) {
 
 // ── LLM call for one segment ──────────────────────────────────────────────────
 
-async function extractKPsFromSegment(ai, model, segment, docTitle, lang) {
+async function extractKPsFromSegment(segment, docTitle, lang) {
   const prompt = getPrompt("kpExtraction", lang, docTitle, segment);
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: { temperature: 0.2, maxOutputTokens: 4000 }
-  });
+  const text = await callLLM({ prompt, temperature: 0.2, taskName: 'kp_extraction' });
 
-  const text = response.text?.trim() || "[]";
+  if (!text) throw new Error("LLM returned empty response");
 
-  // Strip markdown code fences if present
-  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+  // Find the JSON array anywhere in the response (handles preamble text and code fences)
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    logger.warn(`KP extraction: no JSON array found in response — "${text.slice(0, 300)}"`);
+    throw new Error("LLM response contains no JSON array");
+  }
 
-  const raw = JSON.parse(stripped);
+  const raw = JSON.parse(jsonMatch[0]);
   if (!Array.isArray(raw)) throw new Error("LLM returned non-array");
+  if (raw.length === 0) {
+    logger.warn(`KP extraction: LLM returned empty array [] — response was: "${text.slice(0, 300)}"`);
+    throw new Error("LLM returned empty KP array");
+  }
   return raw;
 }
 
@@ -182,15 +187,11 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
     maxKPs        = MAX_KPS_PER_DOC
   } = options;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!useLLM || !apiKey) {
+  if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) {
     return extractKPsFromParagraphs(text, docTitle, { authorityLevel, documentId, maxKPs });
   }
 
-  const ai    = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-  const lang  = detectLanguage(text);
+  const lang = getEffectiveLang(text);
 
   const segments = splitIntoSegments(text, SEGMENT_SIZE, SEGMENT_OVERLAP);
   logger.info(`KP extraction: ${segments.length} segment(s) for "${docTitle}"`);
@@ -199,7 +200,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
 
   for (let s = 0; s < segments.length; s++) {
     try {
-      const raw = await extractKPsFromSegment(ai, model, segments[s], docTitle, lang);
+      const raw = await extractKPsFromSegment(segments[s], docTitle, lang);
       allRaw.push(...raw);
       logger.debug(`Segment ${s + 1}/${segments.length}: ${raw.length} KPs`);
     } catch (err) {

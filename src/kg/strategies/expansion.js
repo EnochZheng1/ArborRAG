@@ -2,7 +2,7 @@
  * Query expansion and multilingual variant building.
  */
 
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../../utils/llm.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { detectLanguage } from "../../utils/langDetect.js";
 import { getNode } from "../graphTraversal.js";
@@ -16,13 +16,9 @@ const EXPANSION_CACHE_MAX = 500;
 export async function expandQuery(query) {
   if (queryExpansionCache.has(query)) return queryExpansionCache.get(query);
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return [query];
+  if (!llmConfig[llmConfig.provider]?.apiKey) return [query];
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     const prompt = `Given this search query, generate 3-5 related search terms or synonyms that might help find relevant content. Include both the original language and translations if applicable.
 
 Query: "${query}"
@@ -30,12 +26,7 @@ Query: "${query}"
 Return ONLY a JSON array of strings, no explanation:
 ["term1", "term2", "term3"]`;
 
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "[]";
+    const text = await callLLM({ prompt, taskName: 'query_expansion' }) ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*?\]/);
     const terms = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
     const allTerms = [query, ...terms.filter(t => typeof t === "string" && t.length > 0)];

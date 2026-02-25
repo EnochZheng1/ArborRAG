@@ -1,7 +1,7 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM } from "../utils/llm.js";
 import { queryLogger as logger } from "../utils/logger.js";
-import { recordTokenUsage } from "../utils/tokenTracker.js";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { getPrompt } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 
 /**
  * Query Classification System
@@ -138,28 +138,12 @@ export function extractQueryEntities(query) {
  * @returns {Promise<object>} Classification result
  */
 async function llmClassify(query) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY required for LLM classification");
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
   // Detect query language and use appropriate prompt
-  const lang = detectLanguage(query);
+  const lang = getEffectiveLang(query);
   const prompt = getPrompt('queryClassification', lang, query);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    // Track token usage
-    recordTokenUsage(resp, 'query_classification', { model });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'query_classification' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
 
     return JSON.parse(jsonMatch[1] || text);

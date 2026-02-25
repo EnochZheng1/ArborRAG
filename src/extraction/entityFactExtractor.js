@@ -1,8 +1,8 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 import { safeJson } from "../db/db.js";
 import { EntityFactRepo } from "../db/repositories/EntityFactRepo.js";
-import { recordTokenUsage } from "../utils/tokenTracker.js";
-import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
@@ -32,17 +32,13 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     return extractWithRules(content, chunk);
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return extractWithRules(content, chunk);
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     // Detect language from content
-    const lang = detectLanguage(content);
+    const lang = getEffectiveLang(content);
 
     // Provide existing entities for deduplication hints
     const existingHint = existingEntities.length > 0
@@ -54,19 +50,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     // Use bilingual prompt based on content language
     const prompt = getPrompt('entityFactExtraction', lang, content.slice(0, 3000), existingHint);
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 4000
-      }
-    });
-
-    // Track token usage
-    recordTokenUsage(response, 'entity_extraction', { model });
-
-    const text = response.text?.trim() || '';
+    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 4000, taskName: 'entity_extraction' }) || '';
 
     // Try to extract JSON, handling various formats
     let jsonStr = text;

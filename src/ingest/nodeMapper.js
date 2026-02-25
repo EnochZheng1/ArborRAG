@@ -2,11 +2,13 @@ import { safeJson, logAudit, runTransaction } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 import { ingestLogger as logger } from "../utils/logger.js";
-import { detectLanguage, getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { getPrompt, isChineseLang } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
+import { resolveKPAction } from "./kpDecisionEngine.js";
 
 /**
  * Map chunks to appropriate tree nodes
@@ -72,16 +74,12 @@ export function findBestNodeMatch(chunk) {
  * @returns {Promise<object>} LLM suggestion
  */
 export async function suggestNodeWithLLM(chunk, candidates) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY required for LLM node suggestion");
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
+    throw new Error("LLM API key required for node suggestion");
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
   // Detect language from chunk content
-  const lang = detectLanguage(chunk.content || '');
+  const lang = getEffectiveLang(chunk.content || '');
 
   const nodeList = candidates.map((c, i) =>
     `${i + 1}. ${c.node.node_id} - ${c.node.name}: ${c.node.node_summary || (isChineseLang(lang) ? "(无摘要)" : "(no summary)")}`
@@ -95,12 +93,7 @@ export async function suggestNodeWithLLM(chunk, candidates) {
   const prompt = getPrompt('nodeSuggestion', lang, chunkPreview, keywords, nodeList, noExisting);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'node_suggestion' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
@@ -290,13 +283,9 @@ function generateNodeId(text) {
  * @returns {Promise<object>} Suggested hierarchy
  */
 async function analyzeDocumentStructure(docTitle, chunks, lang) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return null;
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
   // Build a summary of chunk contents for analysis
   const chunkLabel = isChineseLang(lang) ? '片段' : 'Chunk';
@@ -311,12 +300,7 @@ async function analyzeDocumentStructure(docTitle, chunks, lang) {
   const prompt = getPrompt('documentStructure', lang, docTitle, chunkSummaries);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'document_structure' }) ?? "{}";
 
     // Robust JSON extraction: try markdown code block first, then bare JSON object
     let jsonStr = text.trim();
@@ -576,8 +560,29 @@ function ensureRootNode() {
 // ── KP topical hierarchy helpers ──────────────────────────────────────────────
 
 const TOPIC_MATCH_THRESHOLD = 0.55;
-const DEDUP_THRESHOLD       = 0.85;
 // wordDiceSimilarity imported from knowledgeExtractor.js
+
+// Generic/placeholder topic hints that the LLM returns when it can't classify.
+// These all collapse to "General" so they don't pollute the tree with noise nodes.
+const GENERIC_TOPIC_HINTS = new Set([
+  // English
+  'general', 'unknown', 'other', 'content', 'information', 'document',
+  'n/a', 'na', 'misc', 'miscellaneous', 'undefined', 'unclassified', 'none',
+  // Chinese Simplified
+  '无信息', '文档内容', '内容', '一般', '未知', '其他', '通用', '无', '一般信息', '文档', '信息',
+  // Chinese Traditional
+  '文件內容', '內容', '一般', '未知', '其他', '通用', '文件',
+]);
+
+function normalizeTopicHint(hint) {
+  const trimmed = (hint || '').trim();
+  if (!trimmed) return 'General';
+  // Match on both original casing and lowercased
+  if (GENERIC_TOPIC_HINTS.has(trimmed) || GENERIC_TOPIC_HINTS.has(trimmed.toLowerCase())) {
+    return 'General';
+  }
+  return trimmed;
+}
 
 /**
  * Find or create a topical node under a given parent.
@@ -660,10 +665,10 @@ async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
   const nodeMap  = new Map();    // kp.index → nodeId
   const newNodes = [];
 
-  // Group by topic_hint
+  // Group by topic_hint (generic LLM placeholders are normalized to "General")
   const byTopic = new Map();
   for (const kp of kps) {
-    const topic = (kp.topic_hint || "General").trim();
+    const topic = normalizeTopicHint(kp.topic_hint);
     if (!byTopic.has(topic)) byTopic.set(topic, []);
     byTopic.get(topic).push(kp);
   }
@@ -707,69 +712,6 @@ async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
   // Strip internal _created flag before returning
   const cleanNodes = newNodes.map(({ _created: _, ...rest }) => rest);
   return { nodeMap, newNodes: cleanNodes };
-}
-
-/**
- * Check for a near-duplicate KP in the same node and either merge source
- * tracking or signal that a new row should be inserted.
- *
- * @returns {number|null} existing chunkId to update, or null → insert new row
- */
-async function deduplicateKP(kp, nodeId, sourceDocInfo, options = {}) {
-  const { useLLM = true } = options;
-
-  try {
-    const candidates = ChunkRepo.findSimilarInNode(nodeId, kp.content, 5);
-
-    for (const candidate of candidates) {
-      const sim = wordDiceSimilarity(kp.content, candidate.content_clean || "");
-
-      if (sim >= DEDUP_THRESHOLD) {
-        // Definite duplicate — merge source tracking
-        const existing = safeJson(candidate.source_documents_json, []);
-        const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
-        if (!alreadyHasDoc) {
-          const merged = JSON.stringify([...existing, sourceDocInfo]);
-          ChunkRepo.updateSourceDocuments(candidate.id, merged);
-        }
-        logger.debug(`KP deduplicated: "${kp.content.slice(0, 60)}…" merged into chunk ${candidate.id}`);
-        return candidate.id;
-      }
-
-      if (useLLM && sim >= 0.65) {
-        // Borderline — ask LLM with a direct yes/no prompt
-        try {
-          const apiKey = process.env.GEMINI_API_KEY;
-          if (apiKey) {
-            const ai = new GoogleGenAI({ apiKey });
-            const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-            const prompt = `Are these two knowledge statements expressing the same fact? Answer with JSON only.
-A: "${kp.content.slice(0, 300)}"
-B: "${(candidate.content_clean || "").slice(0, 300)}"
-Return: {"same_fact": true|false, "confidence": 0.0-1.0}`;
-
-            const resp = await ai.models.generateContent({ model, contents: prompt,
-              config: { temperature: 0.1, maxOutputTokens: 50 } });
-            const text = (resp.text || "{}").replace(/```(?:json)?|```/g, "").trim();
-            const parsed = JSON.parse(text);
-            if (parsed.same_fact === true && (parsed.confidence ?? 0) >= 0.75) {
-              const existing = safeJson(candidate.source_documents_json, []);
-              const alreadyHasDoc = existing.some(d => d.doc_id === sourceDocInfo.doc_id);
-              if (!alreadyHasDoc) {
-                ChunkRepo.updateSourceDocuments(candidate.id, JSON.stringify([...existing, sourceDocInfo]));
-              }
-              logger.debug(`KP borderline merge confirmed by LLM: chunk ${candidate.id}`);
-              return candidate.id;
-            }
-          }
-        } catch (_) { /* non-fatal */ }
-      }
-    }
-  } catch (err) {
-    logger.warn(`KP deduplication check failed: ${err.message}`);
-  }
-
-  return null; // insert new row
 }
 
 /**
@@ -839,14 +781,43 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
 
     for (const kp of chunks) {
       const targetNodeId = nodeMap.get(kp.index) || "root";
-      const sourceDocInfo = { doc_id: documentId, doc_title: docTitle, excerpt: kp.source_excerpt || "" };
 
-      const existingId = await deduplicateKP(kp, targetNodeId, sourceDocInfo, { useLLM });
-      if (existingId) {
-        results.mapped.push({ chunkIndex: kp.index, chunkId: existingId, nodeId: targetNodeId, deduplicated: true });
-      } else {
-        const chunkId = assignKPToNode(kp, targetNodeId, documentId);
-        results.mapped.push({ chunkIndex: kp.index, chunkId, nodeId: targetNodeId });
+      const decision = await resolveKPAction(kp, targetNodeId, documentId, { useLLM });
+
+      switch (decision.action) {
+        case "IGNORE":
+          results.ignored = (results.ignored || 0) + 1;
+          logger.debug(`KP ignored: ${decision.reason}`);
+          break;
+
+        case "MERGE":
+          results.mapped.push({
+            chunkIndex: kp.index, chunkId: decision.chunkId,
+            nodeId: targetNodeId, merge: true, queued: false
+          });
+          break;
+
+        case "REPLACE": {
+          // Insert the new KP first, then supersede the old one
+          const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
+          ChunkRepo.supersede(decision.chunkId, newChunkId);
+          results.mapped.push({
+            chunkIndex: kp.index, chunkId: newChunkId,
+            nodeId: targetNodeId, replace: true
+          });
+          break;
+        }
+
+        case "NORMALIZE_THEN_STORE":
+        case "STORE":
+        default: {
+          const chunkId = assignKPToNode(kp, targetNodeId, documentId);
+          results.mapped.push({
+            chunkIndex: kp.index, chunkId, nodeId: targetNodeId,
+            queued: decision.queued ?? false
+          });
+          break;
+        }
       }
     }
 
@@ -870,7 +841,7 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
 
   // Detect language once from first chunk content — passed to all sub-functions
   // so they can use language-appropriate strings and prompts.
-  const lang = detectLanguage(chunks[0]?.content || '');
+  const lang = getEffectiveLang(chunks[0]?.content || '');
 
   // Strategy: Create a document hierarchy for new documents
   if (createNewNodes && chunks.length > 0) {
@@ -1075,28 +1046,18 @@ export async function generateNodeAliases(nodeId, options = {}) {
   }
 
   // Use LLM to generate aliases
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    // Fallback: generate simple aliases from node name
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return generateSimpleAliases(node.name);
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
   // Detect language from context
-  const lang = detectLanguage(context);
+  const lang = getEffectiveLang(context);
 
   // Use bilingual prompt based on content language
   const prompt = getPrompt('aliasGeneration', lang, context, maxAliases);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "[]";
+    const text = await callLLM({ prompt, taskName: 'alias_generation' }) ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*?\]/);
     const aliases = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
 

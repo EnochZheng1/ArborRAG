@@ -5,11 +5,16 @@
  * functions (list, get, delete, empty tree).
  */
 
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { logAudit, runTransaction, safeJson } from "../db/db.js";
 import { DocumentRepo } from "../db/repositories/DocumentRepo.js";
 import { IngestRepo } from "../db/repositories/IngestRepo.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ingestLogger as logger } from "../utils/logger.js";
+
+const UPLOADS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../uploads");
 
 // Re-export sub-module helpers (used by routes and other callers)
 export * from "./fileParser.js";
@@ -57,7 +62,10 @@ export function listDocuments(filters = {}) {
 // ── Delete document ───────────────────────────────────────────────────────────
 
 export function deleteDocument(docId) {
-  return runTransaction(() => {
+  // Read filename before the transaction so we can delete the file afterward
+  const docRow = DocumentRepo.getById(docId);
+
+  const result = runTransaction(() => {
     logger.info(`Deleting document ${docId} and all associated data...`);
 
     const chunks = IngestRepo.getChunksForDoc(docId);
@@ -165,6 +173,22 @@ export function deleteDocument(docId) {
 
     return { deletedChunks: chunkIds.length, deletedNodes, deletedEmbeddings: chunkIds.length + deletedNodes };
   });
+
+  // Delete the physical file after the DB transaction succeeds
+  if (docRow?.filename) {
+    const filePath = path.join(UPLOADS_DIR, docRow.filename);
+    try {
+      fs.unlinkSync(filePath);
+      logger.info(`Deleted upload file: ${docRow.filename}`);
+    } catch (err) {
+      // Non-fatal: file may have already been removed or never existed
+      if (err.code !== 'ENOENT') {
+        logger.warn(`Could not delete upload file ${docRow.filename}: ${err.message}`);
+      }
+    }
+  }
+
+  return result;
 }
 
 // ── Empty the entire tree ─────────────────────────────────────────────────────

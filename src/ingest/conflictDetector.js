@@ -1,7 +1,8 @@
 import { safeJson, logAudit, runTransaction } from "../db/db.js";
 import { ConflictRepo } from "../db/repositories/ConflictRepo.js";
-import { GoogleGenAI } from "@google/genai";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { callLLM, llmConfig } from "../utils/llm.js";
+import { getPrompt } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
@@ -105,28 +106,19 @@ function contextsSimilar(contextA, contextB) {
  * @returns {Promise<object|null>} Conflict info or null
  */
 export async function detectConflictWithLLM(chunkA, chunkB) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return compareChunks(chunkA, chunkB);
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
   // Detect language from chunk content
   const combinedContent = (chunkA.content || '') + (chunkB.content || '');
-  const lang = detectLanguage(combinedContent);
+  const lang = getEffectiveLang(combinedContent);
 
   // Use bilingual prompt based on content language
   const prompt = getPrompt('conflictDetection', lang, chunkA, chunkB);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'conflict_detection' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
     const result = JSON.parse(jsonMatch[1] || text);
 

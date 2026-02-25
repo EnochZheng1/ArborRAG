@@ -1,5 +1,6 @@
-import { GoogleGenAI } from "@google/genai";
-import { detectLanguage, getPrompt } from "../utils/langDetect.js";
+import { callLLM, llmConfig } from "../utils/llm.js";
+import { getPrompt } from "../utils/langDetect.js";
+import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 
 /**
@@ -211,11 +212,10 @@ export function extractEntitiesBasic(text) {
  */
 export async function extractMetadataWithLLM(text, docTitle = "") {
   // Detect language first
-  const lang = detectLanguage(text);
+  const lang = getEffectiveLang(text);
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.warn("GEMINI_API_KEY not set, using basic extraction only");
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
+    console.warn("LLM API key not set, using basic extraction only");
     return {
       keywords: extractKeywords(text),
       entities: extractEntitiesBasic(text),
@@ -224,9 +224,6 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
       language: lang
     };
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
   // Truncate text if too long
   const maxLen = 4000;
@@ -238,12 +235,7 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
   const prompt = getPrompt('metadataExtraction', lang, docTitle, truncatedText);
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const respText = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const respText = await callLLM({ prompt, taskName: 'metadata_extraction' }) ?? "{}";
 
     // Extract JSON from response
     const jsonMatch = respText.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, respText];

@@ -4,8 +4,8 @@
  * Adds source citations to LLM-generated answers
  */
 
-import { GoogleGenAI } from "@google/genai";
-import { detectLanguage } from "../utils/langDetect.js";
+import { callLLM, llmConfig } from "../utils/llm.js";
+import { detectLanguage, isChineseLang } from "../utils/langDetect.js";
 
 function escapeHtml(str) {
   return String(str ?? '')
@@ -27,8 +27,7 @@ function escapeHtml(str) {
 export async function generateAnswerWithCitations(query, context, sources, options = {}) {
   const { lang = 'auto', maxSources = 10, temperature = 0.3 } = options;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return {
       answer: context.slice(0, 500),
       citations: [],
@@ -50,15 +49,12 @@ export async function generateAnswerWithCitations(query, context, sources, optio
   ).join('\n\n');
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     // Detect language from context for better understanding
     const contextText = numberedSources.map(s => s.content).join(' ');
     const detectedLang = lang === 'auto' ? detectLanguage(contextText || query) : lang;
 
     // Use bilingual prompts based on detected language
-    const prompt = detectedLang === 'zh'
+    const prompt = isChineseLang(detectedLang)
       ? `使用提供的来源回答问题。使用[n]格式添加内联引用。
 
 问题: ${query}
@@ -92,16 +88,7 @@ Instructions:
 
 Answer with citations:`;
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        temperature,
-        maxOutputTokens: 1000
-      }
-    });
-
-    const answerText = response.text?.trim() || '';
+    const answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
 
     // Extract citations used
     const citationsUsed = extractCitationsFromAnswer(answerText);
@@ -184,8 +171,7 @@ function formatAnswerWithCitationLinks(text, citations) {
  * @returns {Promise<object>} Answer with citations added
  */
 export async function addCitationsToAnswer(answer, sources, options = {}) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || !answer || !sources || sources.length === 0) {
+  if (!llmConfig[llmConfig.provider]?.apiKey || !answer || !sources || sources.length === 0) {
     return { answer, citations: [], sources };
   }
 
@@ -197,9 +183,6 @@ export async function addCitationsToAnswer(answer, sources, options = {}) {
   }));
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     const sourceList = numberedSources.map(s =>
       `[${s.number}] ${s.content}`
     ).join('\n\n');
@@ -215,13 +198,7 @@ ${sourceList}
 Add [n] citations after statements that are supported by source n. Only cite sources that actually support the statement.
 Return the annotated answer only:`;
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: { temperature: 0.1, maxOutputTokens: 1500 }
-    });
-
-    const annotatedAnswer = response.text?.trim() || answer;
+    const annotatedAnswer = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 1500, taskName: 'add_citations' }) || answer;
     const citationsUsed = extractCitationsFromAnswer(annotatedAnswer);
 
     const citations = citationsUsed.map(num => {

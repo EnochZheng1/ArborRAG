@@ -1,0 +1,166 @@
+/**
+ * Central LLM provider abstraction.
+ *
+ * Supports OpenAI and Gemini. Provider, model names, and API keys are read
+ * from environment variables at startup and can be changed at runtime via
+ * updateLlmConfig() (Settings API).
+ *
+ * All LLM call sites import callLLM() from this module instead of using
+ * provider-specific SDKs directly.
+ */
+
+import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
+import { logger } from "./logger.js";
+import { recordTokenUsage } from "./tokenTracker.js";
+
+// ── Runtime-mutable config ────────────────────────────────────────────────────
+
+export const llmConfig = {
+  provider: process.env.LLM_PROVIDER || 'openai',
+  openai: {
+    model:          process.env.OPENAI_MODEL           || 'gpt-5-nano',
+    embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-large',
+    apiKey:         process.env.OPENAI_API_KEY         || '',
+  },
+  gemini: {
+    model:          process.env.GEMINI_MODEL           || 'gemini-2.0-flash',
+    embeddingModel: process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001',
+    apiKey:         process.env.GEMINI_API_KEY         || '',
+  },
+};
+
+/**
+ * Update runtime config (changes propagate immediately to all subsequent calls).
+ * Passing openai or gemini sub-objects resets the corresponding lazy client.
+ */
+export function updateLlmConfig(patch) {
+  if (patch.provider !== undefined) llmConfig.provider = patch.provider;
+  if (patch.openai) {
+    Object.assign(llmConfig.openai, patch.openai);
+    _openai = null; // force client re-init
+  }
+  if (patch.gemini) {
+    Object.assign(llmConfig.gemini, patch.gemini);
+    _gemini = null;
+  }
+}
+
+// ── Lazy client instances ─────────────────────────────────────────────────────
+
+let _openai = null;
+let _gemini = null;
+
+function openaiClient() {
+  if (!_openai) _openai = new OpenAI({ apiKey: llmConfig.openai.apiKey });
+  return _openai;
+}
+
+function geminiClient() {
+  if (!_gemini) _gemini = new GoogleGenAI({ apiKey: llmConfig.gemini.apiKey });
+  return _gemini;
+}
+
+// Track which models don't support temperature (auto-detected on first failure)
+const _noTemperatureModels = new Set();
+
+// ── Primary call function ─────────────────────────────────────────────────────
+
+/**
+ * Call the configured LLM and return the response text.
+ *
+ * @param {{ prompt: string, temperature?: number, maxOutputTokens?: number, taskName?: string }} opts
+ * @returns {Promise<string>}
+ */
+export async function callLLM({
+  prompt,
+  temperature     = 0.2,
+  maxOutputTokens = null,   // null = no limit (model default)
+  taskName        = 'llm_call',
+} = {}) {
+  if (llmConfig.provider === 'openai') {
+    if (!llmConfig.openai.apiKey) throw new Error('OPENAI_API_KEY is not configured');
+
+    const model = llmConfig.openai.model;
+    const baseParams = {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      reasoning_effort: 'minimal',
+      verbosity: 'low',
+      // Only set max_completion_tokens when explicitly requested
+      ...(maxOutputTokens != null && { max_completion_tokens: maxOutputTokens }),
+    };
+
+    // Some models (o-series reasoning models) reject custom temperature values.
+    // Auto-detect on first failure and remember for subsequent calls.
+    const withTemp = !_noTemperatureModels.has(model);
+    let resp;
+    try {
+      resp = await openaiClient().chat.completions.create(
+        withTemp ? { ...baseParams, temperature } : baseParams
+      );
+    } catch (err) {
+      if (withTemp && err.status === 400 && err.message?.toLowerCase().includes('temperature')) {
+        _noTemperatureModels.add(model);
+        logger.info(`Model '${model}' does not support custom temperature — disabling for future calls`);
+        resp = await openaiClient().chat.completions.create(baseParams);
+      } else {
+        throw err;
+      }
+    }
+
+    recordTokenUsage(
+      { usageMetadata: { totalTokenCount: resp.usage?.total_tokens ?? 0 } },
+      taskName,
+      { provider: 'openai', model: llmConfig.openai.model }
+    );
+
+    const choice   = resp.choices[0];
+    const content  = choice?.message?.content?.trim() ?? '';
+    const reason   = choice?.finish_reason;
+    const usage    = resp.usage;
+
+    if (!content) {
+      // Diagnose why content is empty
+      const refusal = choice?.message?.refusal;
+      if (refusal) {
+        logger.warn(`[${taskName}] OpenAI refused: ${refusal}`);
+      } else if (reason === 'length') {
+        logger.warn(
+          `[${taskName}] OpenAI hit token limit. ` +
+          `Usage: prompt=${usage?.prompt_tokens}, completion=${usage?.completion_tokens}, ` +
+          `reasoning=${usage?.completion_tokens_details?.reasoning_tokens ?? 'n/a'}.`
+        );
+      } else {
+        logger.warn(`[${taskName}] OpenAI returned empty content (finish_reason=${reason})`);
+      }
+    }
+
+    return content;
+
+  } else {
+    if (!llmConfig.gemini.apiKey) throw new Error('GEMINI_API_KEY is not configured');
+
+    const resp = await geminiClient().models.generateContent({
+      model:    llmConfig.gemini.model,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config:   { temperature, maxOutputTokens },
+    });
+
+    recordTokenUsage(resp, taskName, { provider: 'gemini', model: llmConfig.gemini.model });
+
+    return (
+      resp.text ??
+      resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ??
+      ''
+    ).trim();
+  }
+}
+
+// ── Config helpers ────────────────────────────────────────────────────────────
+
+export const getCurrentProvider      = () => llmConfig.provider;
+export const getCurrentLlmModel      = () =>
+  llmConfig.provider === 'openai' ? llmConfig.openai.model      : llmConfig.gemini.model;
+export const getCurrentEmbedModel    = () =>
+  llmConfig.provider === 'openai' ? llmConfig.openai.embeddingModel : llmConfig.gemini.embeddingModel;

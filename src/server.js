@@ -1,6 +1,6 @@
+import "dotenv/config";
 import http from "http";
 import express from "express";
-import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
@@ -14,6 +14,7 @@ import { subscribeToJob, unsubscribeFromJob, unsubscribeAll } from "./utils/prog
 
 // Route modules
 import datasetsRouter from "./routes/datasets.js";
+import settingsRouter from "./routes/settings.js";
 import queryRouter from "./routes/query.js";
 import ingestRouter from "./routes/ingest.js";
 import documentsRouter from "./routes/documents.js";
@@ -22,10 +23,11 @@ import conflictsRouter from "./routes/conflicts.js";
 import embeddingsRouter from "./routes/embeddings.js";
 import statsRouter from "./routes/stats.js";
 import entitiesRouter from "./routes/entities.js";
+import decisionsRouter from "./routes/decisions.js";
+import testsRouter from "./routes/tests.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-dotenv.config();
 initDb();
 
 const app = express();
@@ -35,6 +37,9 @@ startIngestionQueue();
 
 // ── Dataset registry endpoints (no DB context required) ──────────────────────
 app.use("/datasets", datasetsRouter);
+
+// ── Settings (no DB context required) ────────────────────────────────────────
+app.use(settingsRouter);
 
 // ── Static files ─────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "../public")));
@@ -62,6 +67,8 @@ app.use(conflictsRouter);
 app.use(embeddingsRouter);
 app.use(statsRouter);
 app.use(entitiesRouter);
+app.use(decisionsRouter);
+app.use(testsRouter);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

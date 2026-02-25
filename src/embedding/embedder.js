@@ -1,23 +1,21 @@
 import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 import { embedLogger as logger } from "../utils/logger.js";
 import { recordTokenUsage } from "../utils/tokenTracker.js";
+import { llmConfig, getCurrentEmbedModel } from "../utils/llm.js";
 
 /**
- * Embedding generation using Google Gemini
+ * Embedding generation — supports OpenAI and Gemini via llmConfig.
  */
 
-// Embedding model configuration
-// Available model: "gemini-embedding-001"
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "gemini-embedding-001";
-const EMBEDDING_DIMENSION = 3072; // gemini-embedding-001 uses 3072 dimensions
+// Both text-embedding-3-large (OpenAI) and gemini-embedding-001 use 3072 dimensions
+const EMBEDDING_DIMENSION = 3072;
 const MAX_BATCH_SIZE = 100;
 const MAX_INPUT_LENGTH = 2048; // Characters
 
 // Check if embeddings are disabled
 const EMBEDDINGS_DISABLED = process.env.DISABLE_EMBEDDINGS === "true";
 
-// Log configuration on load
-logger.info(`Embedding model: ${EMBEDDING_MODEL}`);
 logger.info(`Embeddings disabled: ${EMBEDDINGS_DISABLED}`);
 
 // Simple in-memory cache
@@ -28,21 +26,34 @@ const CACHE_MAX_SIZE = 1000;
 let lastRequestTime = 0;
 const MIN_REQUEST_INTERVAL = 100; // ms between requests
 
-// Cached client
-let cachedClient = null;
+// Lazy provider clients
+let _geminiClient = null;
+let _openaiClient = null;
+
+function getGeminiClient() {
+  if (!_geminiClient) {
+    const apiKey = llmConfig.gemini.apiKey;
+    if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
+    _geminiClient = new GoogleGenAI({ apiKey });
+  }
+  return _geminiClient;
+}
+
+function getOpenAIClient() {
+  if (!_openaiClient) {
+    const apiKey = llmConfig.openai.apiKey;
+    if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
+    _openaiClient = new OpenAI({ apiKey });
+  }
+  return _openaiClient;
+}
 
 /**
- * Get Gemini client
+ * Reset cached clients (call when llmConfig changes provider or keys).
  */
-function getClient() {
-  if (cachedClient) return cachedClient;
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is required");
-  }
-  cachedClient = new GoogleGenAI({ apiKey });
-  return cachedClient;
+export function resetEmbedderClient() {
+  _geminiClient = null;
+  _openaiClient = null;
 }
 
 /**
@@ -83,6 +94,38 @@ function getCacheKey(text) {
 }
 
 /**
+ * Generate an embedding vector using the configured provider.
+ * taskType is used only for Gemini (ignored by OpenAI).
+ */
+async function generateEmbeddingVector(text, taskType) {
+  await rateLimitWait();
+
+  if (llmConfig.provider === 'openai') {
+    const client = getOpenAIClient();
+    const resp = await client.embeddings.create({
+      model: llmConfig.openai.embeddingModel,
+      input: text,
+      encoding_format: 'float',
+    });
+    recordTokenUsage(
+      { usageMetadata: { totalTokenCount: resp.usage?.total_tokens ?? 0 } },
+      'embedding',
+      { provider: 'openai', model: llmConfig.openai.embeddingModel }
+    );
+    return resp.data[0].embedding;
+  } else {
+    const ai = getGeminiClient();
+    const result = await ai.models.embedContent({
+      model: llmConfig.gemini.embeddingModel,
+      contents: [{ parts: [{ text }] }],
+      config: { taskType },
+    });
+    recordTokenUsage(result, 'embedding', { provider: 'gemini', model: llmConfig.gemini.embeddingModel });
+    return result?.embedding?.values || result?.embeddings?.[0]?.values;
+  }
+}
+
+/**
  * Generate embedding for a single text
  * @param {string} text - Text to embed
  * @param {object} options - Options
@@ -110,23 +153,8 @@ export async function generateEmbedding(text, options = {}) {
     }
   }
 
-  const ai = getClient();
-
   try {
-    await rateLimitWait();
-
-    // Use ai.models.embedContent with the model name
-    const result = await ai.models.embedContent({
-      model: EMBEDDING_MODEL,
-      contents: [{ parts: [{ text: normalizedText }] }],
-      config: { taskType }
-    });
-
-    // Track token usage (embeddings count tokens differently)
-    recordTokenUsage(result, 'embedding', { model: EMBEDDING_MODEL, text_length: normalizedText.length });
-
-    // Extract embedding from response
-    const embedding = result?.embedding?.values || result?.embeddings?.[0]?.values;
+    const embedding = await generateEmbeddingVector(normalizedText, taskType);
 
     if (!embedding || !Array.isArray(embedding)) {
       logger.error("Invalid embedding response format:", JSON.stringify(result));
@@ -198,21 +226,13 @@ export async function generateEmbeddingBatch(texts, options = {}) {
   }
 
   // Generate embeddings for non-cached texts in batches
-  const ai = getClient();
-
   for (let batchStart = 0; batchStart < toGenerate.length; batchStart += MAX_BATCH_SIZE) {
     const batch = toGenerate.slice(batchStart, batchStart + MAX_BATCH_SIZE);
 
     try {
       // Generate embeddings one at a time
       for (const item of batch) {
-        await rateLimitWait();
-        const result = await ai.models.embedContent({
-          model: EMBEDDING_MODEL,
-          contents: [{ parts: [{ text: item.text }] }],
-          config: { taskType }
-        });
-        const embedding = result?.embedding?.values || result?.embeddings?.[0]?.values;
+        const embedding = await generateEmbeddingVector(item.text, taskType);
 
         if (embedding && Array.isArray(embedding)) {
           results[item.index] = embedding;
@@ -304,10 +324,10 @@ export function getEmbeddingDimension() {
 }
 
 /**
- * Get embedding model name
+ * Get embedding model name (reflects current provider config).
  */
 export function getEmbeddingModel() {
-  return EMBEDDING_MODEL;
+  return getCurrentEmbedModel();
 }
 
 /**

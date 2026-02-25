@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 
 /**
  * Query Decomposition Module
@@ -35,8 +35,7 @@ export async function decomposeQuery(query, options = {}) {
     return result;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return {
       isComplex: false,
       original: query,
@@ -46,9 +45,6 @@ export async function decomposeQuery(query, options = {}) {
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
     const prompt = `Analyze this query and determine if it should be broken into simpler sub-queries for better information retrieval.
 
 Query: "${query}"
@@ -75,13 +71,7 @@ Rules:
 
 JSON only:`;
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: { temperature: 0.2, maxOutputTokens: 500 }
-    });
-
-    const text = response.text?.trim() || '';
+    const text = await callLLM({ prompt, temperature: 0.2, maxOutputTokens: 500, taskName: 'query_decomposition' }) || '';
 
     // Parse JSON
     const jsonMatch = text.match(/\{[\s\S]*\}/);

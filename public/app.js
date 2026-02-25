@@ -548,7 +548,10 @@ document.addEventListener('DOMContentLoaded', () => {
   initUpload();
   initDocuments();
   initConflicts();
+  initDecisions();
+  initTests();
   initStats();
+  initSettings();
   initQueryHistory();
   initGraphView();
   initMobileSidebar();
@@ -608,8 +611,11 @@ function initTabs() {
       if (tabId === 'tree') loadTree();
       if (tabId === 'documents') loadDocuments();
       if (tabId === 'conflicts') loadConflicts();
+      if (tabId === 'decisions') loadDecisions();
+      if (tabId === 'tests') loadTests();
       if (tabId === 'stats') loadStats();
       if (tabId === 'datasets') loadDatasets();
+      if (tabId === 'settings') loadSettings();
     });
   });
 }
@@ -3539,6 +3545,8 @@ function switchDataset(id, name, reload = true) {
     }
     else if (activeTab === 'documents') loadDocuments();
     else if (activeTab === 'conflicts') loadConflicts();
+    else if (activeTab === 'decisions') loadDecisions();
+    else if (activeTab === 'tests') loadTests();
     else if (activeTab === 'stats') loadStats();
     else if (activeTab === 'datasets') loadDatasets();
   }
@@ -3560,14 +3568,16 @@ async function loadDatasets() {
       return;
     }
 
-    // Fetch stats for each dataset in parallel
-    const statsResults = await Promise.allSettled(
-      allDatasets.map(d => fetch(`/datasets/${d.id}/stats`).then(r => r.json()))
-    );
+    // Fetch stats AND language config for each dataset in parallel
+    const [statsResults, langResults] = await Promise.all([
+      Promise.allSettled(allDatasets.map(d => fetch(`/datasets/${d.id}/stats`).then(r => r.json()))),
+      Promise.allSettled(allDatasets.map(d => fetch(`/datasets/${d.id}/config/language`).then(r => r.json())))
+    ]);
 
     list.innerHTML = allDatasets.map((d, i) => {
       const stats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : {};
-      return renderDatasetCard(d, stats);
+      const langInfo = langResults[i].status === 'fulfilled' ? langResults[i].value : { language: 'auto', locked: false };
+      return renderDatasetCard(d, stats, langInfo);
     }).join('');
 
     // Wire up card action buttons via delegation
@@ -3577,11 +3587,18 @@ async function loadDatasets() {
   }
 }
 
-function renderDatasetCard(dataset, stats = {}) {
+const LANG_LABELS = { 'auto': 'Auto', 'zh-CN': '简体中文', 'zh-TW': '繁體中文', 'en': 'English' };
+
+function renderDatasetCard(dataset, stats = {}, langInfo = { language: 'auto', locked: false }) {
   const isActive = dataset.id === currentDatasetId;
   const nodeCount = stats.node_count ?? '—';
   const docCount = stats.document_count ?? '—';
   const createdDate = dataset.created_at ? new Date(dataset.created_at).toLocaleDateString() : '';
+  const langLabel = LANG_LABELS[langInfo.language] || langInfo.language;
+  const langBadge = `<span class="lang-badge ${langInfo.locked ? 'lang-badge--locked' : 'lang-badge--auto'}">${escapeHtml(langLabel)}</span>`;
+  const lockBtn = !langInfo.locked
+    ? `<button class="btn btn-secondary btn-small" data-action="lock-language">Set Language</button>`
+    : '';
 
   return `
     <div class="dataset-card" data-dataset-id="${escapeHtml(dataset.id)}">
@@ -3589,6 +3606,7 @@ function renderDatasetCard(dataset, stats = {}) {
         <div class="dataset-card-title">
           <h3 class="dataset-name">${escapeHtml(dataset.name)}</h3>
           ${isActive ? `<span class="dataset-active-badge">${t('dataset_active')}</span>` : ''}
+          ${langBadge}
         </div>
         ${dataset.description ? `<div class="dataset-description">${escapeHtml(dataset.description)}</div>` : ''}
         <div class="dataset-meta">
@@ -3601,6 +3619,7 @@ function renderDatasetCard(dataset, stats = {}) {
         <button class="btn btn-secondary btn-small" data-action="rename">${t('dataset_rename')}</button>
         <button class="btn btn-secondary btn-small" data-action="duplicate">${t('dataset_duplicate')}</button>
         <button class="btn btn-secondary btn-small" data-action="export">${t('dataset_export')}</button>
+        ${lockBtn}
         <button class="btn btn-danger btn-small" data-action="delete">${t('dataset_delete')}</button>
       </div>
       <div class="dataset-rename-form hidden" data-rename-form>
@@ -3662,6 +3681,23 @@ async function handleDatasetCardAction(e) {
     } catch (err) { showToast(err.message, 'error'); }
   } else if (action === 'export') {
     window.location.href = `/datasets/${datasetId}/export`;
+  } else if (action === 'lock-language') {
+    const options = [
+      { value: 'zh-CN', label: '简体中文 (Simplified Chinese)' },
+      { value: 'zh-TW', label: '繁體中文 (Traditional Chinese)' },
+      { value: 'en', label: 'English' }
+    ];
+    const choice = prompt(`Select dataset language (cannot be changed after):\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}`);
+    const idx = parseInt(choice, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= options.length) return;
+    try {
+      await api(`/datasets/${datasetId}/config/language`, {
+        method: 'POST',
+        body: JSON.stringify({ language: options[idx].value })
+      });
+      showToast(`Language locked to ${options[idx].label}`, 'success');
+      loadDatasets();
+    } catch (err) { showToast(err.message, 'error'); }
   } else if (action === 'delete') {
     const confirmation = prompt(t('confirm_delete_dataset'));
     if (confirmation !== 'DELETE') return;
@@ -3681,18 +3717,1104 @@ async function handleDatasetCardAction(e) {
 async function handleCreateDataset() {
   const nameInput = document.getElementById('new-dataset-name');
   const descInput = document.getElementById('new-dataset-desc');
+  const langSelect = document.getElementById('new-dataset-lang');
   const name = nameInput?.value.trim();
   if (!name) { showToast('Name is required', 'error'); return; }
 
   try {
     const result = await api('/datasets', {
       method: 'POST',
-      body: JSON.stringify({ name, description: descInput?.value.trim() || '' })
+      body: JSON.stringify({
+        name,
+        description: descInput?.value.trim() || '',
+        language: langSelect?.value || 'auto'
+      })
     });
     document.getElementById('dataset-create-form').classList.add('hidden');
     nameInput.value = '';
     if (descInput) descInput.value = '';
+    if (langSelect) langSelect.value = 'auto';
     showToast(t('dataset_created'), 'success');
     loadDatasets();
   } catch (err) { showToast(err.message, 'error'); }
+}
+
+// ── Decisions Tab ─────────────────────────────────────────────────────────────
+
+function initDecisions() {
+  document.getElementById('refresh-decisions-btn')?.addEventListener('click', loadDecisions);
+  document.getElementById('decisions-status-filter')?.addEventListener('change', loadDecisions);
+  document.getElementById('run-cleanup-btn')?.addEventListener('click', runCleanupJob);
+}
+
+async function loadDecisions() {
+  const list = document.getElementById('decisions-list');
+  const statsDiv = document.getElementById('decisions-stats');
+  if (!list) return;
+
+  const statusFilter = document.getElementById('decisions-status-filter')?.value || 'pending';
+
+  try {
+    list.innerHTML = '<p class="empty-state">Loading…</p>';
+
+    const [{ decisions }, stats] = await Promise.all([
+      api(`/decisions?status=${encodeURIComponent(statusFilter)}&limit=100`),
+      api('/decisions/stats')
+    ]);
+
+    // Render stats row
+    if (statsDiv) {
+      statsDiv.innerHTML = `
+        <span class="decision-stat-pill decision-stat-pending">${stats.pending} pending</span>
+        <span class="decision-stat-pill decision-stat-accepted">${stats.accepted} accepted</span>
+        <span class="decision-stat-pill decision-stat-rejected">${stats.rejected} rejected</span>
+        <span class="decision-stat-pill decision-stat-auto">${stats.auto_resolved} auto-resolved</span>
+      `;
+    }
+
+    if (!decisions.length) {
+      list.innerHTML = `<p class="empty-state">No ${statusFilter === 'pending' ? 'pending ' : ''}decisions found.</p>`;
+      return;
+    }
+
+    list.innerHTML = decisions.map(d => renderDecisionCard(d)).join('');
+
+    list.querySelectorAll('[data-accept]').forEach(btn => {
+      btn.addEventListener('click', () => applyDecision(btn.dataset.accept, 'accept'));
+    });
+    list.querySelectorAll('[data-reject]').forEach(btn => {
+      btn.addEventListener('click', () => applyDecision(btn.dataset.reject, 'reject'));
+    });
+  } catch (err) {
+    list.innerHTML = `<p class="empty-state error">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderDecisionCard(d) {
+  const actionClass = {
+    merge_suggestion:      'decision-merge',
+    replace_suggestion:    'decision-replace',
+    node_merge_suggestion: 'decision-node-merge'
+  }[d.action] || '';
+
+  const actionLabel = {
+    merge_suggestion:      'Merge',
+    replace_suggestion:    'Replace',
+    node_merge_suggestion: 'Node Merge'
+  }[d.action] || d.action;
+
+  const simStr = d.similarity_score != null ? `Similarity: ${(d.similarity_score * 100).toFixed(0)}%` : '';
+  const confStr = d.confidence != null ? `Confidence: ${(d.confidence * 100).toFixed(0)}%` : '';
+  const isPending = d.status === 'pending';
+
+  return `
+    <div class="decision-card ${actionClass}">
+      <div class="decision-card-header">
+        <span class="decision-action">${escapeHtml(actionLabel)}</span>
+        <span class="decision-status decision-status-${d.status}">${escapeHtml(d.status)}</span>
+        <span class="decision-meta">${[simStr, confStr].filter(Boolean).join(' · ')}</span>
+      </div>
+      ${d.reason ? `<p class="decision-reason">${escapeHtml(d.reason)}</p>` : ''}
+      ${d.incoming_preview ? `
+        <div class="kp-preview-block">
+          <span class="kp-preview-label">Incoming</span>
+          <div class="kp-preview">${escapeHtml(d.incoming_preview)}</div>
+        </div>` : ''}
+      ${d.target_preview ? `
+        <div class="kp-preview-block">
+          <span class="kp-preview-label">Existing</span>
+          <div class="kp-preview">${escapeHtml(d.target_preview)}</div>
+        </div>` : ''}
+      ${isPending ? `
+        <div class="decision-actions">
+          <button class="btn btn-primary btn-small" data-accept="${d.id}">Accept</button>
+          <button class="btn btn-secondary btn-small" data-reject="${d.id}">Reject</button>
+        </div>` : ''}
+    </div>
+  `;
+}
+
+async function applyDecision(id, action) {
+  try {
+    await api(`/decisions/${id}/${action}`, { method: 'POST' });
+    showToast(`Decision ${action}ed`, 'success');
+    loadDecisions();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function runCleanupJob() {
+  const btn = document.getElementById('run-cleanup-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const result = await api('/decisions/cleanup', { method: 'POST', body: JSON.stringify({}) });
+    showToast(result.message || 'Cleanup job started', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Tests Tab ─────────────────────────────────────────────────────────────────
+
+// ── Accuracy test document ────────────────────────────────────────────────────
+// A fictional employee handbook with precise, verifiable facts used as ground
+// truth for the accuracy test suite. Ingested once per session via accuracy_ingest.
+
+const ACCURACY_TEST_DOCUMENT = `QUANTUM LABS, INC.
+EMPLOYEE HANDBOOK — VERSION 3.0
+
+COMPANY OVERVIEW
+
+Quantum Labs, Inc. was founded in 2019 by Dr. James Harrington and Sarah Chen in
+San Francisco, California. Our headquarters are located at 42 Innovation Drive,
+San Francisco, CA 94105. Sarah Chen serves as Chief Executive Officer (CEO), while
+Dr. James Harrington serves as Chief Technology Officer (CTO).
+
+Quantum Labs develops enterprise software solutions focused on security and
+productivity. Our three flagship products are:
+- QuantumVault: An enterprise password manager with zero-knowledge encryption
+- QuantumFlow: A workflow automation platform for teams of all sizes
+- QuantumScan: An automated security vulnerability scanner
+
+EMPLOYMENT POLICIES
+
+1. Probationary Period
+All new employees are subject to a 90-day probationary period starting from their
+first day of employment. During this period, either party may terminate employment
+with 7 days notice. Remote work is not available during the probationary period.
+
+2. Vacation Policy
+Employees in their first year of service receive 15 days of paid vacation annually.
+After completing 3 consecutive years of service, vacation entitlement increases to
+20 days per year. Unused vacation days may be carried over up to a maximum of 5
+days per calendar year.
+
+3. Health Insurance
+Quantum Labs covers 85% of employee health insurance premiums for the standard
+plan. Employees choosing enhanced coverage plans are responsible for the additional
+premium difference. Dependents may be added during the annual enrollment window
+each November.
+
+4. Remote Work Policy
+Employees may work remotely up to 3 days per week, subject to manager approval.
+Core collaboration hours are 10:00 AM to 3:00 PM Pacific Time, during which all
+employees must be available regardless of work location.
+
+5. Performance Reviews
+Performance reviews are conducted twice per year: in June and in December. Each
+review includes a self-assessment, a peer review from two colleagues, and a formal
+evaluation by the direct manager.
+
+TECHNICAL SUPPORT SLA
+
+Quantum Labs' internal IT team guarantees the following service level agreements:
+- Critical issues (system outage): 4-hour response time
+- High priority (significant impact): 8-hour response time
+- Medium priority (partial impact): 24-hour response time
+- Low priority (minor impact): 72-hour response time
+
+IT support requests should be submitted to support@quantumlabs.example.com
+
+CONTACT INFORMATION
+
+HR Department: hr@quantumlabs.example.com
+CEO: sarah.chen@quantumlabs.example.com
+CTO: james.harrington@quantumlabs.example.com
+Office Phone: +1 (415) 555-0142
+Emergency Hotline: +1 (415) 555-0199
+
+PRODUCT DETAILS
+
+QuantumVault
+QuantumVault is Quantum Labs' flagship password management solution. It uses
+zero-knowledge architecture, ensuring that only the user can access their stored
+credentials. QuantumVault supports integration with over 200 third-party
+applications and provides multi-factor authentication (MFA) support. Enterprise
+pricing starts at $8 per user per month.
+
+QuantumFlow
+QuantumFlow automates repetitive business workflows using a drag-and-drop interface
+requiring no coding experience. It integrates with popular tools including Slack,
+Jira, GitHub, and Microsoft 365. QuantumFlow processes over 50 million workflow
+executions per month across all customers. Enterprise pricing starts at $12 per
+user per month.
+
+QuantumScan
+QuantumScan performs automated security scans of web applications and cloud
+infrastructure. Scans are conducted weekly by default, with the option for daily
+scans on critical systems. QuantumScan has detected over 2 million security
+vulnerabilities since its launch in 2021. Enterprise pricing starts at $500 per
+month per domain.
+`;
+
+// Helper: evaluate a /ask response for a factual substring match.
+// Returns { passed, detail } for use inside accuracy test run() functions.
+function checkAccuracyAnswer(d, needle) {
+  if (d.action === 'no_results')
+    return { passed: false, detail: 'no_results — test document may not be indexed in this dataset' };
+  const answer  = d.llm_response?.final_answer ?? '';
+  const passed  = answer.toLowerCase().includes(needle.toLowerCase());
+  const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+  return { passed, detail: `conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}${answer.length > 150 ? '…' : ''}` };
+}
+
+// ── Built-in test catalog ─────────────────────────────────────────────────────
+
+const BUILTIN_TESTS = [
+  // ─ Connectivity
+  {
+    id: 'health_check', category: 'Connectivity', builtin: true,
+    name: 'Server Health Check',
+    description: 'GET /health returns status "ok"',
+    async run(call) {
+      const d = await call('GET', '/health');
+      const passed = d.status === 'ok';
+      return { passed, detail: `status: ${d.status}` };
+    }
+  },
+  {
+    id: 'stats_structure', category: 'Connectivity', builtin: true,
+    name: 'System Stats Structure',
+    description: 'GET /stats returns nodes, documents, chunks keys',
+    async run(call) {
+      const d = await call('GET', '/stats');
+      const missing = ['nodes', 'documents', 'chunks'].filter(k => !(k in d));
+      return { passed: missing.length === 0, detail: missing.length ? `missing keys: ${missing.join(', ')}` : 'all keys present' };
+    }
+  },
+
+  // ─ Query Pipeline
+  {
+    id: 'ask_returns_answer', category: 'Query Pipeline', builtin: true,
+    name: 'Ask Returns Answer Field',
+    description: 'POST /ask → response has llm_response.final_answer or action=no_results',
+    async run(call) {
+      const d = await call('POST', '/ask', { query: 'test query' });
+      const hasAnswer = d.llm_response?.final_answer != null;
+      const isNoResults = d.action === 'no_results';
+      const passed = hasAnswer || isNoResults;
+      return {
+        passed,
+        detail: hasAnswer
+          ? `final_answer length: ${d.llm_response.final_answer.length} chars`
+          : isNoResults ? 'no results (empty dataset)' : `unexpected shape; keys: ${Object.keys(d).join(', ')}`
+      };
+    }
+  },
+  {
+    id: 'ask_confidence_range', category: 'Query Pipeline', builtin: true,
+    name: 'Answer Confidence In Range',
+    description: 'POST /ask → confidence field is a number in [0, 1]',
+    async run(call) {
+      const d = await call('POST', '/ask', { query: 'test query' });
+      const c = d.confidence;
+      const passed = typeof c === 'number' && c >= 0 && c <= 1;
+      return { passed, detail: `confidence: ${c}` };
+    }
+  },
+  {
+    id: 'ask_has_query_type', category: 'Query Pipeline', builtin: true,
+    name: 'Ask Returns Query Type',
+    description: 'POST /ask → response includes query_type field',
+    async run(call) {
+      const d = await call('POST', '/ask', { query: 'test query' });
+      const passed = !!d.query_type;
+      return { passed, detail: `query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+  {
+    id: 'ask_simple_works', category: 'Query Pipeline', builtin: true,
+    name: 'Simple Search Works',
+    description: 'POST /ask/simple → response has llm_response.final_answer or action=no_results',
+    async run(call) {
+      const d = await call('POST', '/ask/simple', { query: 'test query' });
+      const hasAnswer = d.llm_response?.final_answer != null;
+      const isNoResults = d.action === 'no_results';
+      const passed = hasAnswer || isNoResults;
+      return {
+        passed,
+        detail: hasAnswer
+          ? `final_answer length: ${d.llm_response.final_answer.length} chars`
+          : isNoResults ? 'no results (empty dataset)' : `unexpected shape; keys: ${Object.keys(d).join(', ')}`
+      };
+    }
+  },
+
+  // ─ Classification
+  {
+    id: 'classify_simple_lookup', category: 'Classification', builtin: true,
+    name: 'Classify Simple Lookup',
+    description: '"What is the definition of X?" → query_type=simple_lookup',
+    async run(call) {
+      const d = await call('POST', '/classify', { query: 'What is the definition of a knowledge base?' });
+      const passed = d.query_type === 'simple_lookup';
+      return { passed, detail: `got query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+  {
+    id: 'classify_comparison', category: 'Classification', builtin: true,
+    name: 'Classify Comparison Query',
+    description: '"Compare option A and option B" → query_type=comparison',
+    async run(call) {
+      const d = await call('POST', '/classify', { query: 'Compare option A and option B' });
+      const passed = d.query_type === 'comparison';
+      return { passed, detail: `got query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+  {
+    id: 'classify_recommendation', category: 'Classification', builtin: true,
+    name: 'Classify Recommendation Query',
+    description: '"What do you recommend for new employees?" → query_type=recommendation',
+    async run(call) {
+      const d = await call('POST', '/classify', { query: 'What do you recommend for new employees?' });
+      const passed = d.query_type === 'recommendation';
+      return { passed, detail: `got query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+
+  // ─ Data Integrity
+  {
+    id: 'nodes_tree_valid', category: 'Data Integrity', builtin: true,
+    name: 'Node Tree Accessible',
+    description: 'GET /nodes → response has "tree" key',
+    async run(call) {
+      const d = await call('GET', '/nodes');
+      const passed = 'tree' in d;
+      return { passed, detail: passed ? `tree present` : 'missing tree key' };
+    }
+  },
+  {
+    id: 'documents_listed', category: 'Data Integrity', builtin: true,
+    name: 'Documents List Valid',
+    description: 'GET /documents → "documents" is an Array',
+    async run(call) {
+      const d = await call('GET', '/documents');
+      const passed = Array.isArray(d.documents);
+      return { passed, detail: passed ? `${d.documents.length} documents` : 'documents is not an array' };
+    }
+  },
+  {
+    id: 'embeddings_coverage_valid', category: 'Data Integrity', builtin: true,
+    name: 'Embeddings Coverage Valid',
+    description: 'GET /embeddings/coverage → response has chunks and nodes keys with coverage data',
+    async run(call) {
+      const d = await call('GET', '/embeddings/coverage');
+      const passed = d.chunks != null && d.nodes != null;
+      const detail = passed
+        ? `chunks: ${d.chunks.embedded}/${d.chunks.total}, nodes: ${d.nodes.embedded}/${d.nodes.total}`
+        : `unexpected shape: ${JSON.stringify(Object.keys(d))}`;
+      return { passed, detail };
+    }
+  },
+
+  // ─ Knowledge Features
+  {
+    id: 'suggestions_work', category: 'Knowledge Features', builtin: true,
+    name: 'Suggestions Endpoint Works',
+    description: 'GET /suggestions/examples → returns an Array',
+    async run(call) {
+      const d = await call('GET', '/suggestions/examples');
+      const arr = d.examples ?? d;
+      const passed = Array.isArray(arr);
+      return { passed, detail: passed ? `${arr.length} examples` : 'expected an array' };
+    }
+  },
+  {
+    id: 'facts_retrieve_format', category: 'Knowledge Features', builtin: true,
+    name: 'Facts Retrieve Format',
+    description: 'POST /facts/retrieve → response has "facts" key',
+    async run(call) {
+      const d = await call('POST', '/facts/retrieve', { question: 'test' });
+      const passed = 'facts' in d;
+      return { passed, detail: passed ? `${(d.facts ?? []).length} facts returned` : 'missing facts key' };
+    }
+  },
+  {
+    id: 'decisions_accessible', category: 'Knowledge Features', builtin: true,
+    name: 'Decisions Accessible',
+    description: 'GET /decisions → response has "decisions" key',
+    async run(call) {
+      const d = await call('GET', '/decisions');
+      const passed = 'decisions' in d;
+      return { passed, detail: passed ? `${d.decisions.length} decisions` : 'missing decisions key' };
+    }
+  },
+
+  // ─ System Health
+  {
+    id: 'queue_stats_accessible', category: 'System Health', builtin: true,
+    name: 'Queue Stats Accessible',
+    description: 'GET /ingest/queue/stats → response has "queued" key',
+    async run(call) {
+      const d = await call('GET', '/ingest/queue/stats');
+      const passed = 'queued' in d;
+      return { passed, detail: passed ? `queued: ${d.queued}, processing: ${d.processing}` : `missing queued key; got: ${JSON.stringify(Object.keys(d))}` };
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ACCURACY TESTS
+  // These tests upload a known fictional document (Quantum Labs Employee Handbook)
+  // and verify that the RAG pipeline retrieves specific facts correctly.
+  // Run accuracy_ingest first; all other accuracy tests depend on it.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // ─ Accuracy — Setup
+  {
+    id: 'accuracy_ingest', category: 'Accuracy — Setup', builtin: true,
+    name: 'Ingest Test Document',
+    description: 'Upload the Quantum Labs handbook and wait for processing to complete',
+    async run(call) {
+      // Reset state for this run
+      accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+
+      // Build multipart upload (can't use api() — it forces JSON content-type)
+      const blob = new Blob([ACCURACY_TEST_DOCUMENT], { type: 'text/plain' });
+      const file = new File([blob], 'quantum-labs-handbook.txt', { type: 'text/plain' });
+      const fd   = new FormData();
+      fd.append('file', file);
+      fd.append('useLLM', 'true');
+      fd.append('detectConflicts', 'false');
+
+      const uploadResp = await fetch('/upload', {
+        method: 'POST',
+        body: fd,
+        headers: { 'X-Dataset-ID': currentDatasetId }
+      });
+      if (!uploadResp.ok) {
+        const err = await uploadResp.json().catch(() => ({}));
+        return { passed: false, detail: `Upload failed ${uploadResp.status}: ${err.error ?? uploadResp.statusText}` };
+      }
+      const uploadData = await uploadResp.json();
+      const jobId = uploadData.job?.id ?? uploadData.jobs?.[0]?.id;
+      if (!jobId) return { passed: false, detail: 'No job ID in upload response' };
+      accuracyState.jobId = jobId;
+
+      // Poll until terminal status (max 3 minutes)
+      const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
+      const start    = Date.now();
+      let job;
+      while (Date.now() - start < 180_000) {
+        job = await call('GET', `/ingest/jobs/${jobId}`);
+        if (TERMINAL.has(job.status)) break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      if (!job)              return { passed: false, detail: 'Polling produced no response' };
+      if (job.status !== 'completed')
+        return { passed: false, detail: `Ingestion ended with status: ${job.status}${job.error_message ? ' — ' + job.error_message : ''}` };
+
+      const result     = job.result ?? {};
+      const docId      = result.documentId ?? result.document_id ?? job.document_id;
+      const chunkCount = result.stats?.chunkCount ?? 0;
+      const elapsed    = ((Date.now() - start) / 1000).toFixed(1);
+
+      accuracyState.docId      = docId;
+      accuracyState.chunkCount = chunkCount;
+      accuracyState.ingested   = true;
+
+      return { passed: true, detail: `Doc #${docId} ingested — ${chunkCount} chunks in ${elapsed}s` };
+    }
+  },
+  {
+    id: 'accuracy_chunks_created', category: 'Accuracy — Setup', builtin: true,
+    name: 'Test Document Has Chunks',
+    description: 'Verify the ingested test document produced at least one chunk',
+    async run(_call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const passed = accuracyState.chunkCount > 0;
+      return { passed, detail: `${accuracyState.chunkCount} chunks created from test document` };
+    }
+  },
+
+  // ─ Accuracy — Factual Retrieval
+  {
+    id: 'accuracy_founded_year', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Founding Year',
+    description: 'Ask when Quantum Labs was founded → answer must contain "2019"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'When was Quantum Labs founded?' });
+      return checkAccuracyAnswer(d, '2019');
+    }
+  },
+  {
+    id: 'accuracy_ceo_name', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve CEO Name',
+    description: 'Ask who the CEO of Quantum Labs is → answer must contain "Sarah Chen"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Who is the CEO of Quantum Labs?' });
+      return checkAccuracyAnswer(d, 'Sarah Chen');
+    }
+  },
+  {
+    id: 'accuracy_vacation_first_year', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve First-Year Vacation Days',
+    description: 'Ask about year-1 vacation entitlement → answer must contain "15"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many vacation days do first year Quantum Labs employees receive?' });
+      return checkAccuracyAnswer(d, '15');
+    }
+  },
+  {
+    id: 'accuracy_health_coverage_pct', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Health Insurance Coverage',
+    description: 'Ask what % of health premiums Quantum Labs covers → answer must contain "85"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What percentage of health insurance premiums does Quantum Labs cover for employees?' });
+      return checkAccuracyAnswer(d, '85');
+    }
+  },
+  {
+    id: 'accuracy_remote_work_days', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Remote Work Days Limit',
+    description: 'Ask how many days/week remote work is allowed → answer must contain "3"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many days per week can Quantum Labs employees work from home?' });
+      return checkAccuracyAnswer(d, '3');
+    }
+  },
+  {
+    id: 'accuracy_probation_length', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Probation Period Length',
+    description: 'Ask about probation duration → answer must contain "90"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the probationary period duration for new Quantum Labs employees?' });
+      return checkAccuracyAnswer(d, '90');
+    }
+  },
+  {
+    id: 'accuracy_critical_sla', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Critical Issue SLA',
+    description: 'Ask SLA for critical IT issues → answer must contain "4"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the SLA response time for critical IT issues at Quantum Labs?' });
+      return checkAccuracyAnswer(d, '4');
+    }
+  },
+
+  // ─ Accuracy — Semantic Retrieval
+  {
+    id: 'accuracy_products_list', category: 'Accuracy — Semantic Retrieval', builtin: true,
+    name: 'List All Products',
+    description: 'Ask what products Quantum Labs makes → answer must name both QuantumVault and QuantumFlow',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What products does Quantum Labs make?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results — test document may not be indexed' };
+      const answer  = (d.llm_response?.final_answer ?? '').toLowerCase();
+      const hasVault = answer.includes('quantumvault');
+      const hasFlow  = answer.includes('quantumflow');
+      const passed   = hasVault && hasFlow;
+      const snippet  = (d.llm_response?.final_answer ?? '').substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `QuantumVault:${hasVault} QuantumFlow:${hasFlow} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${snippet.length===150?'…':''}` };
+    }
+  },
+  {
+    id: 'accuracy_product_description', category: 'Accuracy — Semantic Retrieval', builtin: true,
+    name: 'Describe QuantumVault',
+    description: 'Ask what QuantumVault is → answer must mention "password"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is QuantumVault and what is it used for?' });
+      return checkAccuracyAnswer(d, 'password');
+    }
+  },
+  {
+    id: 'accuracy_review_frequency', category: 'Accuracy — Semantic Retrieval', builtin: true,
+    name: 'Retrieve Review Schedule',
+    description: 'Ask how often performance reviews are held → answer implies twice a year',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How often are performance reviews conducted at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results — test document may not be indexed' };
+      const answer  = (d.llm_response?.final_answer ?? '').toLowerCase();
+      const passed  = answer.includes('twice') || answer.includes('two') || answer.includes('june') || answer.includes('december') || answer.includes('2 times');
+      const snippet = (d.llm_response?.final_answer ?? '').substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `conf:${(d.confidence??0).toFixed(2)} | ${snippet}${snippet.length===150?'…':''}` };
+    }
+  },
+
+  // ─ Accuracy — Classification
+  {
+    id: 'accuracy_classify_comparison', category: 'Accuracy — Classification', builtin: true,
+    name: 'Classify Product Comparison Query',
+    description: '"Compare QuantumVault and QuantumFlow…" → query_type=comparison',
+    async run(call) {
+      const d = await call('POST', '/classify', { query: 'Compare QuantumVault and QuantumFlow in terms of features and pricing' });
+      const passed = d.query_type === 'comparison';
+      return { passed, detail: `got query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+  {
+    id: 'accuracy_classify_recommendation', category: 'Accuracy — Classification', builtin: true,
+    name: 'Classify Recommendation Query',
+    description: '"Which Quantum Labs product should I use for…" → query_type=recommendation',
+    async run(call) {
+      const d = await call('POST', '/classify', { query: 'Which Quantum Labs product should a small team use for workflow automation?' });
+      const passed = d.query_type === 'recommendation';
+      return { passed, detail: `got query_type: ${d.query_type ?? '(missing)'}` };
+    }
+  },
+
+  // ─ Accuracy — Knowledge Graph
+  {
+    id: 'accuracy_nodes_populated', category: 'Accuracy — Knowledge Graph', builtin: true,
+    name: 'Knowledge Graph Has Nodes',
+    description: 'After ingestion, GET /nodes → tree must contain at least one node',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('GET', '/nodes');
+      const count  = d.stats?.count ?? d.stats?.active ?? 0;
+      const passed = count > 0;
+      return { passed, detail: `${count} node(s) in knowledge tree` };
+    }
+  },
+  {
+    id: 'accuracy_entities_extracted', category: 'Accuracy — Knowledge Graph', builtin: true,
+    name: 'Entities Extracted From Document',
+    description: 'GET /entities → at least one entity mentions "Quantum" or "Sarah"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('GET', '/entities?limit=100');
+      const entities = d.entities ?? [];
+      const match    = entities.find(e => {
+        const n = (e.name ?? '').toLowerCase();
+        return n.includes('quantum') || n.includes('sarah') || n.includes('harrington');
+      });
+      return {
+        passed: !!match,
+        detail: match
+          ? `Found entity: "${match.name}" (${match.entity_type ?? 'unknown type'})`
+          : `No matching entity among ${entities.length} extracted (first 5: ${entities.slice(0,5).map(e=>e.name).join(', ')})`
+      };
+    }
+  },
+  {
+    id: 'accuracy_embeddings_generated', category: 'Accuracy — Knowledge Graph', builtin: true,
+    name: 'Chunk Embeddings Generated',
+    description: 'GET /embeddings/coverage → at least one chunk has been embedded',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('GET', '/embeddings/coverage');
+      const embedded = d.chunks?.embedded ?? 0;
+      const total    = d.chunks?.total ?? 0;
+      const passed   = embedded > 0;
+      return { passed, detail: `chunks embedded: ${embedded}/${total}` };
+    }
+  },
+  {
+    id: 'accuracy_facts_retrievable', category: 'Accuracy — Knowledge Graph', builtin: true,
+    name: 'Facts Extracted and Retrievable',
+    description: 'POST /facts/retrieve with a Quantum Labs question → returns at least 1 fact',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/facts/retrieve', { question: 'Quantum Labs vacation policy' });
+      const facts  = d.facts ?? [];
+      const passed = facts.length > 0;
+      return {
+        passed,
+        detail: passed
+          ? `${facts.length} fact(s) — first: "${(facts[0].content ?? '').substring(0, 80)}"`
+          : 'No facts returned'
+      };
+    }
+  },
+];
+
+// ── Test runner state ─────────────────────────────────────────────────────────
+
+let testResults  = {};  // id → { status: 'pending'|'running'|'passed'|'failed', detail: string }
+let allTests     = [];  // merged builtin + custom (each has a .run function)
+let isRunning    = false;
+// Shared state for accuracy tests — populated by accuracy_ingest, read by downstream tests
+let accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+
+function initTests() {
+  document.getElementById('run-all-tests-btn')?.addEventListener('click', () => runTests('all'));
+  document.getElementById('run-selected-tests-btn')?.addEventListener('click', () => runTests('selected'));
+  document.getElementById('clear-test-results-btn')?.addEventListener('click', clearTestResults);
+  document.getElementById('show-add-test-btn')?.addEventListener('click', () => {
+    document.getElementById('test-add-form')?.classList.remove('hidden');
+  });
+  document.getElementById('cancel-test-btn')?.addEventListener('click', () => {
+    document.getElementById('test-add-form')?.classList.add('hidden');
+    clearAddForm();
+  });
+  document.getElementById('save-test-btn')?.addEventListener('click', saveCustomTest);
+  document.getElementById('tc-assertion-type')?.addEventListener('change', updateAssertionValueVisibility);
+}
+
+// ── Load & render ─────────────────────────────────────────────────────────────
+
+async function loadTests() {
+  const container = document.getElementById('tests-container');
+  if (!container) return;
+  container.innerHTML = '<div class="loading-text">Loading tests…</div>';
+
+  try {
+    const { test_cases: custom = [] } = await api('/tests').catch(() => ({ test_cases: [] }));
+
+    // Convert custom DB rows to runnable test objects
+    const customTests = custom.map(tc => ({
+      ...tc,
+      id: `custom_${tc.id}`,
+      dbId: tc.id,
+      category: 'Custom',
+      builtin: false,
+      async run(call) {
+        const d = await call('POST', '/ask', { query: tc.query });
+        return evaluateAssertion(d, tc.assertion_type, tc.assertion_value);
+      }
+    }));
+
+    allTests = [...BUILTIN_TESTS, ...customTests];
+
+    // Preserve existing results across reloads
+    for (const t of allTests) {
+      if (!(t.id in testResults)) testResults[t.id] = { status: 'pending', detail: '' };
+    }
+
+    renderTestList();
+  } catch (err) {
+    container.innerHTML = `<div class="error-text">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderTestList() {
+  const container = document.getElementById('tests-container');
+  if (!container) return;
+
+  // Group by category
+  const groups = {};
+  for (const t of allTests) {
+    (groups[t.category] ??= []).push(t);
+  }
+
+  container.innerHTML = Object.entries(groups).map(([cat, tests]) => `
+    <div class="test-group">
+      <div class="test-group-header">${escapeHtml(cat)} <span class="test-group-count">(${tests.length})</span></div>
+      ${tests.map(t => renderTestCard(t)).join('')}
+    </div>
+  `).join('');
+
+  // Wire individual Run buttons
+  container.querySelectorAll('[data-run-test]').forEach(btn => {
+    btn.addEventListener('click', () => runTests('single', btn.dataset.runTest));
+  });
+  // Wire delete buttons for custom tests
+  container.querySelectorAll('[data-delete-test]').forEach(btn => {
+    btn.addEventListener('click', () => deleteCustomTest(parseInt(btn.dataset.deleteTest, 10)));
+  });
+
+  updateSummary();
+}
+
+function renderTestCard(test) {
+  const result = testResults[test.id] || { status: 'pending', detail: '' };
+  const statusLabel = { pending: '● Pending', running: '⟳ Running', passed: '✓ Passed', failed: '✗ Failed' };
+  const customBtns = test.builtin ? '' : `
+    <button class="btn btn-danger btn-small" data-delete-test="${test.dbId}" title="Delete">✕</button>`;
+  const detailHtml = result.detail
+    ? `<div class="test-detail">${escapeHtml(result.detail)}</div>`
+    : '';
+
+  return `
+    <div class="test-card" id="tc-${escapeHtml(test.id)}">
+      <div class="test-card-row">
+        <input type="checkbox" class="test-checkbox" data-test-id="${escapeHtml(test.id)}" checked>
+        <div class="test-card-info">
+          <div class="test-card-name">${escapeHtml(test.name)}</div>
+          <div class="test-card-desc">${escapeHtml(test.description || test.query || '')}</div>
+          ${detailHtml}
+        </div>
+        <span class="test-status test-status--${result.status}">${statusLabel[result.status] ?? result.status}</span>
+        <button class="btn btn-secondary btn-small" data-run-test="${escapeHtml(test.id)}">Run</button>
+        ${customBtns}
+      </div>
+    </div>
+  `;
+}
+
+// ── Run tests ─────────────────────────────────────────────────────────────────
+
+async function runTests(mode, singleId = null) {
+  if (isRunning) return;
+
+  let ids;
+  if (mode === 'single') {
+    ids = [singleId];
+  } else if (mode === 'selected') {
+    ids = [...document.querySelectorAll('.test-checkbox:checked')].map(cb => cb.dataset.testId);
+    if (ids.length === 0) { showToast('No tests selected', 'error'); return; }
+  } else {
+    ids = allTests.map(t => t.id);
+  }
+
+  isRunning = true;
+  document.getElementById('run-all-tests-btn').disabled = true;
+  document.getElementById('run-selected-tests-btn').disabled = true;
+
+  // Mark all as running
+  for (const id of ids) {
+    testResults[id] = { status: 'running', detail: '' };
+    updateCard(id);
+  }
+  updateSummary();
+
+  // Execute each test sequentially
+  for (const id of ids) {
+    const test = allTests.find(t => t.id === id);
+    if (!test) { testResults[id] = { status: 'failed', detail: 'Test not found' }; updateCard(id); continue; }
+    try {
+      const result = await test.run(apiCallWrapper);
+      testResults[id] = { status: result.passed ? 'passed' : 'failed', detail: result.detail ?? '' };
+    } catch (err) {
+      testResults[id] = { status: 'failed', detail: err.message };
+    }
+    updateCard(id);
+    updateSummary();
+  }
+
+  isRunning = false;
+  document.getElementById('run-all-tests-btn').disabled = false;
+  document.getElementById('run-selected-tests-btn').disabled = false;
+
+  const passed  = ids.filter(id => testResults[id]?.status === 'passed').length;
+  const failed  = ids.filter(id => testResults[id]?.status === 'failed').length;
+  showToast(`Tests complete: ${passed} passed, ${failed} failed`, failed > 0 ? 'error' : 'success');
+}
+
+async function apiCallWrapper(method, endpoint, body) {
+  return api(endpoint, {
+    method,
+    body: body ? JSON.stringify(body) : undefined
+  });
+}
+
+function updateCard(id) {
+  const card = document.getElementById(`tc-${id}`);
+  if (!card) return;
+  const result = testResults[id] || { status: 'pending', detail: '' };
+  const statusLabel = { pending: '● Pending', running: '⟳ Running', passed: '✓ Passed', failed: '✗ Failed' };
+
+  const badge = card.querySelector('.test-status');
+  if (badge) {
+    badge.className = `test-status test-status--${result.status}`;
+    badge.textContent = statusLabel[result.status] ?? result.status;
+  }
+
+  // Update or create detail block
+  let detail = card.querySelector('.test-detail');
+  if (result.detail) {
+    if (!detail) {
+      detail = document.createElement('div');
+      detail.className = 'test-detail';
+      card.querySelector('.test-card-info')?.appendChild(detail);
+    }
+    detail.textContent = result.detail;
+  } else if (detail) {
+    detail.remove();
+  }
+}
+
+function updateSummary() {
+  const total   = allTests.length;
+  const passed  = Object.values(testResults).filter(r => r.status === 'passed').length;
+  const failed  = Object.values(testResults).filter(r => r.status === 'failed').length;
+  const pending = Object.values(testResults).filter(r => r.status === 'pending').length;
+  const done    = passed + failed;
+
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const el = (id) => document.getElementById(id);
+  if (el('tc-total'))   el('tc-total').textContent   = `${total} tests`;
+  if (el('tc-passed'))  el('tc-passed').textContent  = `✓ ${passed}`;
+  if (el('tc-failed'))  el('tc-failed').textContent  = `✗ ${failed}`;
+  if (el('tc-pending')) el('tc-pending').textContent = `● ${pending} pending`;
+  if (el('test-progress-fill')) el('test-progress-fill').style.width = `${pct}%`;
+}
+
+function clearTestResults() {
+  for (const key of Object.keys(testResults)) {
+    testResults[key] = { status: 'pending', detail: '' };
+  }
+  renderTestList();
+}
+
+// ── Assertion evaluator (for custom tests) ────────────────────────────────────
+
+function evaluateAssertion(data, type, value) {
+  const answer = data.llm_response?.final_answer ?? '';
+  switch (type) {
+    case 'answer_contains':
+      return { passed: String(answer).includes(value),
+               detail: `answer contains "${value}": ${String(answer).includes(value)}` };
+    case 'answer_not_empty':
+      return { passed: !!answer, detail: `answer: "${String(answer).slice(0, 80)}"` };
+    case 'confidence_gte': {
+      const t = parseFloat(value) || 0;
+      return { passed: (data.confidence ?? 0) >= t,
+               detail: `confidence ${data.confidence ?? 'n/a'} ≥ ${t}` };
+    }
+    case 'query_type_is':
+      return { passed: data.query_type === value,
+               detail: `query_type: ${data.query_type ?? '(missing)'}, expected: ${value}` };
+    case 'has_citations': {
+      const cits = data.citations?.citations ?? data.llm_response?.citations ?? [];
+      return { passed: Array.isArray(cits) && cits.length > 0,
+               detail: `citations: ${cits.length}` };
+    }
+    default:
+      return { passed: false, detail: `Unknown assertion type: ${type}` };
+  }
+}
+
+// ── Custom test CRUD ──────────────────────────────────────────────────────────
+
+function updateAssertionValueVisibility() {
+  const type = document.getElementById('tc-assertion-type')?.value;
+  const group = document.getElementById('tc-value-group');
+  const label = document.getElementById('tc-value-label');
+  if (!group) return;
+  const needsValue = ['answer_contains', 'confidence_gte', 'query_type_is'].includes(type);
+  group.style.display = needsValue ? '' : 'none';
+  if (label) {
+    const labels = { answer_contains: 'Expected substring', confidence_gte: 'Minimum confidence (0–1)', query_type_is: 'Expected type (simple_lookup / comparison / recommendation / reasoning / aggregation)' };
+    label.textContent = labels[type] || 'Value';
+  }
+}
+
+async function saveCustomTest() {
+  const name           = document.getElementById('tc-name')?.value.trim();
+  const query          = document.getElementById('tc-query')?.value.trim();
+  const assertion_type  = document.getElementById('tc-assertion-type')?.value;
+  const assertion_value = document.getElementById('tc-assertion-value')?.value.trim();
+
+  if (!name)  { showToast('Test name is required', 'error'); return; }
+  if (!query) { showToast('Query is required', 'error'); return; }
+
+  try {
+    await api('/tests', {
+      method: 'POST',
+      body: JSON.stringify({ name, query, assertion_type, assertion_value })
+    });
+    document.getElementById('test-add-form')?.classList.add('hidden');
+    clearAddForm();
+    showToast('Test case saved', 'success');
+    testResults = {};  // reset so new test starts as pending
+    await loadTests();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function deleteCustomTest(dbId) {
+  if (!confirm('Delete this test case?')) return;
+  try {
+    await api(`/tests/${dbId}`, { method: 'DELETE' });
+    delete testResults[`custom_${dbId}`];
+    showToast('Test case deleted', 'success');
+    await loadTests();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function clearAddForm() {
+  ['tc-name', 'tc-query', 'tc-assertion-value'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const sel = document.getElementById('tc-assertion-type');
+  if (sel) sel.value = 'answer_not_empty';
+  updateAssertionValueVisibility();
+}
+
+// ── Settings Tab ──────────────────────────────────────────────────────────────
+
+const PROVIDER_DEFAULTS = {
+  openai: { model: 'gpt-4o-mini',       embeddingModel: 'text-embedding-3-large' },
+  gemini: { model: 'gemini-2.0-flash',  embeddingModel: 'gemini-embedding-001'   },
+};
+
+let _settingsOriginalProvider = null;
+
+function initSettings() {
+  const providerSel = document.getElementById('settings-provider');
+  if (!providerSel) return;
+
+  providerSel.addEventListener('change', () => {
+    const p = providerSel.value;
+    document.getElementById('settings-model').value = PROVIDER_DEFAULTS[p]?.model ?? '';
+    document.getElementById('settings-embed-model').value = PROVIDER_DEFAULTS[p]?.embeddingModel ?? '';
+    const warning = document.getElementById('settings-embed-warning');
+    if (warning) {
+      warning.classList.toggle('hidden', p === _settingsOriginalProvider);
+    }
+  });
+
+  document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
+}
+
+async function loadSettings() {
+  try {
+    const data = await api('/settings/llm');
+    const providerSel = document.getElementById('settings-provider');
+    if (!providerSel) return;
+
+    providerSel.value = data.provider;
+    _settingsOriginalProvider = data.provider;
+    document.getElementById('settings-model').value = data.model ?? '';
+    document.getElementById('settings-embed-model').value = data.embeddingModel ?? '';
+
+    // API status badges
+    const statusEl = document.getElementById('settings-api-status');
+    if (statusEl) {
+      const badge = (label, ok) =>
+        `<span class="api-status-badge api-status-badge--${ok ? 'ok' : 'missing'}">${label}: ${ok ? '✓ configured' : '✗ not configured'}</span>`;
+      statusEl.innerHTML = badge('OpenAI', data.openaiConfigured) + badge('Gemini', data.geminiConfigured);
+    }
+
+    // Hide embed warning on load
+    document.getElementById('settings-embed-warning')?.classList.add('hidden');
+  } catch (err) {
+    showToast('Failed to load settings: ' + err.message, 'error');
+  }
+}
+
+async function saveSettings() {
+  const provider = document.getElementById('settings-provider')?.value;
+  const model = document.getElementById('settings-model')?.value.trim();
+  const embeddingModel = document.getElementById('settings-embed-model')?.value.trim();
+
+  try {
+    const data = await api('/settings/llm', {
+      method: 'POST',
+      body: JSON.stringify({ provider, model, embeddingModel }),
+    });
+    _settingsOriginalProvider = data.provider;
+    document.getElementById('settings-embed-warning')?.classList.add('hidden');
+    showToast('Settings saved', 'success');
+
+    // Refresh status badges
+    const statusEl = document.getElementById('settings-api-status');
+    if (statusEl) {
+      const badge = (label, ok) =>
+        `<span class="api-status-badge api-status-badge--${ok ? 'ok' : 'missing'}">${label}: ${ok ? '✓ configured' : '✗ not configured'}</span>`;
+      statusEl.innerHTML = badge('OpenAI', data.openaiConfigured) + badge('Gemini', data.geminiConfigured);
+    }
+  } catch (err) {
+    showToast('Save failed: ' + err.message, 'error');
+  }
 }

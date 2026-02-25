@@ -58,6 +58,7 @@ function failJob(conn, job, errorMessage, result = null) {
   } else {
     logger.error(`[ingest-job:${job.id}] exhausted retries: ${errorMessage}`);
   }
+  return retried;
 }
 
 function pauseRateLimitedJob(conn, job, errorMessage) {
@@ -101,8 +102,8 @@ async function processClaimedJob(job, conn, datasetId) {
       const reason = Array.isArray(result?.errors) && result.errors.length > 0
         ? result.errors.join("; ")
         : "Document processing failed";
-      failJob(conn, job, reason, result);
-      maybeCleanupUploadedFile(job.file_path, "failed");
+      const willRetry = failJob(conn, job, reason, result);
+      if (!willRetry) maybeCleanupUploadedFile(job.file_path, "failed");
       return;
     }
 
@@ -116,8 +117,8 @@ async function processClaimedJob(job, conn, datasetId) {
       pauseRateLimitedJob(conn, job, `Rate limit hit (429) — resume when quota resets: ${err.message}`);
       // Keep file on disk — job may be retried when quota resets.
     } else {
-      failJob(conn, job, err.message, result);
-      maybeCleanupUploadedFile(job.file_path, "failed");
+      const willRetry = failJob(conn, job, err.message, result);
+      if (!willRetry) maybeCleanupUploadedFile(job.file_path, "failed");
     }
   }
 }

@@ -231,21 +231,35 @@ export const ChunkRepo = {
   // ── KP-specific operations ───────────────────────────────────────────────────
 
   /**
-   * BM25 search within a specific node (for KP deduplication).
-   * Returns chunks with content_clean and source_documents_json.
+   * BM25 search within a specific node (for KP deduplication / decision engine).
+   * Returns chunks with content_clean, authority_level, and source_documents_json.
+   * @param {string} nodeId
+   * @param {string} queryText
+   * @param {number} limit
+   * @param {number|null} excludeChunkId - Skip this chunk id (cleanup / self-match avoidance)
    */
-  findSimilarInNode(nodeId, queryText, limit = 5) {
-    // Strip FTS5 special characters: operators (AND OR NOT), phrase quotes,
-    // wildcards, boost markers, and NEAR/column filters.
+  findSimilarInNode(nodeId, queryText, limit = 5, excludeChunkId = null) {
+    // Keep only Unicode letters, digits and whitespace — strips all punctuation
+    // that could be interpreted as FTS5 query operators (., %, *, -, :, etc.).
     const safeQ = queryText
       .slice(0, 500)
-      .replace(/["'`*^:()-]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .replace(/\b(AND|OR|NOT|NEAR)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     if (!safeQ) return [];
+    if (excludeChunkId != null) {
+      return db.prepare(`
+        SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
+        FROM chunks_fts
+        JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
+        WHERE chunks_fts MATCH ? AND c.node_id = ? AND c.status = 'active' AND c.id != ?
+        ORDER BY bm25(chunks_fts) ASC
+        LIMIT ?
+      `).all(safeQ, nodeId, excludeChunkId, Math.max(1, Math.floor(Number(limit))));
+    }
     return db.prepare(`
-      SELECT c.id, c.content_clean, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
+      SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
       FROM chunks_fts
       JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
       WHERE chunks_fts MATCH ? AND c.node_id = ? AND c.status = 'active'
@@ -259,6 +273,16 @@ export const ChunkRepo = {
     return db.prepare(
       "UPDATE chunks SET source_documents_json = ? WHERE id = ?"
     ).run(sourceDocsJson, chunkId);
+  },
+
+  /**
+   * Mark an existing chunk as superseded by a newer one.
+   * Sets status='superseded' and superseded_by=newChunkId.
+   */
+  supersede(existingId, newChunkId) {
+    return db.prepare(
+      "UPDATE chunks SET superseded_by = ?, status = 'superseded' WHERE id = ?"
+    ).run(newChunkId, existingId);
   },
 
   /** INSERT a Knowledge Point row (includes KP-specific columns). */

@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 import { classifyQuery, QUERY_TYPES } from "./classifier.js";
 
 /**
@@ -198,13 +198,9 @@ function createAggregationPlan(query, classification) {
  * Use LLM for complex query planning
  */
 async function llmPlanQuery(query, classification) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return null;
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
   const prompt = `You are a query planning assistant for a knowledge base system.
 
@@ -231,12 +227,7 @@ Return JSON only:
 }`;
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'query_planning' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
 
     return JSON.parse(jsonMatch[1] || text);

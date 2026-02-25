@@ -240,6 +240,38 @@ function initQueryHistoryTable(conn) {
   `);
 }
 
+function initDecisionTable(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS pending_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      incoming_chunk_id INTEGER,
+      target_chunk_id INTEGER,
+      node_id TEXT,
+      confidence REAL,
+      reason TEXT,
+      similarity_score REAL,
+      incoming_preview TEXT,
+      target_preview TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      resolved_at TEXT,
+      resolved_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pd_status ON pending_decisions(status, created_at);
+  `);
+}
+
+function initDatasetConfigTable(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS dataset_config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('language', 'auto')`).run();
+}
+
 function initFeedbackTables(conn) {
   conn.exec(`
     CREATE TABLE IF NOT EXISTS feedback (
@@ -291,4 +323,23 @@ export function initDatasetDb(connection) {
   initTokenTrackingTable(connection);
   initFeedbackTables(connection);
   initQueryHistoryTable(connection);
+  initDecisionTable(connection);
+  initDatasetConfigTable(connection);
+  initTestCasesTable(connection);
+}
+
+function initTestCasesTable(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS test_cases (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      name           TEXT NOT NULL,
+      description    TEXT DEFAULT '',
+      query          TEXT NOT NULL,
+      assertion_type  TEXT NOT NULL,
+      assertion_value TEXT DEFAULT '',
+      enabled        INTEGER DEFAULT 1,
+      created_at     TEXT DEFAULT (datetime('now')),
+      updated_at     TEXT DEFAULT (datetime('now'))
+    );
+  `);
 }

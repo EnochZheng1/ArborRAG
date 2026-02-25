@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { callLLM, llmConfig } from "../utils/llm.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getNode, getRelatedNodes, getPathToNode, getChildren, getAncestors } from "../kg/graphTraversal.js";
 import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
@@ -179,16 +179,12 @@ function formatReasoningContext(context) {
  * @returns {Promise<object>} Reasoning result
  */
 export async function performReasoning(query, context) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return {
       success: false,
       error: "LLM required for reasoning queries"
     };
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
   const prompt = `You are a knowledge base reasoning assistant. Answer the user's question by reasoning through the provided context.
 
@@ -218,12 +214,7 @@ Return JSON:
 }`;
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt, taskName: 'reasoning' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
 
     const result = JSON.parse(jsonMatch[1] || text);
@@ -285,8 +276,7 @@ export async function reason(query, options = {}) {
  * @returns {Promise<object>} Combined reasoning result
  */
 export async function chainOfThoughtReason(query, subQueries = []) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!llmConfig[llmConfig.provider]?.apiKey) {
     return { success: false, error: "LLM required" };
   }
 
@@ -294,9 +284,6 @@ export async function chainOfThoughtReason(query, subQueries = []) {
   if (subQueries.length === 0) {
     subQueries = await decomposeQuery(query);
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
   // Gather context for each sub-query
   const subResults = [];
@@ -332,12 +319,7 @@ Return JSON:
 }`;
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: synthesisPrompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "{}";
+    const text = await callLLM({ prompt: synthesisPrompt, taskName: 'chain_of_thought' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
 
     return {
@@ -355,11 +337,7 @@ Return JSON:
  * Decompose a complex query into sub-queries
  */
 async function decomposeQuery(query) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return [query];
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  if (!llmConfig[llmConfig.provider]?.apiKey) return [query];
 
   const prompt = `Decompose this complex question into 2-4 simpler sub-questions that can be answered independently.
 
@@ -369,12 +347,7 @@ Return JSON array of sub-questions:
 ["sub-question 1", "sub-question 2", ...]`;
 
   try {
-    const resp = await ai.models.generateContent({
-      model,
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-
-    const text = resp?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "[]";
+    const text = await callLLM({ prompt, taskName: 'decompose_query' }) ?? "[]";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
 
     return JSON.parse(jsonMatch[1] || text);

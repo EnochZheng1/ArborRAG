@@ -57,6 +57,14 @@
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           <span>Conflicts</span>
         </button>
+        <button class="nav-btn" data-tab="decisions">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span>Decisions</span>
+        </button>
+        <button class="nav-btn" data-tab="tests">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          <span>Tests</span>
+        </button>
         <button class="nav-btn" data-tab="stats">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           <span>Stats</span>
@@ -64,6 +72,10 @@
         <button class="nav-btn" data-tab="datasets">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
           <span data-i18n="datasets_title">Datasets</span>
+        </button>
+        <button class="nav-btn" data-tab="settings">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
         </button>
       </nav>
 
@@ -487,6 +499,94 @@
         </div>
       </section>
 
+      <!-- Decisions Tab -->
+      <section class="tab-content" id="tab-decisions">
+        <div class="tab-header">
+          <h2>Decisions</h2>
+          <div class="tab-header-actions">
+            <button id="run-cleanup-btn" class="btn btn-secondary">Run Cleanup</button>
+            <button id="refresh-decisions-btn" class="btn btn-secondary">Refresh</button>
+          </div>
+        </div>
+
+        <div id="decisions-stats" class="decision-stats-row"></div>
+
+        <div class="decisions-filter-row">
+          <label>
+            <span>Filter:</span>
+            <select id="decisions-status-filter">
+              <option value="">All</option>
+              <option value="pending" selected>Pending</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+              <option value="auto_resolved">Auto-resolved</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="decisions-list" class="decisions-list">
+          <p class="empty-state">Loading decisions…</p>
+        </div>
+      </section>
+
+      <!-- Tests Tab -->
+      <section class="tab-content" id="tab-tests">
+        <div class="tab-header">
+          <h2>Test Suite</h2>
+          <div class="header-actions">
+            <button class="btn btn-primary" id="run-all-tests-btn">Run All</button>
+            <button class="btn btn-secondary" id="run-selected-tests-btn">Run Selected</button>
+            <button class="btn btn-secondary" id="clear-test-results-btn">Clear</button>
+          </div>
+        </div>
+
+        <div class="test-summary" id="test-summary">
+          <div class="test-summary-counts">
+            <span id="tc-total">0 tests</span>
+            <span class="tc-passed" id="tc-passed">✓ 0</span>
+            <span class="tc-failed" id="tc-failed">✗ 0</span>
+            <span id="tc-pending">● 0 pending</span>
+          </div>
+          <div class="test-progress-bar">
+            <div class="test-progress-fill" id="test-progress-fill" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div id="tests-container"></div>
+
+        <div class="test-add-section">
+          <button class="btn btn-secondary" id="show-add-test-btn">+ Add Custom Test</button>
+          <div class="test-add-form hidden" id="test-add-form">
+            <div class="form-group">
+              <label for="tc-name">Test Name</label>
+              <input type="text" id="tc-name" placeholder="e.g. Verify vacation policy answer">
+            </div>
+            <div class="form-group">
+              <label for="tc-query">Query</label>
+              <input type="text" id="tc-query" placeholder="Question to send to the knowledge base">
+            </div>
+            <div class="form-group">
+              <label for="tc-assertion-type">Assertion</label>
+              <select id="tc-assertion-type" class="form-select">
+                <option value="answer_not_empty">Answer is not empty</option>
+                <option value="answer_contains">Answer contains text…</option>
+                <option value="confidence_gte">Confidence ≥ threshold…</option>
+                <option value="query_type_is">Query classified as…</option>
+                <option value="has_citations">Has at least one citation</option>
+              </select>
+            </div>
+            <div class="form-group" id="tc-value-group" style="display:none">
+              <label id="tc-value-label" for="tc-assertion-value">Value</label>
+              <input type="text" id="tc-assertion-value" placeholder="Expected value">
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-secondary" id="cancel-test-btn">Cancel</button>
+              <button class="btn btn-primary" id="save-test-btn">Save Test</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Stats Tab -->
       <section class="tab-content" id="tab-stats">
         <div class="tab-header">
@@ -534,6 +634,41 @@
           </div>
         </div>
       </section>
+      <!-- Settings Tab -->
+      <section class="tab-content" id="tab-settings">
+        <div class="tab-header">
+          <h2>LLM Settings</h2>
+        </div>
+
+        <div class="settings-card">
+          <h3>Model Provider</h3>
+          <div class="options-grid">
+            <div class="option-group">
+              <label class="option-label-row">Provider</label>
+              <select class="option-select" id="settings-provider">
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </div>
+            <div class="option-group">
+              <label class="option-label-row">LLM Model</label>
+              <input type="text" id="settings-model" class="option-select" placeholder="e.g. gpt-4o-mini">
+            </div>
+            <div class="option-group">
+              <label class="option-label-row">Embedding Model</label>
+              <input type="text" id="settings-embed-model" class="option-select" placeholder="e.g. text-embedding-3-large">
+            </div>
+          </div>
+          <div id="settings-api-status" class="settings-api-status"></div>
+          <div class="settings-warning hidden" id="settings-embed-warning">
+            ⚠ Switching providers requires re-generating all embeddings (use Sync Embeddings in Stats).
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-primary" id="settings-save-btn">Save</button>
+          </div>
+        </div>
+      </section>
+
       <!-- Datasets Tab -->
       <section class="tab-content" id="tab-datasets">
         <div class="tab-header">
@@ -549,6 +684,15 @@
           <div class="form-group">
             <label for="new-dataset-desc" data-i18n="dataset_desc_label">Description</label>
             <input type="text" id="new-dataset-desc" data-i18n-placeholder="dataset_desc_placeholder" placeholder="Description (optional)">
+          </div>
+          <div class="form-group">
+            <label for="new-dataset-lang">Language</label>
+            <select id="new-dataset-lang" class="form-select">
+              <option value="auto" selected>Auto-detect</option>
+              <option value="zh-CN">简体中文 (Simplified Chinese)</option>
+              <option value="zh-TW">繁體中文 (Traditional Chinese)</option>
+              <option value="en">English</option>
+            </select>
           </div>
           <div class="form-actions">
             <button class="btn btn-secondary" id="cancel-create-dataset" data-i18n="cancel">Cancel</button>
