@@ -115,6 +115,25 @@ export function simpleContentSearch(query, limit = 30) {
   }
 }
 
+export function keywordTagSearch(query, limit = 30) {
+  try {
+    const terms = extractSearchTerms(query, { maxTerms: 16 });
+    if (terms.length === 0) return [];
+
+    const rows = ChunkRepo.searchByKeywords(terms, limit);
+
+    return rows.map(r => {
+      const keywords = safeJson(r.keywords_json, []).map(k => String(k).toLowerCase());
+      const matchedTerms = terms.filter(t => keywords.some(kw => kw.includes(t) || t.includes(kw))).length;
+      const score = Math.max(0.3, Math.min(1, matchedTerms / Math.min(terms.length, 6)));
+      return { chunk: { ...buildChunkResult(r), node_name: r.node_name, node_level: r.node_level }, score };
+    });
+  } catch (err) {
+    logger.error("Keyword tag search error:", err.message);
+    return [];
+  }
+}
+
 export function searchChunksByDocTitle(query, limit = 30) {
   try {
     const docNameMatch =

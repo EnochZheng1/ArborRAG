@@ -44,6 +44,10 @@ export function expandChunksWithContext(chunks, options = {}) {
     const chunkInfo = getChunkSequenceInfo(chunkId);
 
     if (!chunkInfo) {
+      // Chunk id exists but DB lookup returned nothing — chunk may have been
+      // deleted, or the id is from a synthesised object without a real DB row.
+      // Log so this can be diagnosed; pass chunk through without context.
+      logger.warn(`expandChunksWithContext: no sequence info for chunk id=${chunkId}; skipping context expansion`);
       expandedChunks.push(chunk);
       continue;
     }
@@ -133,6 +137,8 @@ function truncateContext(text, maxLength) {
   const truncated = text.slice(0, maxLength);
   const lastSentence = Math.max(
     truncated.lastIndexOf('。'),
+    truncated.lastIndexOf('！'),   // full-width exclamation (Chinese)
+    truncated.lastIndexOf('？'),   // full-width question mark (Chinese)
     truncated.lastIndexOf('. '),
     truncated.lastIndexOf('!\n'),
     truncated.lastIndexOf('?\n')

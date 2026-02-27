@@ -29,7 +29,9 @@ export function findBestNodeMatch(chunk) {
   ].join(" ");
 
   // Use BM25 to find candidates
-  const candidates = bm25RecallNodes(searchTerms, 10);
+  // 20 candidates (was 10) — in large KBs the correct node can rank 11–15;
+  // the old cap meant it was never considered during ingestion mapping.
+  const candidates = bm25RecallNodes(searchTerms, 20);
 
   if (candidates.length === 0) {
     return null;
@@ -93,7 +95,7 @@ export async function suggestNodeWithLLM(chunk, candidates) {
   const prompt = getPrompt('nodeSuggestion', lang, chunkPreview, keywords, nodeList, noExisting);
 
   try {
-    const text = await callLLM({ prompt, taskName: 'node_suggestion' }) ?? "{}";
+    const text = await callLLM({ prompt, temperature: 0.1, taskName: 'node_suggestion' }) ?? "{}";
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
     return JSON.parse(jsonMatch[1] || text);
   } catch (err) {
@@ -300,7 +302,7 @@ async function analyzeDocumentStructure(docTitle, chunks, lang) {
   const prompt = getPrompt('documentStructure', lang, docTitle, chunkSummaries);
 
   try {
-    const text = await callLLM({ prompt, taskName: 'document_structure' }) ?? "{}";
+    const text = await callLLM({ prompt, temperature: 0.1, taskName: 'document_structure' }) ?? "{}";
 
     // Robust JSON extraction: try markdown code block first, then bare JSON object
     let jsonStr = text.trim();
@@ -559,7 +561,10 @@ function ensureRootNode() {
 
 // ── KP topical hierarchy helpers ──────────────────────────────────────────────
 
-const TOPIC_MATCH_THRESHOLD = 0.55;
+// Lowered from 0.55 → 0.40: reduces duplicate node creation when LLM produces
+// slightly different phrasings of the same topic across runs (e.g. "Employee Benefits"
+// vs "Benefits" vs "HR Benefits").
+const TOPIC_MATCH_THRESHOLD = 0.40;
 // wordDiceSimilarity imported from knowledgeExtractor.js
 
 // Generic/placeholder topic hints that the LLM returns when it can't classify.
@@ -688,11 +693,21 @@ async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
 
     const uniqueSubs = [...bySubtopic.keys()].filter(k => k !== "__none__");
 
-    // Use a subtopic level only when there are ≥2 distinct, dissimilar subtopics
+    // Use a subtopic level only when subtopics are dissimilar enough on average.
+    // Previously used minimum pairwise similarity, which is unstable: a single
+    // outlier pair (e.g. "Onboarding" vs "Payroll" in a set of otherwise similar
+    // subtopics) would flip the decision for the entire node. Mean similarity is
+    // robust to outliers and reflects the overall structure of the subtopic set.
     let useSubtopic = false;
     if (uniqueSubs.length >= 2) {
-      const [s1, s2] = uniqueSubs;
-      useSubtopic = wordDiceSimilarity(s1, s2) < 0.6;
+      const sims = [];
+      for (let i = 0; i < uniqueSubs.length; i++) {
+        for (let j = i + 1; j < uniqueSubs.length; j++) {
+          sims.push(wordDiceSimilarity(uniqueSubs[i], uniqueSubs[j]));
+        }
+      }
+      const meanSim = sims.reduce((a, b) => a + b, 0) / sims.length;
+      useSubtopic = meanSim < 0.6;
     }
 
     if (useSubtopic) {

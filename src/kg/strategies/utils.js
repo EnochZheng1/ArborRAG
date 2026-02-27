@@ -41,7 +41,10 @@ export function extractSearchTerms(query, options = {}) {
     return terms.length < maxTerms;
   };
 
-  const latinTokens = normalized.match(/[a-z0-9]{2,}/g) || [];
+  // Match letter sequences (2+ chars) OR digit sequences (any length, including "3", "7").
+  // Previously /[a-z0-9]{2,}/ silently dropped single-digit numbers like "3" in
+  // "after 3 years" and "7" in "7 days notice", preventing exact-fact retrieval.
+  const latinTokens = normalized.match(/[a-z]{2,}|\d+/g) || [];
   for (const token of latinTokens) if (!addTerm(token)) return terms;
 
   const spaceTokens = normalized.split(/\s+/).map(t => t.trim()).filter(Boolean);

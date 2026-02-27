@@ -29,8 +29,10 @@ export async function rerankerChunks(query, chunks, options = {}) {
     return chunks.slice(0, topK);
   }
 
-  // Take top candidates for re-ranking (limit to avoid token limits)
-  const candidates = chunks.slice(0, Math.min(20, chunks.length));
+  // Take top candidates for re-ranking (limit to avoid token limits).
+  // Raised from 20 → 40: with the expanded retrieval pool (hierarchical + direct
+  // + keyword-tag paths) the answer chunk can now sit beyond position 20.
+  const candidates = chunks.slice(0, Math.min(40, chunks.length));
 
   // Check cache
   const cacheKey = `${query}:${candidates.map(c => c.id || c.chunk?.id).join(',')}`;

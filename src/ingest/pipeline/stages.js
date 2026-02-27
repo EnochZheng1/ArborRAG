@@ -112,8 +112,7 @@ export async function stageExtractKPs(ctx) {
   const kps = await extractKnowledgePoints(content, fileMetadata.filename, {
     useLLM,
     authorityLevel: detectAuthorityLevel(content, fileMetadata.filename),
-    documentId,
-    maxKPs: 150
+    documentId
   });
 
   ctx.results.stats.chunkCount = kps.length;

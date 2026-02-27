@@ -12,7 +12,7 @@ import { normalizeByMax, normalizeVariantText, reciprocalRankFusion } from "./st
 import { searchByAliases } from "./strategies/aliases.js";
 import { expandQuery, buildRetrievalQueryVariants } from "./strategies/expansion.js";
 import {
-  bm25RecallNodes, bm25RecallChunks, simpleContentSearch,
+  bm25RecallNodes, bm25RecallChunks, simpleContentSearch, keywordTagSearch,
   searchChunksByDocTitle, getChunksByDocumentName, getNodesByIds, searchNodesByName
 } from "./strategies/bm25.js";
 import { vectorRecallNodes, vectorRecallChunks } from "./strategies/vector.js";
@@ -22,7 +22,7 @@ import { enrichWithHierarchy, getHierarchicalChunks } from "./strategies/hierarc
 export {
   searchByAliases,
   expandQuery, buildRetrievalQueryVariants,
-  bm25RecallNodes, bm25RecallChunks, simpleContentSearch,
+  bm25RecallNodes, bm25RecallChunks, simpleContentSearch, keywordTagSearch,
   searchChunksByDocTitle, getChunksByDocumentName, getNodesByIds, searchNodesByName,
   vectorRecallNodes, vectorRecallChunks,
   enrichWithHierarchy, getHierarchicalChunks

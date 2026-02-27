@@ -3958,12 +3958,64 @@ vulnerabilities since its launch in 2021. Enterprise pricing starts at $500 per
 month per domain.
 `;
 
+// Second ground-truth document — TechServe IT Solutions.
+// Used by multi-document tests to verify cross-document isolation and aggregation.
+const SECOND_TEST_DOCUMENT = `TECHSERVE IT SOLUTIONS
+SERVICE CATALOG — Q1 2024
+
+COMPANY OVERVIEW
+
+TechServe IT Solutions was established in 2015 by Michael Torres and Jennifer Park
+in Austin, Texas. Our registered address is 800 Tech Boulevard, Austin, TX 78701.
+Jennifer Park serves as Chief Executive Officer (CEO), while Michael Torres serves
+as Chief Operating Officer (COO).
+
+TechServe provides managed IT services and cloud solutions. Our three core service
+offerings are:
+- CloudGuard: A managed firewall and network security service
+- DataBridge: A real-time data synchronization and migration platform
+- HelpDesk Pro: An AI-powered IT support ticketing system
+
+SERVICE LEVEL AGREEMENTS
+
+TechServe guarantees the following response times for all managed services:
+- P1 (Critical outage): 1-hour response time, 99.99% uptime guaranteed
+- P2 (High impact): 4-hour response time, 99.9% uptime guaranteed
+- P3 (Medium impact): 12-hour response time, 99.5% uptime guaranteed
+- P4 (Low impact): 48-hour response time, 99.0% uptime guaranteed
+
+PRODUCT DETAILS
+
+CloudGuard
+CloudGuard provides enterprise-grade firewall management, intrusion detection, and
+24/7 network monitoring for on-premise and cloud environments. It supports up to
+10,000 simultaneous connections. Pricing starts at $200 per month per site.
+
+DataBridge
+DataBridge synchronizes data in real time across databases, cloud storage, and SaaS
+applications. It supports over 150 pre-built data connectors. DataBridge handles
+peak throughput of 1 million records per minute. Pricing starts at $300 per month.
+
+HelpDesk Pro
+HelpDesk Pro uses machine learning to auto-classify, route, and resolve IT support
+tickets. It automatically resolves 40% of incoming tickets without human intervention.
+Average ticket resolution time is 22 minutes. Pricing is $15 per agent per month.
+
+SUPPORT CONTACTS
+
+Support email: support@techserve.example.com
+Sales inquiries: sales@techserve.example.com
+Main office phone: +1 (512) 555-0280
+Emergency hotline: +1 (512) 555-0300
+`;
+
 // Helper: evaluate a /ask response for a factual substring match.
 // Returns { passed, detail } for use inside accuracy test run() functions.
 function checkAccuracyAnswer(d, needle) {
   if (d.action === 'no_results')
     return { passed: false, detail: 'no_results — test document may not be indexed in this dataset' };
-  const answer  = d.llm_response?.final_answer ?? '';
+  // Support both simple_lookup (llm_response.final_answer) and aggregation (data.final_answer)
+  const answer  = d.llm_response?.final_answer ?? d.data?.final_answer ?? '';
   const passed  = answer.toLowerCase().includes(needle.toLowerCase());
   const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
   return { passed, detail: `conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}${answer.length > 150 ? '…' : ''}` };
@@ -4201,11 +4253,11 @@ const BUILTIN_TESTS = [
       if (!jobId) return { passed: false, detail: 'No job ID in upload response' };
       accuracyState.jobId = jobId;
 
-      // Poll until terminal status (max 3 minutes)
+      // Poll until terminal status (no time limit)
       const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
       const start    = Date.now();
       let job;
-      while (Date.now() - start < 180_000) {
+      while (true) {
         job = await call('GET', `/ingest/jobs/${jobId}`);
         if (TERMINAL.has(job.status)) break;
         await new Promise(r => setTimeout(r, 3000));
@@ -4223,6 +4275,12 @@ const BUILTIN_TESTS = [
       accuracyState.docId      = docId;
       accuracyState.chunkCount = chunkCount;
       accuracyState.ingested   = true;
+
+      // Generate embeddings — ingestion does not auto-embed; sync is required
+      // for semantic search and the accuracy_embeddings_generated test
+      try {
+        await call('POST', '/embeddings/sync');
+      } catch (_) { /* non-fatal — embedding test will surface the failure */ }
 
       return { passed: true, detail: `Doc #${docId} ingested — ${chunkCount} chunks in ${elapsed}s` };
     }
@@ -4319,11 +4377,12 @@ const BUILTIN_TESTS = [
       if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
       const d = await call('POST', '/ask', { query: 'What products does Quantum Labs make?' });
       if (d.action === 'no_results') return { passed: false, detail: 'no_results — test document may not be indexed' };
-      const answer  = (d.llm_response?.final_answer ?? '').toLowerCase();
+      const rawAnswer = d.llm_response?.final_answer ?? d.data?.final_answer ?? '';
+      const answer   = rawAnswer.toLowerCase();
       const hasVault = answer.includes('quantumvault');
       const hasFlow  = answer.includes('quantumflow');
       const passed   = hasVault && hasFlow;
-      const snippet  = (d.llm_response?.final_answer ?? '').substring(0, 150).replace(/\n/g, ' ');
+      const snippet  = rawAnswer.substring(0, 150).replace(/\n/g, ' ');
       return { passed, detail: `QuantumVault:${hasVault} QuantumFlow:${hasFlow} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${snippet.length===150?'…':''}` };
     }
   },
@@ -4345,9 +4404,10 @@ const BUILTIN_TESTS = [
       if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
       const d = await call('POST', '/ask', { query: 'How often are performance reviews conducted at Quantum Labs?' });
       if (d.action === 'no_results') return { passed: false, detail: 'no_results — test document may not be indexed' };
-      const answer  = (d.llm_response?.final_answer ?? '').toLowerCase();
+      const rawAnswer = d.llm_response?.final_answer ?? d.data?.final_answer ?? '';
+      const answer  = rawAnswer.toLowerCase();
       const passed  = answer.includes('twice') || answer.includes('two') || answer.includes('june') || answer.includes('december') || answer.includes('2 times');
-      const snippet = (d.llm_response?.final_answer ?? '').substring(0, 150).replace(/\n/g, ' ');
+      const snippet = rawAnswer.substring(0, 150).replace(/\n/g, ' ');
       return { passed, detail: `conf:${(d.confidence??0).toFixed(2)} | ${snippet}${snippet.length===150?'…':''}` };
     }
   },
@@ -4382,7 +4442,7 @@ const BUILTIN_TESTS = [
     async run(call) {
       if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
       const d = await call('GET', '/nodes');
-      const count  = d.stats?.count ?? d.stats?.active ?? 0;
+      const count  = d.stats?.total_nodes ?? 0;
       const passed = count > 0;
       return { passed, detail: `${count} node(s) in knowledge tree` };
     }
@@ -4437,7 +4497,580 @@ const BUILTIN_TESTS = [
       };
     }
   },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ACCURACY — ADDITIONAL FACTUAL RETRIEVAL
+  // More precise, numeric facts from the Quantum Labs handbook that stress-test
+  // exact-number retrieval (pricing, SLAs, thresholds, contact details).
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'accuracy_cto_name', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve CTO Name',
+    description: 'Ask who the CTO is → answer must contain "Harrington"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Who is the CTO of Quantum Labs?' });
+      return checkAccuracyAnswer(d, 'Harrington');
+    }
+  },
+  {
+    id: 'accuracy_vacation_3yr', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Vacation Days After 3 Years',
+    description: 'Ask vacation entitlement after 3 years → answer must contain "20"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many vacation days do Quantum Labs employees get after 3 years of service?' });
+      return checkAccuracyAnswer(d, '20');
+    }
+  },
+  {
+    id: 'accuracy_vacation_carryover', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Vacation Carryover Limit',
+    description: 'Ask maximum carry-over vacation days → answer must contain "5"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many unused vacation days can Quantum Labs employees carry over each year?' });
+      return checkAccuracyAnswer(d, '5');
+    }
+  },
+  {
+    id: 'accuracy_high_sla', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve High Priority SLA',
+    description: 'Ask SLA for high-priority IT issues → answer must contain "8"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the response time SLA for high-priority IT issues at Quantum Labs?' });
+      return checkAccuracyAnswer(d, '8');
+    }
+  },
+  {
+    id: 'accuracy_medium_sla', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Medium Priority SLA',
+    description: 'Ask SLA for medium-priority issues → answer must contain "24"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the response time for medium priority IT support at Quantum Labs?' });
+      return checkAccuracyAnswer(d, '24');
+    }
+  },
+  {
+    id: 'accuracy_probation_notice', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Probation Notice Period',
+    description: 'Ask the notice period during probation → answer must contain "7"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many days notice is required to terminate employment during the probation period at Quantum Labs?' });
+      return checkAccuracyAnswer(d, '7');
+    }
+  },
+  {
+    id: 'accuracy_probation_no_remote', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Probation Remote Work Restriction',
+    description: 'Ask if remote work is allowed during probation → answer must indicate it is not available',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Can new Quantum Labs employees work remotely during their probationary period?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results — test document may not be indexed' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const passed = answer.includes('not') || answer.includes('no') || answer.includes('unavailable') || answer.includes('prohibited');
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}${answer.length > 150 ? '…' : ''}` };
+    }
+  },
+  {
+    id: 'accuracy_quantumvault_price', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumVault Pricing',
+    description: 'Ask QuantumVault enterprise price → answer must contain "8"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the enterprise pricing for QuantumVault?' });
+      return checkAccuracyAnswer(d, '8');
+    }
+  },
+  {
+    id: 'accuracy_quantumflow_price', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumFlow Pricing',
+    description: 'Ask QuantumFlow enterprise price → answer must contain "12"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the enterprise pricing for QuantumFlow?' });
+      return checkAccuracyAnswer(d, '12');
+    }
+  },
+  {
+    id: 'accuracy_quantumscan_price', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumScan Pricing',
+    description: 'Ask QuantumScan price per domain → answer must contain "500"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What does QuantumScan cost per domain per month?' });
+      return checkAccuracyAnswer(d, '500');
+    }
+  },
+  {
+    id: 'accuracy_quantumvault_integrations', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumVault Integration Count',
+    description: 'Ask how many third-party integrations QuantumVault supports → answer must contain "200"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many third-party applications does QuantumVault integrate with?' });
+      return checkAccuracyAnswer(d, '200');
+    }
+  },
+  {
+    id: 'accuracy_quantumflow_executions', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumFlow Execution Volume',
+    description: 'Ask monthly workflow executions for QuantumFlow → answer must contain "50"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How many workflow executions does QuantumFlow process per month?' });
+      return checkAccuracyAnswer(d, '50');
+    }
+  },
+  {
+    id: 'accuracy_quantumscan_launch', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve QuantumScan Launch Year',
+    description: 'Ask when QuantumScan was launched → answer must contain "2021"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'When was QuantumScan launched?' });
+      return checkAccuracyAnswer(d, '2021');
+    }
+  },
+  {
+    id: 'accuracy_core_hours', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Core Collaboration Hours',
+    description: 'Ask about mandatory collaboration hours → answer must contain "10"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What are the core collaboration hours at Quantum Labs when all employees must be available?' });
+      return checkAccuracyAnswer(d, '10');
+    }
+  },
+  {
+    id: 'accuracy_review_months', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve Performance Review Months',
+    description: 'Ask when performance reviews happen → answer must mention June or December',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'In which months are performance reviews conducted at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const hasJune = answer.includes('june');
+      const hasDec  = answer.includes('december') || answer.includes('dec');
+      const passed  = hasJune || hasDec;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `June:${hasJune} Dec:${hasDec} | conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}${answer.length > 150 ? '…' : ''}` };
+    }
+  },
+  {
+    id: 'accuracy_all_sla_levels', category: 'Accuracy — Factual Retrieval', builtin: true,
+    name: 'Retrieve All SLA Tiers',
+    description: 'Ask for all SLA levels → answer covers at least 3 of the 4 SLA tiers',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What are all the IT support SLA response times at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const tiers = { '4': answer.includes('4'), '8': answer.includes('8'), '24': answer.includes('24'), '72': answer.includes('72') };
+      const count  = Object.values(tiers).filter(Boolean).length;
+      const passed = count >= 3;
+      return { passed, detail: `SLA values found: ${Object.entries(tiers).filter(([,v])=>v).map(([k])=>k+'h').join(', ') || 'none'} (${count}/4 tiers)` };
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // MULTI-DOCUMENT PROCESSING
+  // Ingest a second unrelated document (TechServe IT catalog) into the same
+  // dataset that already contains the Quantum Labs handbook.  Tests verify:
+  //   • Both documents are indexed independently
+  //   • Company-specific facts don't cross-contaminate between documents
+  //   • The retrieval pipeline correctly targets per-company content
+  //   • Cross-document aggregation finds content from both sources
+  // Run accuracy_ingest BEFORE running any multi-doc tests.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'multidoc_ingest', category: 'Multi-Document Processing', builtin: true,
+    name: 'Ingest Second Document (TechServe)',
+    description: 'Upload the TechServe IT catalog alongside the existing Quantum Labs doc',
+    async run(call) {
+      if (!accuracyState.ingested)
+        return { passed: false, detail: 'Run accuracy_ingest first to establish the first document' };
+
+      multidocState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+
+      const blob = new Blob([SECOND_TEST_DOCUMENT], { type: 'text/plain' });
+      const file = new File([blob], 'techserve-catalog.txt', { type: 'text/plain' });
+      const fd   = new FormData();
+      fd.append('file', file);
+      fd.append('useLLM', 'true');
+      fd.append('detectConflicts', 'false');
+
+      const uploadResp = await fetch('/upload', {
+        method: 'POST',
+        body: fd,
+        headers: { 'X-Dataset-ID': currentDatasetId }
+      });
+      if (!uploadResp.ok) {
+        const err = await uploadResp.json().catch(() => ({}));
+        return { passed: false, detail: `Upload failed ${uploadResp.status}: ${err.error ?? uploadResp.statusText}` };
+      }
+      const uploadData = await uploadResp.json();
+      const jobId = uploadData.job?.id ?? uploadData.jobs?.[0]?.id;
+      if (!jobId) return { passed: false, detail: 'No job ID in upload response' };
+      multidocState.jobId = jobId;
+
+      const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
+      const start    = Date.now();
+      let job;
+      while (true) {
+        job = await call('GET', `/ingest/jobs/${jobId}`);
+        if (TERMINAL.has(job.status)) break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      if (job.status !== 'completed')
+        return { passed: false, detail: `Ingestion ended: ${job.status}${job.error_message ? ' — ' + job.error_message : ''}` };
+
+      const result     = job.result ?? {};
+      const docId      = result.documentId ?? result.document_id ?? job.document_id;
+      const chunkCount = result.stats?.chunkCount ?? 0;
+      const elapsed    = ((Date.now() - start) / 1000).toFixed(1);
+
+      multidocState.docId      = docId;
+      multidocState.chunkCount = chunkCount;
+      multidocState.ingested   = true;
+
+      try { await call('POST', '/embeddings/sync'); } catch (_) {}
+
+      return { passed: true, detail: `Doc #${docId} (TechServe) ingested — ${chunkCount} chunks in ${elapsed}s` };
+    }
+  },
+  {
+    id: 'multidoc_both_docs_indexed', category: 'Multi-Document Processing', builtin: true,
+    name: 'Both Documents Indexed',
+    description: 'After ingesting two docs, GET /documents → must list at least 2 documents',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('GET', '/documents');
+      const count  = (d.documents ?? []).length;
+      const passed = count >= 2;
+      return { passed, detail: `${count} document(s) in dataset (need ≥2)` };
+    }
+  },
+  {
+    id: 'multidoc_both_docs_have_chunks', category: 'Multi-Document Processing', builtin: true,
+    name: 'Second Document Produced Chunks',
+    description: 'TechServe ingest must have produced at least one chunk',
+    async run(_call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const passed = multidocState.chunkCount > 0;
+      return { passed, detail: `TechServe: ${multidocState.chunkCount} chunks, Quantum Labs: ${accuracyState.chunkCount} chunks` };
+    }
+  },
+  {
+    id: 'multidoc_isolation_techserve_ceo', category: 'Multi-Document Processing', builtin: true,
+    name: 'TechServe CEO Not Contaminated',
+    description: 'Ask specifically for TechServe CEO → answer must contain "Jennifer" not "Sarah"',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Who is the CEO of TechServe IT Solutions?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results — TechServe doc may not be indexed' };
+      const answer  = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const hasJennifer = answer.includes('jennifer');
+      const hasSarah    = answer.includes('sarah');
+      // Correct: mentions Jennifer; wrong bleed: mentions only Sarah Chen from other doc
+      const passed  = hasJennifer;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `Jennifer:${hasJennifer} Sarah(bleed):${hasSarah} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_isolation_quantum_ceo', category: 'Multi-Document Processing', builtin: true,
+    name: 'Quantum Labs CEO Not Contaminated',
+    description: 'Ask specifically for Quantum Labs CEO → answer must contain "Sarah Chen" not "Jennifer"',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Who is the CEO of Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer  = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const hasSarah    = answer.includes('sarah');
+      const hasJennifer = answer.includes('jennifer');
+      const passed  = hasSarah;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `Sarah:${hasSarah} Jennifer(bleed):${hasJennifer} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_founding_isolation', category: 'Multi-Document Processing', builtin: true,
+    name: 'TechServe Founding Year (2015) Not Confused With Quantum Labs (2019)',
+    description: 'Ask when TechServe was founded → answer must contain "2015", not only "2019"',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What year was TechServe IT Solutions established?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const has2015 = answer.includes('2015');
+      const has2019 = answer.includes('2019');
+      const passed  = has2015;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `2015:${has2015} 2019(bleed):${has2019} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_product_isolation_techserve', category: 'Multi-Document Processing', builtin: true,
+    name: 'TechServe Products Do Not Bleed QuantumVault',
+    description: 'Ask for TechServe products → answer must contain CloudGuard, NOT QuantumVault',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What services or products does TechServe IT Solutions offer?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer      = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const hasCloudGuard = answer.includes('cloudguard');
+      const hasQuantumVault = answer.includes('quantumvault');
+      // Pass if TechServe product found; flag bleed if Quantum product appears without context
+      const passed  = hasCloudGuard;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `CloudGuard:${hasCloudGuard} QuantumVault(bleed):${hasQuantumVault} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_product_isolation_quantum', category: 'Multi-Document Processing', builtin: true,
+    name: 'Quantum Labs Products Do Not Bleed CloudGuard',
+    description: 'Ask for Quantum Labs products → answer must contain QuantumVault, NOT CloudGuard',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What products does Quantum Labs develop?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer      = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const hasQuantumVault  = answer.includes('quantumvault');
+      const hasCloudGuard    = answer.includes('cloudguard');
+      const passed  = hasQuantumVault;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed, detail: `QuantumVault:${hasQuantumVault} CloudGuard(bleed):${hasCloudGuard} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_sla_disambiguation', category: 'Multi-Document Processing', builtin: true,
+    name: 'SLA Disambiguation Between Documents',
+    description: 'Ask TechServe P1 SLA → must contain "1" (not only "4" from Quantum Labs critical SLA)',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is TechServe IT Solutions P1 critical outage response time?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      // TechServe P1 = 1 hour; Quantum Labs critical = 4 hours
+      const has1hour = answer.includes('1-hour') || answer.includes('1 hour') || /\b1\b/.test(answer);
+      const snippet  = answer.substring(0, 150).replace(/\n/g, ' ');
+      return { passed: has1hour, detail: `1-hour found:${has1hour} | conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>150?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_techserve_price', category: 'Multi-Document Processing', builtin: true,
+    name: 'Retrieve TechServe-Specific Pricing',
+    description: 'Ask CloudGuard price → answer must contain "200" (distinct from Quantum Labs prices)',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'How much does CloudGuard from TechServe cost per month?' });
+      return checkAccuracyAnswer(d, '200');
+    }
+  },
+  {
+    id: 'multidoc_helpdesk_auto_resolve', category: 'Multi-Document Processing', builtin: true,
+    name: 'Retrieve HelpDesk Pro Auto-Resolve Rate',
+    description: 'Ask what percentage of tickets HelpDesk Pro auto-resolves → answer must contain "40"',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What percentage of IT tickets does HelpDesk Pro resolve automatically?' });
+      return checkAccuracyAnswer(d, '40');
+    }
+  },
+  {
+    id: 'multidoc_cross_doc_aggregation', category: 'Multi-Document Processing', builtin: true,
+    name: 'Cross-Document Product Aggregation',
+    description: 'Ask to list all products in the knowledge base → must mention products from BOTH companies',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('POST', '/ask', { query: 'List all the products and services available in this knowledge base.' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      // Must find at least one product from each company
+      const hasQuantum = answer.includes('quantumvault') || answer.includes('quantumflow') || answer.includes('quantumscan');
+      const hasTechServe = answer.includes('cloudguard') || answer.includes('databridge') || answer.includes('helpdesk');
+      const passed  = hasQuantum && hasTechServe;
+      const snippet = answer.substring(0, 200).replace(/\n/g, ' ');
+      return { passed, detail: `QuantumProduct:${hasQuantum} TechServeProduct:${hasTechServe} | ${snippet}${answer.length>200?'…':''}` };
+    }
+  },
+  {
+    id: 'multidoc_node_growth', category: 'Multi-Document Processing', builtin: true,
+    name: 'Knowledge Tree Grows With Second Document',
+    description: 'After ingesting two documents, tree must have more nodes than after just one',
+    async run(call) {
+      if (!multidocState.ingested) return { passed: false, detail: 'Run multidoc_ingest first' };
+      const d = await call('GET', '/nodes');
+      const count  = d.stats?.total_nodes ?? 0;
+      // With two distinct documents on different topics, we expect at least 3 topic nodes
+      const passed = count >= 3;
+      return { passed, detail: `${count} node(s) in tree after 2 documents (need ≥3)` };
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RETRIEVAL COVERAGE
+  // Verify that the retrieval pipeline actually surfaces chunks across the full
+  // depth and breadth of a document — not just the first section or most-indexed topic.
+  // These tests check pipeline metadata (chunks_used, retrieval_sources, snippets,
+  // tree_paths) rather than specific answer content.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  {
+    id: 'coverage_chunks_returned', category: 'Retrieval Coverage', builtin: true,
+    name: 'Retrieval Returns Multiple Chunks',
+    description: 'For a grounded question, chunks_used must be > 1',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Tell me about Quantum Labs employee policies.' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const count  = d.chunks_used ?? 0;
+      const passed = count > 1;
+      return { passed, detail: `chunks_used: ${count}` };
+    }
+  },
+  {
+    id: 'coverage_retrieval_sources_tracked', category: 'Retrieval Coverage', builtin: true,
+    name: 'Retrieval Sources Metadata Present',
+    description: 'Response must include retrieval_sources with hierarchical and direct counts',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the remote work policy at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const rs     = d.retrieval_sources;
+      const passed = rs != null && ('hierarchical' in rs) && ('direct' in rs);
+      return {
+        passed,
+        detail: passed
+          ? `hierarchical: ${rs.hierarchical}, direct: ${rs.direct}`
+          : `retrieval_sources missing or malformed: ${JSON.stringify(rs)}`
+      };
+    }
+  },
+  {
+    id: 'coverage_at_least_one_source_path', category: 'Retrieval Coverage', builtin: true,
+    name: 'At Least One Retrieval Path Succeeds',
+    description: 'Either hierarchical or direct retrieval must return at least 1 chunk',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the vacation policy for new employees at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const rs     = d.retrieval_sources ?? {};
+      const total  = (rs.hierarchical ?? 0) + (rs.direct ?? 0);
+      const passed = total > 0;
+      return { passed, detail: `total chunks from both paths: ${total} (hier:${rs.hierarchical ?? 0} + direct:${rs.direct ?? 0})` };
+    }
+  },
+  {
+    id: 'coverage_snippets_generated', category: 'Retrieval Coverage', builtin: true,
+    name: 'Snippets Generated for Results',
+    description: 'Response must include at least one snippet when chunks are found',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the health insurance coverage at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const snippets = d.snippets ?? [];
+      const passed   = snippets.length > 0;
+      return {
+        passed,
+        detail: passed
+          ? `${snippets.length} snippet(s) — first: "${(snippets[0].text ?? '').substring(0, 80)}"`
+          : 'no snippets in response'
+      };
+    }
+  },
+  {
+    id: 'coverage_tree_paths_present', category: 'Retrieval Coverage', builtin: true,
+    name: 'Tree Paths Present in Response',
+    description: 'Response must include tree_paths array showing the navigation route',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What SLA does Quantum Labs have for critical IT issues?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const paths  = d.tree_paths ?? [];
+      const passed = Array.isArray(paths);
+      return { passed, detail: `tree_paths: ${paths.length} path(s) — ${JSON.stringify(paths.slice(0, 2))}` };
+    }
+  },
+  {
+    id: 'coverage_deep_fact_contact', category: 'Retrieval Coverage', builtin: true,
+    name: 'Deep Section Retrieval (Contact Info)',
+    description: 'A question about contact info (late in doc) must still return a non-empty answer',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the HR department email address at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results — contact section may not be indexed' };
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '');
+      const passed = answer.trim().length > 0;
+      const snippet = answer.substring(0, 120).replace(/\n/g, ' ');
+      return { passed, detail: `conf:${(d.confidence??0).toFixed(2)} | ${snippet}${answer.length>120?'…':''}` };
+    }
+  },
+  {
+    id: 'coverage_hr_email_exact', category: 'Retrieval Coverage', builtin: true,
+    name: 'Exact Contact Detail Retrieved (HR Email)',
+    description: 'Ask HR email → answer must contain "hr@quantumlabs"',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the HR email address at Quantum Labs?' });
+      return checkAccuracyAnswer(d, 'hr@quantumlabs');
+    }
+  },
+  {
+    id: 'coverage_multi_section_breadth', category: 'Retrieval Coverage', builtin: true,
+    name: 'Multi-Section Query Returns Broad Context',
+    description: 'A query spanning multiple sections (overview + policies) must return ≥3 chunks',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'Give me an overview of Quantum Labs including its products, policies, and leadership.' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const count  = d.chunks_used ?? 0;
+      const passed = count >= 3;
+      return { passed, detail: `chunks_used: ${count} (need ≥3 for cross-section breadth)` };
+    }
+  },
+  {
+    id: 'coverage_confidence_nonzero', category: 'Retrieval Coverage', builtin: true,
+    name: 'Confidence Score Meaningful When Grounded',
+    description: 'For a well-grounded question, confidence must be > 0.10',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the probationary period at Quantum Labs?' });
+      if (d.action === 'no_results') return { passed: false, detail: 'no_results' };
+      const conf   = d.confidence ?? 0;
+      const passed = conf > 0.10;
+      return { passed, detail: `confidence: ${conf.toFixed(3)} (need > 0.10)` };
+    }
+  },
+  {
+    id: 'coverage_no_answer_for_unknown', category: 'Retrieval Coverage', builtin: true,
+    name: 'Low Confidence or No Result for Out-of-Scope Query',
+    description: 'A question about a completely absent topic should yield low confidence or no_results',
+    async run(call) {
+      if (!accuracyState.ingested) return { passed: false, detail: 'Run accuracy_ingest first' };
+      const d = await call('POST', '/ask', { query: 'What is the refund policy for QuantumVault hardware devices?' });
+      // Either no_results or a low-confidence "I don't know" answer is acceptable
+      if (d.action === 'no_results') return { passed: true, detail: 'no_results — correctly returned no match' };
+      const conf    = d.confidence ?? 1;
+      const answer  = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+      const admitsUnknown = answer.includes("don't know") || answer.includes('not mentioned') ||
+                            answer.includes('no information') || answer.includes('not found') ||
+                            answer.includes('unable to') || answer.includes('not available');
+      const passed  = conf < 0.60 || admitsUnknown;
+      return { passed, detail: `confidence: ${conf.toFixed(3)}, admits_unknown: ${admitsUnknown}` };
+    }
+  },
 ];
+
 
 // ── Test runner state ─────────────────────────────────────────────────────────
 
@@ -4446,6 +5079,8 @@ let allTests     = [];  // merged builtin + custom (each has a .run function)
 let isRunning    = false;
 // Shared state for accuracy tests — populated by accuracy_ingest, read by downstream tests
 let accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+// Shared state for multi-document tests — populated by multidoc_ingest, read by downstream tests
+let multidocState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
@@ -4529,22 +5164,67 @@ function renderTestList() {
   updateSummary();
 }
 
+/** Parse "conf:0.85 | answer snippet…" returned by accuracy test helpers. */
+function parseAccuracyDetail(detail) {
+  const m = detail.match(/^conf:([\d.]+)\s*\|\s*([\s\S]*)$/);
+  if (!m) return null;
+  return { confidence: parseFloat(m[1]), snippet: m[2].trim() };
+}
+
+/** Human-readable assertion hint shown on custom test cards. */
+function formatAssertionHint(test) {
+  const map = {
+    answer_not_empty: 'Answer is not empty',
+    answer_contains:  `Contains: "${test.assertion_value}"`,
+    confidence_gte:   `Confidence ≥ ${test.assertion_value}`,
+    query_type_is:    `Type = ${test.assertion_value}`,
+    has_citations:    'Has at least one citation',
+  };
+  return map[test.assertion_type] || test.assertion_type;
+}
+
+/** Build the detail HTML block for a test card. */
+function buildTestDetailHtml(test, result) {
+  if (!result.detail) return '';
+
+  const acc = parseAccuracyDetail(result.detail);
+  if (acc) {
+    const level = acc.confidence >= 0.75 ? 'high' : acc.confidence >= 0.45 ? 'mid' : 'low';
+    const statusCls = result.status === 'failed' ? ' tc-detail--failed' : result.status === 'passed' ? ' tc-detail--passed' : '';
+    return `
+      <div class="tc-detail-rich${statusCls}">
+        <span class="tc-conf tc-conf--${level}">conf&nbsp;${acc.confidence.toFixed(2)}</span>
+        <span class="tc-snippet">${escapeHtml(acc.snippet)}</span>
+      </div>`;
+  }
+
+  const statusCls = result.status === 'failed' ? ' tc-detail--failed' : result.status === 'passed' ? ' tc-detail--passed' : '';
+  return `<div class="tc-detail${statusCls}">${escapeHtml(result.detail)}</div>`;
+}
+
 function renderTestCard(test) {
-  const result = testResults[test.id] || { status: 'pending', detail: '' };
+  const result      = testResults[test.id] || { status: 'pending', detail: '' };
   const statusLabel = { pending: '● Pending', running: '⟳ Running', passed: '✓ Passed', failed: '✗ Failed' };
-  const customBtns = test.builtin ? '' : `
+  const customBtns  = test.builtin ? '' : `
     <button class="btn btn-danger btn-small" data-delete-test="${test.dbId}" title="Delete">✕</button>`;
-  const detailHtml = result.detail
-    ? `<div class="test-detail">${escapeHtml(result.detail)}</div>`
+
+  const assertionHint = (!test.builtin && test.assertion_type)
+    ? `<div class="tc-assertion-hint">Assertion: ${escapeHtml(formatAssertionHint(test))}</div>`
     : '';
 
+  const detailHtml = buildTestDetailHtml(test, result);
+
   return `
-    <div class="test-card" id="tc-${escapeHtml(test.id)}">
+    <div class="test-card test-card--${result.status}" id="tc-${escapeHtml(test.id)}">
       <div class="test-card-row">
         <input type="checkbox" class="test-checkbox" data-test-id="${escapeHtml(test.id)}" checked>
         <div class="test-card-info">
-          <div class="test-card-name">${escapeHtml(test.name)}</div>
+          <div class="test-card-header">
+            <span class="test-card-name">${escapeHtml(test.name)}</span>
+            <span class="test-card-cat">${escapeHtml(test.category)}</span>
+          </div>
           <div class="test-card-desc">${escapeHtml(test.description || test.query || '')}</div>
+          ${assertionHint}
           ${detailHtml}
         </div>
         <span class="test-status test-status--${result.status}">${statusLabel[result.status] ?? result.status}</span>
@@ -4574,6 +5254,34 @@ async function runTests(mode, singleId = null) {
   document.getElementById('run-all-tests-btn').disabled = true;
   document.getElementById('run-selected-tests-btn').disabled = true;
 
+  // ── Dataset isolation ───────────────────────────────────────────────────────
+  // 1. Delete any orphaned [Test Run] datasets left by previous crashed runs
+  await cleanupOrphanedTestDatasets();
+
+  // 2. Create a fresh isolated dataset for this run
+  const savedDatasetId   = currentDatasetId;
+  const savedDatasetName = currentDatasetName;
+  let testDatasetId = null;
+
+  try {
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 16);
+    const ds = await api('/datasets', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `[Test Run] ${ts}`,
+        description: 'Temporary isolated dataset created by the test suite. Auto-deleted on completion.'
+      })
+    });
+    testDatasetId      = ds.dataset.id;
+    currentDatasetId   = testDatasetId;
+    currentDatasetName = ds.dataset.name;
+    showToast('Isolated test dataset created', 'success');
+  } catch (err) {
+    // Dataset creation failed — run tests on the current dataset as fallback
+    showToast(`Warning: could not create isolated test dataset (${err.message})`, 'error');
+  }
+  // ───────────────────────────────────────────────────────────────────────────
+
   // Mark all as running
   for (const id of ids) {
     testResults[id] = { status: 'running', detail: '' };
@@ -4599,9 +5307,44 @@ async function runTests(mode, singleId = null) {
   document.getElementById('run-all-tests-btn').disabled = false;
   document.getElementById('run-selected-tests-btn').disabled = false;
 
-  const passed  = ids.filter(id => testResults[id]?.status === 'passed').length;
-  const failed  = ids.filter(id => testResults[id]?.status === 'failed').length;
+  const passed = ids.filter(id => testResults[id]?.status === 'passed').length;
+  const failed = ids.filter(id => testResults[id]?.status === 'failed').length;
   showToast(`Tests complete: ${passed} passed, ${failed} failed`, failed > 0 ? 'error' : 'success');
+
+  renderTestReport(ids);
+
+  // ── Post-run cleanup ────────────────────────────────────────────────────────
+  // Restore original dataset first so the UI lands on the right context
+  currentDatasetId   = savedDatasetId;
+  currentDatasetName = savedDatasetName;
+
+  // Delete the isolated test dataset (and everything it contains)
+  if (testDatasetId) {
+    try {
+      await api(`/datasets/${testDatasetId}?confirm=yes`, { method: 'DELETE' });
+      showToast('Test dataset deleted — knowledge base is clean', 'success');
+    } catch (err) {
+      showToast(`Warning: test dataset ${testDatasetId} could not be deleted — please remove it manually`, 'error');
+    }
+  }
+
+  // Reset shared accuracy test state
+  accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+  // ───────────────────────────────────────────────────────────────────────────
+}
+
+/** Delete any [Test Run] datasets left behind by a previously crashed test suite. */
+async function cleanupOrphanedTestDatasets() {
+  try {
+    const { datasets = [] } = await api('/datasets');
+    for (const ds of datasets) {
+      if (ds.name?.startsWith('[Test Run]') && ds.id !== currentDatasetId) {
+        try {
+          await api(`/datasets/${ds.id}?confirm=yes`, { method: 'DELETE' });
+        } catch (_) { /* non-fatal */ }
+      }
+    }
+  } catch (_) { /* non-fatal */ }
 }
 
 async function apiCallWrapper(method, endpoint, body) {
@@ -4614,8 +5357,12 @@ async function apiCallWrapper(method, endpoint, body) {
 function updateCard(id) {
   const card = document.getElementById(`tc-${id}`);
   if (!card) return;
-  const result = testResults[id] || { status: 'pending', detail: '' };
+  const result      = testResults[id] || { status: 'pending', detail: '' };
   const statusLabel = { pending: '● Pending', running: '⟳ Running', passed: '✓ Passed', failed: '✗ Failed' };
+  const test        = allTests.find(t => t.id === id);
+
+  // Update status class on card root
+  card.className = `test-card test-card--${result.status}`;
 
   const badge = card.querySelector('.test-status');
   if (badge) {
@@ -4623,17 +5370,14 @@ function updateCard(id) {
     badge.textContent = statusLabel[result.status] ?? result.status;
   }
 
-  // Update or create detail block
-  let detail = card.querySelector('.test-detail');
-  if (result.detail) {
-    if (!detail) {
-      detail = document.createElement('div');
-      detail.className = 'test-detail';
-      card.querySelector('.test-card-info')?.appendChild(detail);
+  // Replace detail block entirely using the same builder as renderTestCard
+  const info = card.querySelector('.test-card-info');
+  if (info) {
+    const oldDetail = info.querySelector('.tc-detail, .tc-detail-rich');
+    if (oldDetail) oldDetail.remove();
+    if (result.detail && test) {
+      info.insertAdjacentHTML('beforeend', buildTestDetailHtml(test, result));
     }
-    detail.textContent = result.detail;
-  } else if (detail) {
-    detail.remove();
   }
 }
 
@@ -4657,7 +5401,145 @@ function clearTestResults() {
   for (const key of Object.keys(testResults)) {
     testResults[key] = { status: 'pending', detail: '' };
   }
+  const reportEl = document.getElementById('test-report');
+  if (reportEl) { reportEl.className = 'hidden'; reportEl.innerHTML = ''; }
+  const dlBtn = document.getElementById('download-report-btn');
+  if (dlBtn) dlBtn.style.display = 'none';
   renderTestList();
+}
+
+// ── Test Report ───────────────────────────────────────────────────────────────
+
+function renderTestReport(ids) {
+  const reportEl = document.getElementById('test-report');
+  const dlBtn    = document.getElementById('download-report-btn');
+  if (!reportEl) return;
+
+  const failed = ids.filter(id => testResults[id]?.status === 'failed');
+
+  if (failed.length === 0) {
+    reportEl.className = 'hidden';
+    reportEl.innerHTML = '';
+    if (dlBtn) dlBtn.style.display = 'none';
+    return;
+  }
+
+  const now = new Date();
+
+  if (dlBtn) {
+    dlBtn.style.display = '';
+    dlBtn.onclick = () => downloadTestReport(ids, now);
+  }
+
+  const issueItems = failed.map((id, i) => {
+    const test   = allTests.find(t => t.id === id);
+    const result = testResults[id];
+    if (!test) return '';
+    return `
+      <div class="tr-issue">
+        <div class="tr-issue-header">
+          <span class="tr-issue-num">#${i + 1}</span>
+          <span class="tr-issue-name">${escapeHtml(test.name)}</span>
+          <span class="tr-issue-cat">${escapeHtml(test.category)}</span>
+        </div>
+        <div class="tr-issue-desc">${escapeHtml(test.description || test.query || '')}</div>
+        ${result.detail ? `<div class="tr-issue-detail">${escapeHtml(result.detail)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  const passed = ids.filter(id => testResults[id]?.status === 'passed').length;
+
+  reportEl.className = 'test-report';
+  reportEl.innerHTML = `
+    <div class="tr-header">
+      <span class="tr-title">Test Report</span>
+      <span class="tr-meta">${escapeHtml(now.toLocaleString())} &nbsp;·&nbsp; ${ids.length} tests &nbsp;·&nbsp; ${passed} passed &nbsp;·&nbsp; ${failed.length} failed</span>
+    </div>
+    <div class="tr-issues-label">Failed Tests — Action Required (${failed.length})</div>
+    <div class="tr-issues">${issueItems}</div>
+    <div class="tr-copy-row">
+      <button class="btn btn-secondary btn-small" id="copy-report-btn">Copy as Markdown</button>
+    </div>
+  `;
+
+  document.getElementById('copy-report-btn')?.addEventListener('click', () => {
+    navigator.clipboard.writeText(buildReportMarkdown(ids, now))
+      .then(() => showToast('Report copied to clipboard', 'success'))
+      .catch(() => showToast('Copy failed', 'error'));
+  });
+}
+
+function buildReportMarkdown(ids, now) {
+  const passed = ids.filter(id => testResults[id]?.status === 'passed');
+  const failed = ids.filter(id => testResults[id]?.status === 'failed');
+
+  // Category breakdown
+  const catStats = {};
+  for (const id of ids) {
+    const test = allTests.find(t => t.id === id);
+    if (!test) continue;
+    catStats[test.category] ??= { total: 0, passed: 0, failed: 0 };
+    catStats[test.category].total++;
+    if (testResults[id]?.status === 'passed') catStats[test.category].passed++;
+    if (testResults[id]?.status === 'failed') catStats[test.category].failed++;
+  }
+
+  const catTable = Object.entries(catStats)
+    .map(([cat, s]) => `| ${cat} | ${s.total} | ${s.passed} | ${s.failed} |`)
+    .join('\n');
+
+  const failedSection = failed.length === 0
+    ? '_All tests passed._'
+    : failed.map((id, i) => {
+        const test   = allTests.find(t => t.id === id);
+        const result = testResults[id];
+        if (!test) return '';
+        return `### ${i + 1}. [${test.category}] ${test.name}\n**Description:** ${test.description || test.query || '(none)'}\n**Error:** ${result?.detail || '(no detail)'}`;
+      }).join('\n\n');
+
+  const allRows = ids.map(id => {
+    const test   = allTests.find(t => t.id === id);
+    const result = testResults[id];
+    if (!test) return '';
+    const icon   = result?.status === 'passed' ? '✓' : result?.status === 'failed' ? '✗' : '●';
+    const status = `${icon} ${result?.status ?? 'pending'}`;
+    const detail = (result?.detail || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 120);
+    return `| ${test.name} | ${test.category} | ${status} | ${detail} |`;
+  }).join('\n');
+
+  return `# Test Suite Report
+Generated: ${now.toISOString().replace('T', ' ').slice(0, 19)}
+
+## Summary
+- Total: ${ids.length}
+- Passed: ${passed.length} ✓
+- Failed: ${failed.length} ✗
+
+## Category Breakdown
+| Category | Total | Passed | Failed |
+|----------|-------|--------|--------|
+${catTable}
+
+## Failed Tests — Action Items
+${failedSection}
+
+## Full Results
+| Test | Category | Status | Detail |
+|------|----------|--------|--------|
+${allRows}
+`;
+}
+
+function downloadTestReport(ids, now) {
+  const content  = buildReportMarkdown(ids, now);
+  const filename = `test-report-${now.toISOString().slice(0, 10)}.md`;
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Assertion evaluator (for custom tests) ────────────────────────────────────

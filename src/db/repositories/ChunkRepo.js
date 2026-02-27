@@ -147,6 +147,26 @@ export const ChunkRepo = {
   },
 
   /**
+   * LIKE search on keywords_json for an array of terms (OR conditions).
+   * Complements BM25 FTS by directly targeting LLM-extracted semantic tags.
+   * @param {string[]} terms - plain search terms (not pre-escaped)
+   */
+  searchByKeywords(terms, limit = 30) {
+    if (!terms || !terms.length) return [];
+    const capped = terms.slice(0, 8); // cap to avoid runaway SQL
+    const conditions = capped.map(() => "c.keywords_json LIKE ?").join(" OR ");
+    const params = capped.map(t => `%${t}%`);
+    return db.prepare(`
+      SELECT c.*, n.name as node_name, n.level as node_level
+      FROM chunks c
+      JOIN nodes n ON c.node_id = n.node_id
+      WHERE c.status = 'active' AND c.superseded_by IS NULL AND (${conditions})
+      ORDER BY c.uploaded_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+  },
+
+  /**
    * Search active chunks by doc_title with a relevance score column.
    * @param {string} term - exact or partial document title
    */

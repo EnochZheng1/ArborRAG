@@ -37,6 +37,21 @@ function calculateSimilarity(text1, text2) {
   return overlap / Math.max(terms1.size, terms2.size);
 }
 
+// Common English stop words — filtered out during CHUNK-level scoring (getNodeChunks)
+// to prevent "is"/"the"/"of" inflating relevance of unrelated content chunks.
+// Node navigation (scoreNodeRelevance) uses the full query term set so that node
+// names like "Company Overview" can still match partial query phrases.
+const EN_STOP_WORDS = new Set([
+  "the","is","are","was","were","be","been","being","have","has","had",
+  "do","does","did","will","would","could","should","may","might","shall",
+  "can","must","of","in","on","at","to","for","by","with","from","as",
+  "or","an","and","but","not","it","its","this","that","what","who","how",
+  "when","where","which","why","all","any","each","few","more","most",
+  "no","nor","so","than","too","very","just","up","out","if","then","than",
+  "them","their","they","we","our","us","you","your","he","she","his","her",
+  "my","me","its","into","about","over","after"
+]);
+
 function extractQueryTerms(query) {
   const normalized = String(query || "").toLowerCase().trim();
   if (!normalized) return [];
@@ -50,7 +65,8 @@ function extractQueryTerms(query) {
     terms.push(token);
   };
 
-  const latin = normalized.match(/[a-z0-9]{2,}/g) || [];
+  // Match letter sequences (2+ chars) OR any digit sequences (incl. single digits like "3", "7").
+  const latin = normalized.match(/[a-z]{2,}|\d+/g) || [];
   for (const token of latin) {
     add(token);
   }
@@ -207,6 +223,10 @@ function getRootNodes() {
  */
 function getNodeChunks(nodeId, query, limit = 10) {
   const queryTerms = extractQueryTerms(query);
+  // Filter stop words for chunk-level scoring so common words ("is","the","of")
+  // don't inflate relevance of unrelated content chunks above on-topic ones.
+  const contentTerms = queryTerms.filter(t => !EN_STOP_WORDS.has(t));
+  const scoringTerms = contentTerms.length > 0 ? contentTerms : queryTerms;
 
   const rows = ChunkRepo.getForNodeFull(nodeId, limit * 2); // Get more, then filter by relevance
 
@@ -214,14 +234,33 @@ function getNodeChunks(nodeId, query, limit = 10) {
     const content = r.content_clean || '';
     const contentLower = content.toLowerCase();
 
-    // Calculate content relevance
+    // Calculate content relevance using only non-stop-word query terms
     let relevance = 0;
-    for (const term of queryTerms) {
+    for (const term of scoringTerms) {
       if (contentLower.includes(term)) {
         relevance += 0.3;
         // Bonus for multiple occurrences
         const matches = (contentLower.match(new RegExp(term, 'g')) || []).length;
         relevance += Math.min(matches * 0.05, 0.2);
+      }
+    }
+
+    // Keyword-tag match bonus — LLM-extracted tags are semantically precise;
+    // matching them is more reliable than raw content text overlap.
+    const chunkKeywords = safeJson(r.keywords_json, []).map(k => String(k).toLowerCase());
+    for (const term of scoringTerms) {
+      if (chunkKeywords.some(kw => kw.includes(term) || term.includes(kw))) {
+        relevance += 0.4;
+      }
+    }
+
+    // Numeric exact-match bonus — BM25 IDF down-weights short numbers ("8", "20",
+    // "50") because they appear across many chunks. Compensate so the answer chunk
+    // containing the exact figure the user asked about isn't buried by prose chunks.
+    for (const num of (query.match(/\b\d+(?:\.\d+)?\b/g) || [])) {
+      if (new RegExp(`\\b${num}\\b`).test(contentLower)) {
+        relevance += 0.35;
+        break; // one numeric match per chunk is sufficient
       }
     }
 
@@ -282,9 +321,13 @@ export function navigateTreeTopDown(query, options = {}) {
     path: [node.node_id]
   }));
 
-  // Sort by score and keep top beamWidth
+  // Sort by score. At the root level we keep ALL nodes regardless of beamWidth.
+  // Slicing here is the primary cause of missed branches: "Company Overview" always
+  // absorbs slots by matching the company name present in every query, starving
+  // deeper topic branches (Employee Benefits, Technical Support, etc.) of a slot.
+  // Beam narrowing is applied at depth 1+ where the tree has already been focused.
   currentLevel.sort((a, b) => b.score - a.score);
-  currentLevel = currentLevel.slice(0, beamWidth);
+  // (no slice here — explore every root node)
 
   // Add initial nodes if they score well
   for (const item of currentLevel) {
@@ -700,8 +743,8 @@ export async function hierarchicalRetrieve(query, options = {}) {
   const seenChunkIds = new Set();
   const nodeChunkStats = [];
 
-  for (const node of relevantNodes.slice(0, 10)) {
-    const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, 5);
+  for (const node of relevantNodes.slice(0, 15)) {
+    const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, 8);
     let added = 0;
 
     for (const chunk of nodeChunks) {

@@ -57,7 +57,12 @@ const TEMPORAL_PATTERNS = [
   /\brevised\b/i,
   /\bnew\b/i,
   /\b(since|from)\s+\d{4}\b/i,
-  /\b20\d{2}\b/,
+  // Require the year to appear in an unambiguous date context (ISO date, quarter, or
+  // spelled-out month) so product codes like "Model 2024X" or form IDs like "ISO 20243"
+  // do not falsely trigger a REPLACE action.
+  /\b20\d{2}-\d{2}(?:-\d{2})?\b/,                // 2024-01 or 2024-01-15
+  /\bQ[1-4]\s*20\d{2}\b/i,                        // Q1 2024
+  /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[,.\s]+20\d{2}\b/i,
 ];
 
 function detectTemporalSignal(content) {
@@ -69,8 +74,12 @@ function detectTemporalSignal(content) {
 async function normalizeWithLLM(kpContent, existingContent) {
   if (!llmConfig[llmConfig.provider]?.apiKey) return null;
 
-  const prompt = `Two knowledge statements express the same fact but use different phrasing.
-Rewrite them as a single canonical statement that is precise, complete, and neutral.
+  const prompt = `Two knowledge statements are about the same topic. Merge them into one canonical statement.
+
+Rules:
+1. Preserve ALL specific numbers, percentages, durations, and dates from BOTH statements (e.g., "90 days", "85%", "7 hours").
+2. When one statement is more specific than the other, keep the more specific phrasing.
+3. The result must be factually precise and complete.
 
 Statement A: "${kpContent.slice(0, 400)}"
 Statement B: "${existingContent.slice(0, 400)}"
@@ -217,7 +226,11 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
 
   // ── [4] Normalize (soft similarity + LLM rewrite) ─────────────────────────
 
-  if (useLLM && bestCandidate && bestSim >= 0.40) {
+  // Threshold raised from 0.40 → 0.55: a dice similarity of 0.40 can match KPs that
+  // are related in topic but differ significantly in specificity (e.g., "probationary period"
+  // sim=0.44 with "90-day probationary period"). Below 0.55, store both KPs separately so
+  // the specific numeric detail (90, 85%, 7 days) is preserved in the KB.
+  if (useLLM && bestCandidate && bestSim >= 0.55) {
     try {
       const normalized = await normalizeWithLLM(content, bestCandidate.content_clean || "");
       if (normalized && normalized.confidence >= 0.70) {

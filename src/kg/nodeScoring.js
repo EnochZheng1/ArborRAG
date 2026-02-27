@@ -7,7 +7,11 @@ function authorityScore(level) {
 
 function recencyScore(updatedAt, now = Date.now()) {
   const days = Math.max(0, (now - new Date(updatedAt).getTime()) / (1000 * 3600 * 24));
-  const halfLife = 30;
+  // halfLife raised from 30 → 180 days. Enterprise knowledge bases contain stable
+  // policies and SOPs that remain authoritative for months or years. A 30-day
+  // half-life (news-feed cadence) was halving the score of content every month,
+  // actively penalising mature, well-maintained nodes over freshly uploaded ones.
+  const halfLife = 180;
   return Math.exp(-Math.log(2) * (days / halfLife));
 }
 
@@ -17,7 +21,10 @@ function scopeFitScore(queryScope, nodeScope) {
   for (const key of ["product", "region", "business_unit", "channel"]) {
     if (queryScope[key]) {
       total += 1;
-      if (nodeScope[key] && nodeScope[key] === queryScope[key]) hit += 1;
+      // Case-insensitive comparison (was strict ===). "US" and "us", or values
+      // normalised differently at ingest time vs query time, now score correctly.
+      if (nodeScope[key] &&
+          String(nodeScope[key]).toLowerCase() === String(queryScope[key]).toLowerCase()) hit += 1;
     }
   }
   if (total === 0) return 0;

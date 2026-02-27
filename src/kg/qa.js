@@ -1,7 +1,7 @@
 import { callLLM } from "../utils/llm.js";
 import { safeJson } from "../db/db.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
-import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
+import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, keywordTagSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
 import { generateSnippet, generateSnippetsForChunks, extractKeySentences } from "../utils/snippetGenerator.js";
 import { rankNodes, decideNode } from "./nodeScoring.js";
 import { classifyQuery, QUERY_TYPES } from "../query/classifier.js";
@@ -193,8 +193,8 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
   // Apply feedback-based boosting
   chunks = applyFeedbackBoost(chunks);
 
-  // LLM Re-ranking for better relevance
-  if (useReranking && chunks.length > 5) {
+  // LLM Re-ranking for better relevance (threshold lowered from > 5 to > 1)
+  if (useReranking && chunks.length > 1) {
     try {
       trace?.addStep('LLM Re-ranking', `Re-ranking ${chunks.length} chunks`);
       const rerankedChunks = await rerankerChunks(query, chunks, {
@@ -213,10 +213,11 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
   // Limit chunks
   chunks = chunks.slice(0, maxChunks);
 
-  // Expand chunks with context
+  // Expand chunks with context (200 chars per side to avoid crowding out later chunks)
   const expandedChunks = expandChunksWithContext(chunks, {
     windowBefore: contextWindow,
-    windowAfter: contextWindow
+    windowAfter: contextWindow,
+    maxContextLength: 400
   });
 
   // Generate snippets
@@ -233,7 +234,7 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
     }));
 
   // Build context
-  const context = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 7000 });
+  const context = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 12000 });
   const sourceNames = [...new Set(chunks.map(c => c.doc_title).filter(Boolean))].slice(0, 3).join(", ") || "Documents";
 
   // Generate answer
@@ -244,7 +245,8 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
     trace?.addStep('LLM Generation', 'Generating answer with citations');
     const citationResult = await generateAnswerWithCitations(query, context, chunks, {
       lang: getEffectiveLang(query),
-      temperature
+      temperature,
+      maxSources: chunks.length
     });
     llmResponse = {
       final_answer: citationResult.answer,
@@ -574,23 +576,27 @@ async function handleAggregationQuery(query, classification, queryScope, useHybr
   let candidates;
   if (useHybridSearch) {
     trace?.addStep('Node Recall', 'Using hierarchical hybrid search for aggregation');
-    candidates = await hierarchicalRecallNodes(query, 15, {
+    candidates = await hierarchicalRecallNodes(query, 30, {
       useHierarchy: true,
       useAliases: true
     });
     candidates = candidates.map(r => ({ node: r.node, bm25: r.score, sources: r.sources }));
   } else {
     trace?.addStep('Node Recall', 'Using BM25 search');
-    candidates = bm25RecallNodes(query, 10);
+    candidates = bm25RecallNodes(query, 30);
   }
 
+  // Use top 20 nodes (up from 8): multi-document KBs can have 15+ nodes across two
+  // documents. Cutting at 8 silently drops entire documents from cross-doc aggregation
+  // results when one company's nodes outrank the other's on BM25 relevance.
+  const AGGREGATION_TOP_N = 20;
   trace?.addStep('Node Recall Complete', `Found ${candidates.length} candidate nodes`, {
-    top_nodes: candidates.slice(0, 5).map(c => ({ name: c.node.name, score: c.bm25?.toFixed(3), sources: c.sources }))
+    top_nodes: candidates.slice(0, AGGREGATION_TOP_N).map(c => ({ name: c.node.name, score: c.bm25?.toFixed(3), sources: c.sources }))
   });
 
   // Get chunks from all relevant nodes
   const allChunks = [];
-  for (const c of candidates.slice(0, 5)) {
+  for (const c of candidates.slice(0, AGGREGATION_TOP_N)) {
     const chunks = getChunksForNode(c.node.node_id);
     allChunks.push(...chunks.map(chunk => ({
       ...chunk,
@@ -694,12 +700,12 @@ async function handleAggregationQuery(query, classification, queryScope, useHybr
       chunkId: c.id
     }));
 
-  const context = formatChunksAsContext(allChunks.slice(0, 20));
+  const context = formatChunksAsContext(allChunks.slice(0, 40));
 
   // Determine source names for context
   const sourceNames = candidates.length > 0
-    ? candidates.slice(0, 5).map(c => c.node.name).join(", ")
-    : [...new Set(allChunks.map(c => c.doc_title || c.node_name).filter(Boolean))].slice(0, 5).join(", ") || "Documents";
+    ? candidates.slice(0, AGGREGATION_TOP_N).map(c => c.node.name).join(", ")
+    : [...new Set(allChunks.map(c => c.doc_title || c.node_name).filter(Boolean))].slice(0, AGGREGATION_TOP_N).join(", ") || "Documents";
 
   trace?.addStep('LLM Generation', 'Generating aggregated answer');
   const llmResponse = await callLLMAnswer({
@@ -714,7 +720,7 @@ async function handleAggregationQuery(query, classification, queryScope, useHybr
     query_type: QUERY_TYPES.AGGREGATION,
     success: true,
     data: llmResponse,
-    nodes_used: candidates.slice(0, 5).map(c => ({
+    nodes_used: candidates.slice(0, AGGREGATION_TOP_N).map(c => ({
       node_id: c.node.node_id,
       name: c.node.name
     })),
@@ -775,7 +781,7 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
 
     const directChunkMap = new Map();
     const variantQueries = retrievalQueryVariants.slice(0, 5);
-    const sourceStats = { doc_title: 0, bm25: 0, simple: 0 };
+    const sourceStats = { doc_title: 0, bm25: 0, simple: 0, keywords: 0 };
 
     const upsertDirectChunk = (chunk, source, score, variant) => {
       if (!chunk?.id) return;
@@ -817,9 +823,11 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       // BM25 FTS search on chunk content
       const bm25Chunks = bm25RecallChunks(variant.text, perVariantLimit);
       sourceStats.bm25 += bm25Chunks.length;
-      const maxBm25 = bm25Chunks.reduce((max, r) => Math.max(max, r.bm25 || 0), 0);
+      // Absolute normalisation — avoids inflating the "best of a bad batch" to 1.0
+      // when all BM25 scores are weak (same fix as nodeScoring.js MAX_EXPECTED_BM25).
+      const MAX_EXPECTED_BM25 = 15.0;
       for (const r of bm25Chunks) {
-        const normalizedBm25 = maxBm25 > 0 ? (r.bm25 || 0) / maxBm25 : 0;
+        const normalizedBm25 = Math.min(1.0, (r.bm25 || 0) / MAX_EXPECTED_BM25);
         upsertDirectChunk(r.chunk, 'bm25_content', normalizedBm25, variant);
       }
 
@@ -828,6 +836,15 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       sourceStats.simple += simpleChunks.length;
       for (const r of simpleChunks) {
         upsertDirectChunk(r.chunk, 'simple_content', r.score || 0, variant);
+      }
+
+      // Keyword tag search — finds chunks whose LLM-extracted semantic tags match
+      // query terms. Bypasses BM25 IDF weighting, so short numeric values and
+      // domain-specific labels surface even when they score low in FTS5.
+      const kwChunks = keywordTagSearch(variant.text, perVariantLimit);
+      sourceStats.keywords += kwChunks.length;
+      for (const r of kwChunks) {
+        upsertDirectChunk(r.chunk, 'keyword_tags', r.score || 0, variant);
       }
     }
 
@@ -838,7 +855,8 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       variants_used: variantQueries.length,
       doc_title: sourceStats.doc_title,
       bm25: sourceStats.bm25,
-      simple: sourceStats.simple
+      simple: sourceStats.simple,
+      keywords: sourceStats.keywords
     });
   } catch (err) {
     logger.warn("Direct chunk search failed:", err.message);
@@ -892,25 +910,52 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     trace?.addStep('Hierarchical Retrieval', `Failed: ${err.message}`, null, 'error');
   }
 
-  // STEP 2: Strict Fallback — node-scope isolation first, global only when tree fails entirely
+  // STEP 2: Supplement strategy — node-scope first, supplement with direct when thin.
+  //
+  // Hierarchical chunks are the primary source (node-scoped, avoids most cross-doc bleed).
+  // When hierarchical returns fewer than SUPPLEMENT_THRESHOLD chunks the tree only found a
+  // partial match (e.g., navigated to Company Overview instead of Health Insurance). In that
+  // case we supplement with the top direct BM25 chunks so specific numeric facts that live in
+  // a different node than the one the tree navigated to are still covered.
+  //
+  // This avoids both failure modes:
+  //   • Pure MERGE: always adds global direct chunks → cross-doc contamination
+  //   • Pure STRICT FALLBACK: discards direct when ANY hierarchical found → misses specific facts
+  const SUPPLEMENT_THRESHOLD = 8;
   let usedFallback = false;
   const allChunks = [];
   const seenChunkIds = new Set();
 
   if (hierarchicalChunks.length > 0) {
-    // Primary: tree successfully located relevant nodes — use ONLY node-scoped chunks
+    // Primary: tree found at least one node — use hierarchical chunks first.
     for (const chunk of hierarchicalChunks) {
       if (!seenChunkIds.has(chunk.id)) {
         seenChunkIds.add(chunk.id);
         allChunks.push({ ...chunk, retrieval_source: 'hierarchical' });
       }
     }
-    trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
-      from_hierarchical: hierarchicalChunks.length,
-      direct_discarded: directChunks.length
-    });
+
+    if (hierarchicalChunks.length < SUPPLEMENT_THRESHOLD && directChunks.length > 0) {
+      // Supplement: hierarchical coverage is thin — add direct BM25 chunks to fill gaps.
+      // De-duplicate so no chunk appears twice.
+      for (const chunk of directChunks) {
+        if (!seenChunkIds.has(chunk.id)) {
+          seenChunkIds.add(chunk.id);
+          allChunks.push({ ...chunk, retrieval_source: 'supplement' });
+        }
+      }
+      trace?.addStep('Chunk Selection', `Used ${hierarchicalChunks.length} hierarchical + ${allChunks.length - hierarchicalChunks.length} supplemental chunks`, {
+        from_hierarchical: hierarchicalChunks.length,
+        from_supplement: allChunks.length - hierarchicalChunks.length
+      });
+    } else {
+      trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
+        from_hierarchical: hierarchicalChunks.length,
+        direct_discarded: directChunks.length
+      });
+    }
   } else {
-    // Fallback: tree localization failed entirely — use global direct chunks
+    // Fallback: tree localization failed entirely — use global direct chunks.
     usedFallback = true;
     for (const chunk of directChunks) {
       if (!seenChunkIds.has(chunk.id)) {
@@ -970,8 +1015,10 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
   // STEP 4: Apply feedback-based boosting
   chunks = applyFeedbackBoost(chunks);
 
-  // STEP 5: LLM Re-ranking for better relevance
-    if (useReranking && chunks.length > 5) {
+  // STEP 5: LLM Re-ranking for better relevance.
+  // Threshold lowered from > 5 to > 1: with the merged pool, the reranker must always run
+  // to filter wrong-node hierarchical chunks from the correct direct-BM25 chunks.
+    if (useReranking && chunks.length > 1) {
       try {
         trace?.addStep('LLM Re-ranking', `Re-ranking chunks (threshold=${rerankerThreshold})`);
         const rerankedChunks = await rerankerChunks(query, chunks, {
@@ -989,10 +1036,15 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       }
     }
 
-    // Expand chunks with context (neighboring chunks)
+    // Expand chunks with context (neighboring chunks).
+    // maxContextLength capped at 400 (200 chars per side) to prevent neighbor text from
+    // crowding out later chunks in the LLM prompt. With the old default of 2000, each
+    // expanded chunk consumed ~2200 chars, fitting only ~3 of 20 chunks in a 7000-char
+    // budget — silently dropping the specific facts needed to answer the query.
     const expandedChunks = expandChunksWithContext(chunks, {
       windowBefore: contextWindow,
-      windowAfter: contextWindow
+      windowAfter: contextWindow,
+      maxContextLength: 400
     });
     const chunksWithContext = expandedChunks.filter(c => c.has_context).length;
     if (chunksWithContext > 0) {
@@ -1029,7 +1081,11 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       trace?.addStep('Fact Retrieval', `Skipped: ${err.message}`, null, 'skipped');
     }
 
-    // Build context with expanded chunks + facts
+    // Build context with expanded chunks + facts.
+    // maxTotalLength: with maxContextLength=400 each expanded chunk is ~600 chars,
+    // 7000 chars accommodates ~11 focused chunks. Keeping the budget moderate prevents
+    // the "lost in the middle" effect — LLMs are less reliable at extracting specific
+    // numbers (like "85%", "4 hours", "90 days") when surrounded by 20+ other chunks.
     const chunkContext = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 7000 });
     const context = chunkContext + factsContext;
 
@@ -1047,7 +1103,8 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       trace?.addStep('LLM Generation', `Generating answer with inline citations (temperature=${temperature})`);
       const citationResult = await generateAnswerWithCitations(query, context, chunks, {
         lang: getEffectiveLang(query),
-        temperature
+        temperature,
+        maxSources: chunks.length
       });
       llmResponse = {
         final_answer: citationResult.answer,

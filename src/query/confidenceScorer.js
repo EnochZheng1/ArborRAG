@@ -54,9 +54,11 @@ export function calculateConfidence(context) {
 
   let overallScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
 
-  // Apply dampening - be conservative
-  // Raw scores tend to be inflated, apply sqrt to compress high values
-  overallScore = Math.sqrt(overallScore) * 0.85;
+  // Apply mild linear scaling instead of sqrt dampening.
+  // sqrt() was compressing ALL scores into a 0.5–0.7 band, making confidence
+  // meaningless (a perfect answer scored only 0.07 higher than a poor one).
+  // Linear scaling preserves the relative differences between good and bad answers.
+  overallScore = overallScore * 0.92;
 
   // Additional penalties
   // Penalty for few chunks
@@ -68,8 +70,10 @@ export function calculateConfidence(context) {
     overallScore *= 0.9;
   }
 
-  // Clamp to reasonable range
-  overallScore = Math.max(0.05, Math.min(0.95, overallScore));
+  // Clamp to reasonable range — guard against NaN propagating into JSON as null
+  overallScore = Number.isFinite(overallScore)
+    ? Math.max(0.05, Math.min(0.95, overallScore))
+    : 0.1;
 
   // Determine confidence level (with stricter thresholds)
   const level = getConfidenceLevel(overallScore);
@@ -151,10 +155,17 @@ function calculateAuthorityScore(chunks) {
   let totalAuthority = 0;
   let count = 0;
 
+  // authority_level is stored as TEXT ('policy','sop','training','personal').
+  // Map to numeric scale 1=highest authority, 5=lowest.
+  const AUTH_STRING_MAP = { policy: 1, sop: 2, training: 3, personal: 4 };
+
   for (const chunk of chunks) {
-    const authority = chunk.authority_level || chunk.chunk?.authority_level || 3;
-    // Authority levels: 1=highest, 5=lowest
-    // Be more conservative - default level 3 gives 0.4
+    const rawAuth = chunk.authority_level ?? chunk.chunk?.authority_level ?? 'sop';
+    const strKey = String(rawAuth).toLowerCase();
+    // Prefer string map; fall back to numeric parse; default to 2 (sop-level)
+    const authority = AUTH_STRING_MAP[strKey]
+      ?? (Number.isFinite(Number(rawAuth)) ? Number(rawAuth) : 2);
+    // Authority levels: 1=highest, 5=lowest; 1 → score 0.80, 2 → 0.60, 3 → 0.40, 4 → 0.20
     const normalizedAuthority = (5 - authority) / 5;
     totalAuthority += normalizedAuthority;
     count++;

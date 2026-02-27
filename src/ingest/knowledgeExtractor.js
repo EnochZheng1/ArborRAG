@@ -18,7 +18,6 @@ import { ingestLogger as logger } from "../utils/logger.js";
 const VALID_KP_TYPES = new Set(["fact", "rule", "definition", "procedure", "example", "context"]);
 const SEGMENT_SIZE   = 5000;   // chars per LLM call
 const SEGMENT_OVERLAP = 500;   // overlap between segments (paragraph boundary)
-const MAX_KPS_PER_DOC = 150;
 
 // ── Word-level Dice similarity (used for cross-segment dedup) ─────────────────
 
@@ -98,7 +97,9 @@ function splitIntoSegments(text, segmentSize, overlap) {
 async function extractKPsFromSegment(segment, docTitle, lang) {
   const prompt = getPrompt("kpExtraction", lang, docTitle, segment);
 
-  const text = await callLLM({ prompt, temperature: 0.2, taskName: 'kp_extraction' });
+  // Low temperature for consistency: same document should produce the same KPs across runs.
+  // This stabilises tree topology and makes retrieval deterministic.
+  const text = await callLLM({ prompt, temperature: 0.1, taskName: 'kp_extraction' });
 
   if (!text) throw new Error("LLM returned empty response");
 
@@ -126,9 +127,16 @@ function normaliseKP(raw, index, docTitle, documentId, authorityLevel) {
 
   const kpType = VALID_KP_TYPES.has(raw.kp_type) ? raw.kp_type : "fact";
 
+  const sourceExcerpt = String(raw.source_excerpt || "").slice(0, 200).trim();
+  // Always include the verbatim excerpt in content so exact numbers/phrases
+  // ("90-day", "twice per year") survive LLM paraphrasing and remain searchable.
+  const fullContent = sourceExcerpt && sourceExcerpt !== statement
+    ? `${statement}\n${sourceExcerpt}`
+    : statement;
+
   return {
     // Fields expected by stageMapChunks / assignChunkToNode (backward compat)
-    content:         statement,
+    content:         fullContent,
     index,
     doc_title:       docTitle,
     chunk_type:      kpType,       // maps to chunk_type column
@@ -139,11 +147,11 @@ function normaliseKP(raw, index, docTitle, documentId, authorityLevel) {
 
     // KP-specific fields
     kp_type:              kpType,
-    source_excerpt:       String(raw.source_excerpt || "").slice(0, 200),
+    source_excerpt:       sourceExcerpt,
     source_documents_json: JSON.stringify([{
       doc_id:    documentId,
       doc_title: docTitle,
-      excerpt:   String(raw.source_excerpt || "").slice(0, 200)
+      excerpt:   sourceExcerpt
     }]),
     topic_hint:    String(raw.topic_hint    || "General").slice(0, 80),
     subtopic_hint: String(raw.subtopic_hint || "").slice(0, 80),
@@ -176,19 +184,17 @@ function deduplicateAcrossSegments(kps, threshold = 0.9) {
  * @param {boolean} options.useLLM       - If false, use paragraph fallback
  * @param {string}  options.authorityLevel
  * @param {number}  options.documentId
- * @param {number}  options.maxKPs
  * @returns {Promise<Array>} Array of EnrichedKP objects
  */
 export async function extractKnowledgePoints(text, docTitle, options = {}) {
   const {
     useLLM        = true,
     authorityLevel = "sop",
-    documentId    = 0,
-    maxKPs        = MAX_KPS_PER_DOC
+    documentId    = 0
   } = options;
 
   if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) {
-    return extractKPsFromParagraphs(text, docTitle, { authorityLevel, documentId, maxKPs });
+    return extractKPsFromParagraphs(text, docTitle, { authorityLevel, documentId });
   }
 
   const lang = getEffectiveLang(text);
@@ -231,7 +237,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
 
   const deduped = deduplicateAcrossSegments(normalised);
 
-  const result = deduped.slice(0, maxKPs).map((kp, i) => ({ ...kp, index: i }));
+  const result = deduped.map((kp, i) => ({ ...kp, index: i }));
   logger.info(`KP extraction complete: ${result.length} KPs from "${docTitle}"`);
   return result;
 }
@@ -266,7 +272,6 @@ function paragraphsToKPs(text, docTitle, { authorityLevel = "sop", documentId = 
  * Always produces KPs with kp_type='legacy_chunk'.
  */
 export function extractKPsFromParagraphs(text, docTitle, options = {}) {
-  const { authorityLevel = detectAuthorityLevel(text, docTitle), documentId = 0, maxKPs = MAX_KPS_PER_DOC } = options;
-  const kps = paragraphsToKPs(text, docTitle, { authorityLevel, documentId });
-  return kps.slice(0, maxKPs);
+  const { authorityLevel = detectAuthorityLevel(text, docTitle), documentId = 0 } = options;
+  return paragraphsToKPs(text, docTitle, { authorityLevel, documentId });
 }

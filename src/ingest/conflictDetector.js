@@ -97,7 +97,11 @@ function contextsSimilar(contextA, contextB) {
   }
 
   const minSize = Math.min(wordsA.size, wordsB.size);
-  return minSize > 0 && overlap / minSize > 0.3;
+  // 0.6 threshold (was 0.3) — requires substantial word overlap before treating
+  // two number contexts as comparable. The old threshold caused false positives
+  // where unrelated contexts (e.g. "max speed" vs "max load") shared only one
+  // word yet triggered conflict detection for any differing numeric value.
+  return minSize > 0 && overlap / minSize > 0.6;
 }
 
 /**
