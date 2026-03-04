@@ -12,10 +12,10 @@ export const DocumentRepo = {
     return db.prepare("SELECT * FROM documents WHERE id = ?").get(docId) ?? null;
   },
 
-  /** Find an active (not deleted/failed) document by file hash. */
+  /** Find a fully-processed document by file hash (ignores pending/processing rows from failed/paused attempts). */
   findByHash(hash) {
     return db.prepare(
-      "SELECT id FROM documents WHERE file_hash = ? AND status NOT IN ('deleted', 'failed')"
+      "SELECT id FROM documents WHERE file_hash = ? AND status = 'processed'"
     ).get(hash) ?? null;
   },
 

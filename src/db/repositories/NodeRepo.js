@@ -98,12 +98,14 @@ export const NodeRepo = {
 
   /** BM25 full-text search via nodes_fts. Returns rows with a `score` column. */
   bm25Search(safeQuery, limit = 30) {
+    // Column weights: node_id col = 0 (ID, not content), text col = 1.0
+    // Ensures BM25 score is computed only from the text column, not node IDs.
     return db.prepare(`
-      SELECT n.*, -bm25(nodes_fts) as score
+      SELECT n.*, -bm25(nodes_fts, 0, 1) as score
       FROM nodes_fts
       JOIN nodes n ON n.node_id = nodes_fts.node_id
       WHERE nodes_fts MATCH ?
-      ORDER BY bm25(nodes_fts) ASC
+      ORDER BY bm25(nodes_fts, 0, 1) ASC
       LIMIT ?
     `).all(safeQuery, limit);
   },

@@ -1,4 +1,5 @@
 import { callLLM } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { safeJson } from "../db/db.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, keywordTagSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
@@ -85,23 +86,17 @@ export async function callLLMAnswer({ query, nodeId, nodeName, context, lang = "
 
   const text = await callLLM({ prompt: fullPrompt, taskName: 'qa_answer' });
 
-  // Try to extract JSON from response
-  try {
-    // Handle markdown code blocks
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    const jsonStr = jsonMatch ? jsonMatch[1] : text;
-    return JSON.parse(jsonStr);
-  } catch {
-    return {
-      final_answer: text,
-      conditions: [],
-      citations: [],
-      conflicts: [],
-      missing_info: [isChineseLang(detectedLang)
-        ? "输出不是JSON（建议开启 Gemini 的结构化输出）"
-        : "Output is not valid JSON (consider enabling Gemini structured output)"]
-    };
-  }
+  const parsed = await parseLLMJson(text, 'object', { context: 'qa_answer', fallback: null });
+  if (parsed) return parsed;
+  return {
+    final_answer: text,
+    conditions: [],
+    citations: [],
+    conflicts: [],
+    missing_info: [isChineseLang(detectedLang)
+      ? "输出不是JSON（建议开启 Gemini 的结构化输出）"
+      : "Output is not valid JSON (consider enabling Gemini structured output)"]
+  };
 }
 
 // Get chunks for a node
@@ -185,7 +180,7 @@ async function generateAnswerFromChunks(query, chunks, trace, options = {}) {
     useReranking = true,
     useCitations = true,
     includeRelatedQuestions = true,
-    rerankerThreshold = 0.3,
+    rerankerThreshold = 0.2,
     contextWindow = 1,
     temperature = 0.3
   } = options;
@@ -340,7 +335,7 @@ export async function ask({ query, queryScope = null, options = {} }) {
     maxChunks = 20,               // Maximum chunks to include in context
     minConfidence = 0.0,          // Minimum confidence threshold (0.0-1.0)
     hybridAlpha = 0.5,            // Weight for vector vs BM25 (0=BM25 only, 1=vector only)
-    rerankerThreshold = 0.3,      // Minimum reranker score to keep
+    rerankerThreshold = 0.2,      // Minimum reranker score to keep (0.2 * 10 = 2 on LLM 0-10 scale)
     contextWindow = 2,            // Number of neighboring chunks to include on each side
     temperature = 0.3             // LLM temperature for answer generation
   } = options;
@@ -739,15 +734,19 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     retrievalOptions = {}
   } = enhancedOptions;
 
-  // Extract retrieval parameters with defaults
+  // Extract retrieval parameters with defaults.
+  // maxChunks reduced from 20 → 12: with 20 sources the answer-generation LLM gets
+  // overwhelmed by noise and says "not in sources" despite the answer being present.
+  // 12 balances enough context for multi-fact queries against LLM attention limits.
+  // Aggregation queries use a separate path with higher limits.
   const {
     topK = 30,
-    maxChunks = 20,
+    maxChunks = 12,
     minConfidence = 0.0,
     hybridAlpha = 0.5,
-    rerankerThreshold = 0.3,
+    rerankerThreshold = 0.2,
     contextWindow = 2,
-    temperature = 0.3
+    temperature = 0.1
   } = retrievalOptions;
 
   let retrievalQueryVariants = [{ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] }];
@@ -848,6 +847,28 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
       }
     }
 
+    // Numeric-fact boost — queries seeking specific numbers ("how many days",
+    // "what percentage") need chunks containing those numbers to rank higher.
+    // BM25 IDF down-weights short numbers; this post-hoc pass compensates.
+    const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
+    const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长/i.test(query);
+
+    if (queryNumbers.length > 0 || isNumericQuery) {
+      for (const [, chunk] of directChunkMap) {
+        const content = (chunk.content || chunk.content_clean || '').toLowerCase();
+        let boost = 0;
+        for (const num of queryNumbers) {
+          if (new RegExp(`\\b${num}\\b`).test(content)) {
+            boost = Math.max(boost, 0.15);
+          }
+        }
+        if (isNumericQuery && boost === 0 && /\d/.test(content)) {
+          boost = 0.08;
+        }
+        if (boost > 0) chunk.relevance_score = (chunk.relevance_score || 0) + boost;
+      }
+    }
+
     directChunks = [...directChunkMap.values()];
     directChunks.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
 
@@ -937,22 +958,107 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
 
     if (hierarchicalChunks.length < SUPPLEMENT_THRESHOLD && directChunks.length > 0) {
       // Supplement: hierarchical coverage is thin — add direct BM25 chunks to fill gaps.
-      // De-duplicate so no chunk appears twice.
+      // IMPORTANT: prefer same-document chunks to avoid cross-doc contamination.
+      // E.g. if tree navigated to CompanyA's node, adding CompanyB's "CEO" chunk
+      // from direct search causes the LLM to conflate the two companies.
+      const hierarchicalDocs = new Set(
+        hierarchicalChunks.map(c => c.doc_title).filter(Boolean)
+      );
+
+      // Partition direct chunks: same-doc first, cross-doc second
+      const sameDocChunks = [];
+      const crossDocChunks = [];
       for (const chunk of directChunks) {
-        if (!seenChunkIds.has(chunk.id)) {
-          seenChunkIds.add(chunk.id);
-          allChunks.push({ ...chunk, retrieval_source: 'supplement' });
+        if (seenChunkIds.has(chunk.id)) continue;
+        if (!chunk.doc_title || hierarchicalDocs.has(chunk.doc_title)) {
+          sameDocChunks.push(chunk);
+        } else {
+          crossDocChunks.push(chunk);
         }
       }
-      trace?.addStep('Chunk Selection', `Used ${hierarchicalChunks.length} hierarchical + ${allChunks.length - hierarchicalChunks.length} supplemental chunks`, {
+
+      // Add same-doc supplements first
+      for (const chunk of sameDocChunks) {
+        seenChunkIds.add(chunk.id);
+        allChunks.push({ ...chunk, retrieval_source: 'supplement_same_doc' });
+      }
+      // Only add cross-doc if still very thin (< 4 chunks total)
+      if (allChunks.length < 4) {
+        for (const chunk of crossDocChunks) {
+          seenChunkIds.add(chunk.id);
+          allChunks.push({ ...chunk, retrieval_source: 'supplement_cross_doc' });
+        }
+      }
+
+      const supplementCount = allChunks.length - hierarchicalChunks.length;
+      trace?.addStep('Chunk Selection', `Used ${hierarchicalChunks.length} hierarchical + ${supplementCount} supplemental chunks (${sameDocChunks.length} same-doc, ${Math.max(0, supplementCount - sameDocChunks.length)} cross-doc)`, {
         from_hierarchical: hierarchicalChunks.length,
-        from_supplement: allChunks.length - hierarchicalChunks.length
+        from_supplement: supplementCount,
+        same_doc: sameDocChunks.length,
+        cross_doc_added: Math.max(0, supplementCount - sameDocChunks.length)
       });
-    } else {
-      trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
-        from_hierarchical: hierarchicalChunks.length,
-        direct_discarded: directChunks.length
-      });
+    } else if (directChunks.length > 0) {
+      // Hierarchical has enough chunks — but BM25 may have found relevant chunks
+      // from nodes the tree didn't navigate to (same doc) or from other documents.
+      const hierarchicalDocs = new Set(
+        hierarchicalChunks.map(c => c.doc_title).filter(Boolean)
+      );
+      const queryLower = query.toLowerCase();
+      let supplementedCount = 0;
+
+      // Collect node IDs already covered by hierarchical search
+      const hierarchicalNodeIds = new Set(
+        hierarchicalChunks.map(c => c.node_id).filter(Boolean)
+      );
+
+      // Sort direct chunks by relevance so the best BM25 hits get priority
+      const sortedDirect = [...directChunks].sort(
+        (a, b) => (b.relevance_score || 0) - (a.relevance_score || 0)
+      );
+
+      // Only add the very best same-doc BM25 hits (from unvisited nodes).
+      // Cap at 2 to avoid diluting the tree's focused results.
+      const MAX_SAME_DOC = 2;
+      const MAX_CROSS_DOC = 4;
+      let sameDocAdded = 0;
+      let crossDocAdded = 0;
+
+      for (const chunk of sortedDirect) {
+        if (seenChunkIds.has(chunk.id)) continue;
+
+        const isCrossDoc = chunk.doc_title && !hierarchicalDocs.has(chunk.doc_title);
+
+        if (isCrossDoc) {
+          if (crossDocAdded >= MAX_CROSS_DOC) continue;
+          // Cross-doc: only include if doc_title contains a distinctive query term
+          const titleTerms = (chunk.doc_title || '').replace(/[-_.]/g, ' ')
+            .toLowerCase().split(/\s+/)
+            .filter((t, i, a) => t.length >= 5 && a.indexOf(t) === i);
+          if (!titleTerms.some(term => queryLower.includes(term))) continue;
+          crossDocAdded++;
+        } else {
+          if (sameDocAdded >= MAX_SAME_DOC) continue;
+          // Same-doc: only include chunks from nodes the tree DIDN'T visit.
+          if (chunk.node_id && hierarchicalNodeIds.has(chunk.node_id)) continue;
+          sameDocAdded++;
+        }
+
+        seenChunkIds.add(chunk.id);
+        allChunks.push({ ...chunk, retrieval_source: isCrossDoc ? 'query_matched_doc' : 'supplement_same_doc' });
+        supplementedCount++;
+      }
+
+      if (supplementedCount > 0) {
+        trace?.addStep('Chunk Selection', `Using ${hierarchicalChunks.length} hierarchical + ${supplementedCount} direct BM25 chunks`, {
+          from_hierarchical: hierarchicalChunks.length,
+          supplemented: supplementedCount
+        });
+      } else {
+        trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
+          from_hierarchical: hierarchicalChunks.length,
+          direct_discarded: directChunks.length
+        });
+      }
     }
   } else {
     // Fallback: tree localization failed entirely — use global direct chunks.
@@ -982,15 +1088,12 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     };
   }
 
-  // STEP 3: Score and rank combined chunks
-  // Sort by hierarchical_score (if available) or relevance_score
+  // STEP 3: Score and rank combined chunks.
   allChunks.sort((a, b) => {
     const scoreA = a.hierarchical_score || a.relevance_score || 0;
     const scoreB = b.hierarchical_score || b.relevance_score || 0;
     return scoreB - scoreA;
   });
-
-  // Take top chunks
   let chunks = allChunks.slice(0, maxChunks);
 
   // Determine the best node (if any) from hierarchical search
@@ -1033,6 +1136,78 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
         }
       } catch (err) {
         trace?.addStep('Re-ranking Skipped', `Error: ${err.message}`, null, 'error');
+      }
+    }
+
+    // STEP 5b: Document-scope filter — when the query explicitly names a document or
+    // company (e.g. "Quantum Labs"), demote chunks from other documents. This prevents
+    // cross-doc contamination where e.g. TechServe's CEO appears in Quantum Labs results
+    // because they share a "Leadership" node in the topical tree.
+    {
+      const queryLower = query.toLowerCase();
+      // Collect all unique doc titles
+      const allDocTitles = [...new Set(chunks.map(c => c.doc_title).filter(Boolean))];
+
+      if (allDocTitles.length > 1) {
+        // Check which doc titles are mentioned in the query
+        const matchedDocs = new Set();
+        for (const title of allDocTitles) {
+          const titleTerms = (title || '').replace(/[-_.]/g, ' ')
+            .toLowerCase().split(/\s+/)
+            .filter(t => t.length >= 5);
+          if (titleTerms.some(t => queryLower.includes(t))) {
+            matchedDocs.add(title);
+          }
+        }
+
+        // If the query names a specific document, filter out chunks from other docs
+        if (matchedDocs.size > 0 && matchedDocs.size < allDocTitles.length) {
+          const before = chunks.length;
+          chunks = chunks.filter(c => !c.doc_title || matchedDocs.has(c.doc_title));
+          if (chunks.length < 2) {
+            // Safety: if filtering removed too many, keep at least the top scored ones
+            chunks = allChunks
+              .filter(c => !c.doc_title || matchedDocs.has(c.doc_title))
+              .slice(0, maxChunks);
+          }
+          if (chunks.length < before) {
+            trace?.addStep('Document Scope Filter', `Filtered ${before - chunks.length} cross-doc chunks (query mentions: ${[...matchedDocs].join(', ')})`);
+          }
+        }
+      }
+    }
+
+    // STEP 5c: Term-overlap re-sort — promote chunks containing actual query terms to
+    // the top of the list. The LLM reranker (gpt-5-nano) sometimes gives all chunks
+    // similar scores, so a chunk about "SLA response time" might end up at position [8]
+    // behind chunks about vacations and products. The answer LLM is more likely to find
+    // and use information from the first few sources, so this simple heuristic ensures
+    // content-relevant chunks appear early in the source list.
+    {
+      const queryTerms = query.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(t => t.length >= 3);
+
+      if (queryTerms.length > 0) {
+        for (const chunk of chunks) {
+          const content = (chunk.content || chunk.content_clean || '').toLowerCase();
+          let termHits = 0;
+          for (const term of queryTerms) {
+            if (content.includes(term)) termHits++;
+          }
+          chunk._termOverlap = termHits / queryTerms.length;
+        }
+
+        // Stable sort: among chunks with similar reranker scores, prefer those with
+        // higher term overlap. This preserves the reranker's relative ordering while
+        // boosting content-relevant chunks to the top.
+        chunks.sort((a, b) => {
+          const overlapDiff = (b._termOverlap || 0) - (a._termOverlap || 0);
+          if (Math.abs(overlapDiff) > 0.2) return overlapDiff;
+          // Fall back to reranker score for similar overlap
+          return (b.rerank_score || 0) - (a.rerank_score || 0);
+        });
       }
     }
 
@@ -1082,11 +1257,13 @@ async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enh
     }
 
     // Build context with expanded chunks + facts.
-    // maxTotalLength: with maxContextLength=400 each expanded chunk is ~600 chars,
-    // 7000 chars accommodates ~11 focused chunks. Keeping the budget moderate prevents
-    // the "lost in the middle" effect — LLMs are less reliable at extracting specific
-    // numbers (like "85%", "4 hours", "90 days") when surrounded by 20+ other chunks.
-    const chunkContext = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 7000 });
+    // maxTotalLength: with maxContextLength=400 each expanded chunk is ~600 chars.
+    // 12000 chars accommodates ~20 focused chunks. The old 7000-char budget only fit
+    // ~11 chunks, silently dropping 45% of retrieved facts (SLA tiers, probation periods,
+    // founding years) that ranked in positions 12-20 after reranking.
+    // "Lost in the middle" is a concern at 50k+ tokens; 12000 chars ≈ 3k tokens is well
+    // within the reliable extraction range for modern LLMs.
+    const chunkContext = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 12000 });
     const context = chunkContext + factsContext;
 
     // Determine node context for LLM (use chosen node or derive from chunks)

@@ -1,4 +1,5 @@
 import { callLLM } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { queryLogger as logger } from "../utils/logger.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
@@ -144,9 +145,9 @@ async function llmClassify(query) {
 
   try {
     const text = await callLLM({ prompt, taskName: 'query_classification' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-
-    return JSON.parse(jsonMatch[1] || text);
+    const result = await parseLLMJson(text, 'object', { context: 'query_classification', fallback: null });
+    if (!result) throw new Error('Failed to parse classification JSON');
+    return result;
   } catch (err) {
     logger.error("LLM classification failed:", err.message);
     throw err;

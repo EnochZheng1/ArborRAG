@@ -53,10 +53,6 @@
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
           <span>Documents</span>
         </button>
-        <button class="nav-btn" data-tab="conflicts">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <span>Conflicts</span>
-        </button>
         <button class="nav-btn" data-tab="decisions">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <span>Decisions</span>
@@ -348,6 +344,42 @@
             </form>
           </div>
         </div>
+
+        <!-- Add Content Modal -->
+        <div class="modal hidden" id="add-chunk-modal">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3>Add Content to Node</h3>
+              <button class="close-btn" id="close-add-chunk-modal">&times;</button>
+            </div>
+            <form id="add-chunk-form">
+              <div class="form-group">
+                <label for="chunk-content">Content</label>
+                <textarea id="chunk-content" rows="6" required
+                  placeholder="Enter the knowledge point content..."></textarea>
+              </div>
+              <div class="form-group">
+                <label for="chunk-kp-type">Type</label>
+                <select id="chunk-kp-type">
+                  <option value="fact">Fact</option>
+                  <option value="rule">Rule</option>
+                  <option value="definition">Definition</option>
+                  <option value="procedure">Procedure</option>
+                  <option value="example">Example</option>
+                  <option value="context">Context</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="chunk-doc-title">Source name <span style="color:var(--text-secondary,#888)">(optional)</span></label>
+                <input type="text" id="chunk-doc-title" placeholder="e.g. Company Policy Manual">
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-add-chunk">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add Content</button>
+              </div>
+            </form>
+          </div>
+        </div>
       </section>
 
       <!-- Upload Tab -->
@@ -377,10 +409,6 @@
             <label class="checkbox-label">
               <input type="checkbox" id="upload-use-llm" checked>
               <span data-i18n="use_llm_extraction">Use LLM for metadata extraction</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="upload-detect-conflicts" checked>
-              <span data-i18n="detect_conflicts">Detect conflicts</span>
             </label>
           </div>
 
@@ -464,38 +492,6 @@
               </tr>
             </tbody>
           </table>
-        </div>
-      </section>
-
-      <!-- Conflicts Tab -->
-      <section class="tab-content" id="tab-conflicts">
-        <div class="tab-header">
-          <h2 data-i18n="conflicts_title">Conflicts</h2>
-          <button id="refresh-conflicts-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
-        </div>
-
-        <div class="conflicts-container">
-          <div class="conflict-stats" id="conflict-stats"></div>
-          <div class="conflict-explainer">
-            <h3 data-i18n="conflict_explainer_title">What is a conflict?</h3>
-            <p data-i18n="conflict_explainer_body">
-              A conflict means two chunks under the same node say incompatible facts or requirements.
-              Review both chunks, then keep the one you trust.
-            </p>
-          </div>
-          <div class="conflict-list" id="conflict-list">
-            <!-- Skeleton conflicts -->
-            <div class="skeleton-conflict">
-              <div class="skeleton-line w-80"></div>
-              <div class="skeleton-line w-100"></div>
-              <div class="skeleton-line w-60"></div>
-            </div>
-            <div class="skeleton-conflict">
-              <div class="skeleton-line w-70"></div>
-              <div class="skeleton-line w-90"></div>
-              <div class="skeleton-line w-50"></div>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -677,6 +673,15 @@
         <div class="tab-header">
           <h2 data-i18n="datasets_title">Datasets</h2>
           <button class="btn btn-primary" id="new-dataset-btn" data-i18n="new_dataset">+ New Dataset</button>
+        </div>
+
+        <!-- Batch Actions Toolbar (shown when ≥1 dataset is selected) -->
+        <div class="batch-toolbar hidden" id="dataset-batch-toolbar">
+          <label class="batch-select-all">
+            <input type="checkbox" id="dataset-select-all">
+            <span id="dataset-batch-count">0 selected</span>
+          </label>
+          <button class="btn btn-danger btn-sm" id="dataset-batch-delete-btn">Delete Selected</button>
         </div>
 
         <div class="dataset-create-form hidden" id="dataset-create-form">

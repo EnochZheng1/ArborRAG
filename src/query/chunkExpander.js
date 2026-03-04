@@ -186,7 +186,7 @@ export function formatExpandedChunk(chunk) {
  * @returns {string} Combined context
  */
 export function buildExpandedContext(expandedChunks, options = {}) {
-  const { includeNeighbors = true, maxTotalLength = 8000 } = options;
+  const { includeNeighbors = true, maxTotalLength = 12000 } = options;
 
   const parts = [];
   let totalLength = 0;

@@ -58,7 +58,7 @@ function setDocumentProcessingStep(docId, step, message, progress, status = "pro
 
 // ── Rollback ──────────────────────────────────────────────────────────────────
 
-function rollbackFailedDocument(docId) {
+function rollbackFailedDocument(docId, newNodeIds = []) {
   return runTransaction(() => {
     const chunks = IngestRepo.getChunksForDoc(docId);
     const affectedNodeIds = new Set(chunks.map(c => c.node_id).filter(Boolean));
@@ -100,6 +100,19 @@ function rollbackFailedDocument(docId) {
       IngestRepo.updateNodeConflictScore(nodeId, openConflicts);
     }
 
+    // Remove nodes that were created during this ingestion and are now empty.
+    // Only delete if the node has no remaining chunks AND no child nodes —
+    // another document may have legitimately mapped content to the same node.
+    for (const nodeId of newNodeIds) {
+      const chunkCount = IngestRepo.getChunkCountForNode(nodeId);
+      const childCount = IngestRepo.getChildCountForNode(nodeId);
+      if (chunkCount === 0 && childCount === 0) {
+        IngestRepo.deleteNodeFts(nodeId);
+        IngestRepo.deleteNodeEmbedding(nodeId);
+        IngestRepo.deleteNode(nodeId);
+      }
+    }
+
     IngestRepo.markDocumentFailed(docId);
   });
 }
@@ -119,7 +132,7 @@ export async function processDocument(filePath, options = {}) {
   const {
     targetNodeId    = null,
     useLLM          = true,
-    detectConflicts = true,
+    detectConflicts = false,
     createNewNodes  = true,
     extractEntities = true,
     chunkConfig     = {},
@@ -150,7 +163,7 @@ export async function processDocument(filePath, options = {}) {
 
   const ctx = {
     filePath,
-    options: { targetNodeId, useLLM, detectConflicts, createNewNodes, extractEntities, chunkConfig, originalName },
+    options: { targetNodeId, useLLM, detectConflicts, createNewNodes, extractEntities, chunkConfig, originalName, jobId },
     results,
     setStep
   };
@@ -179,7 +192,7 @@ export async function processDocument(filePath, options = {}) {
 
     if (ctx.documentId) {
       try {
-        rollbackFailedDocument(ctx.documentId);
+        rollbackFailedDocument(ctx.documentId, ctx.createdNodeIds ?? []);
         setStep(ctx.documentId, "failed", `Processing failed: ${err.message}`, 100, "failed");
       } catch (rollbackErr) {
         logger.error(`Rollback failed for document ${ctx.documentId}: ${rollbackErr.message}`);
@@ -196,12 +209,31 @@ export async function processDocument(filePath, options = {}) {
   return results;
 }
 
+const BATCH_CONCURRENCY = 3; // parallel documents per batch — keeps LLM rate-limit headroom
+
 export async function processDocumentBatch(filePaths, options = {}) {
   const results = { total: filePaths.length, successful: 0, failed: 0, documents: [] };
-  for (const filePath of filePaths) {
-    const result = await processDocument(filePath, options);
-    results.documents.push(result);
-    if (result.success) results.successful++; else results.failed++;
+
+  for (let i = 0; i < filePaths.length; i += BATCH_CONCURRENCY) {
+    const slice = filePaths.slice(i, i + BATCH_CONCURRENCY);
+    const settled = await Promise.allSettled(slice.map(fp => processDocument(fp, options)));
+
+    for (let j = 0; j < settled.length; j++) {
+      const outcome = settled[j];
+      if (outcome.status === 'fulfilled') {
+        results.documents.push(outcome.value);
+        if (outcome.value.success) results.successful++; else results.failed++;
+      } else {
+        results.failed++;
+        results.documents.push({
+          success: false,
+          filename: path.basename(slice[j]),
+          errors: [outcome.reason?.message ?? 'Unknown error'],
+          stats: {}, chunks: [], mappings: [], conflicts: []
+        });
+      }
+    }
   }
+
   return results;
 }

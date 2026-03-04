@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { retrieveForRecommendation, retrieveAndAggregate } from "./multiNodeRetriever.js";
 import { logger } from "../utils/logger.js";
 
@@ -122,9 +123,9 @@ Generate recommendations. Return JSON:
 
   try {
     const text = await callLLM({ prompt, taskName: 'recommendation' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-
-    return JSON.parse(jsonMatch[1] || text);
+    const result = await parseLLMJson(text, 'object', { context: 'recommendation', fallback: null });
+    if (!result) throw new Error('Failed to parse recommendation JSON');
+    return result;
   } catch (err) {
     logger.warn(`LLM recommendation failed: ${err.message}`);
     return generateBasicRecommendation(candidateData, criteria);

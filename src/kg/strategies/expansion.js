@@ -3,6 +3,7 @@
  */
 
 import { callLLM, llmConfig } from "../../utils/llm.js";
+import { parseLLMJson } from "../../utils/parseJSON.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { detectLanguage } from "../../utils/langDetect.js";
 import { getNode } from "../graphTraversal.js";
@@ -27,8 +28,7 @@ Return ONLY a JSON array of strings, no explanation:
 ["term1", "term2", "term3"]`;
 
     const text = await callLLM({ prompt, taskName: 'query_expansion' }) ?? "[]";
-    const jsonMatch = text.match(/\[[\s\S]*?\]/);
-    const terms = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    const terms = await parseLLMJson(text, 'array', { context: 'query_expansion', fallback: [] });
     const allTerms = [query, ...terms.filter(t => typeof t === "string" && t.length > 0)];
     const uniqueTerms = [...new Set(allTerms)];
 

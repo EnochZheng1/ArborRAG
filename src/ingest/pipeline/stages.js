@@ -20,7 +20,6 @@ import { parseFile, isSupportedFileType } from "../fileParser.js";
 import { extractKnowledgePoints } from "../knowledgeExtractor.js";
 import { detectAuthorityLevel } from "../metadataExtractor.js";
 import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
-import { processNewChunkConflicts } from "../conflictDetector.js";
 import { processDocumentForExtraction } from "../../extraction/entityFactExtractor.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import crypto from "crypto";
@@ -104,7 +103,7 @@ export function stageRegister(ctx) {
 
 export async function stageExtractKPs(ctx) {
   const { content, fileMetadata, options, documentId } = ctx;
-  const { useLLM } = options;
+  const { useLLM, jobId } = options;
 
   ctx.enrichedChunks = []; // ensure downstream never sees undefined on early throw
   ctx.setStep(documentId, "kp_extraction", "Extracting knowledge points…", 25);
@@ -112,7 +111,14 @@ export async function stageExtractKPs(ctx) {
   const kps = await extractKnowledgePoints(content, fileMetadata.filename, {
     useLLM,
     authorityLevel: detectAuthorityLevel(content, fileMetadata.filename),
-    documentId
+    documentId,
+    jobId,
+    onProgress: (done, total) => {
+      if (total <= 1) return; // single-segment docs don't need intermediate updates
+      const pct = 25 + Math.round((done / total) * 38);
+      ctx.setStep(documentId, "kp_extraction",
+        `Extracting KPs (${done}/${total} segments)…`, pct);
+    }
   });
 
   ctx.results.stats.chunkCount = kps.length;
@@ -122,11 +128,11 @@ export async function stageExtractKPs(ctx) {
   logger.info(`Extracted ${kps.length} KPs from "${fileMetadata.filename}"`);
 }
 
-// ── Stage 4: Map chunks to nodes, detect conflicts, generate aliases ──────────
+// ── Stage 4: Map chunks to nodes, generate aliases ───────────────────────────
 
 export async function stageMapChunks(ctx) {
   const { enrichedChunks, documentId, options } = ctx;
-  const { targetNodeId, useLLM, detectConflicts, createNewNodes } = options;
+  const { targetNodeId, useLLM, createNewNodes } = options;
 
   ctx.setStep(documentId, "mapping_chunks", "Mapping chunks to tree nodes.", 68);
 
@@ -137,19 +143,10 @@ export async function stageMapChunks(ctx) {
       const chunkId = assignChunkToNode(chunk, targetNodeId, documentId);
       ctx.results.chunks.push({ chunkId, nodeId: targetNodeId, index: chunk.index });
 
-      if (detectConflicts) {
-        if (i === 0) ctx.setStep(documentId, "conflict_detection", "Checking for conflicts.", 85);
-        const conflictResult = await processNewChunkConflicts(chunkId, targetNodeId);
-        if (conflictResult.total_conflicts > 0) ctx.results.conflicts.push(...conflictResult.recorded);
-      }
-
       if (i === 0 || (i + 1) % 10 === 0 || i === enrichedChunks.length - 1) {
-        const base = detectConflicts ? 85 : 90;
-        const progress = base + ((i + 1) / enrichedChunks.length) * (detectConflicts ? 10 : 8);
-        ctx.setStep(documentId,
-          detectConflicts ? "conflict_detection" : "mapping_chunks",
-          `${detectConflicts ? "Checking conflicts" : "Mapping"} (${i + 1}/${enrichedChunks.length}).`,
-          progress);
+        const progress = 90 + ((i + 1) / enrichedChunks.length) * 8;
+        ctx.setStep(documentId, "mapping_chunks",
+          `Mapping (${i + 1}/${enrichedChunks.length}).`, progress);
       }
     }
   } else {
@@ -157,23 +154,10 @@ export async function stageMapChunks(ctx) {
     const mappingResult = await autoMapChunks(enrichedChunks, documentId, { useLLM, createNewNodes });
     ctx.results.mappings = mappingResult;
     ctx.results.chunks = mappingResult.mapped;
+    // Track newly-created node IDs so rollback can clean them up if a later stage fails
+    ctx.createdNodeIds = (mappingResult.newNodes || []).map(n => n.node_id);
     ctx.setStep(documentId, "mapping_chunks",
       `Mapped ${mappingResult.mapped.length}/${enrichedChunks.length} chunks.`, 84);
-
-    if (detectConflicts) {
-      ctx.setStep(documentId, "conflict_detection", "Checking mapped chunks for conflicts.", 88);
-      for (let i = 0; i < mappingResult.mapped.length; i++) {
-        const mapping = mappingResult.mapped[i];
-        const conflictResult = await processNewChunkConflicts(mapping.chunkId, mapping.nodeId);
-        if (conflictResult.total_conflicts > 0) ctx.results.conflicts.push(...conflictResult.recorded);
-
-        if (i === 0 || (i + 1) % 10 === 0 || i === mappingResult.mapped.length - 1) {
-          const progress = 88 + ((i + 1) / mappingResult.mapped.length) * 10;
-          ctx.setStep(documentId, "conflict_detection",
-            `Checking conflicts (${i + 1}/${mappingResult.mapped.length}).`, progress);
-        }
-      }
-    }
 
     if (mappingResult.unmapped.length > 0) {
       ctx.results.errors.push(`${mappingResult.unmapped.length} chunks could not be mapped to nodes`);

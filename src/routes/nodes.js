@@ -149,4 +149,45 @@ router.get("/chunks/detail/:id", (req, res) => {
   }
 });
 
+// Create a manual chunk on a node
+router.post("/nodes/:id/chunks", (req, res) => {
+  try {
+    const { content, kp_type = 'fact', doc_title = 'Manual Entry' } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: 'content is required' });
+    const validTypes = ['fact', 'rule', 'definition', 'procedure', 'example', 'context'];
+    if (!validTypes.includes(kp_type)) return res.status(400).json({ error: 'invalid kp_type' });
+    if (!NodeRepo.existsById(req.params.id)) return res.status(404).json({ error: 'node not found' });
+
+    const result = ChunkRepo.insertKP({
+      doc_title,
+      content: content.trim(),
+      chunk_type: 'manual',
+      kp_type,
+      nodeId: req.params.id,
+      documentId: null,
+      index: 0
+    });
+    ChunkRepo.insertFts(result.lastInsertRowid, content.trim());
+    NodeRepo.touch(req.params.id);
+    res.json({ chunk: { id: result.lastInsertRowid, content: content.trim(), kp_type, doc_title } });
+  } catch (err) {
+    apiLogger.error("Create chunk error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a manually-created chunk (guards against file-ingested chunks)
+router.delete("/chunks/:id", (req, res) => {
+  try {
+    const chunk = ChunkRepo.getById(parseInt(req.params.id, 10));
+    if (!chunk) return res.status(404).json({ error: 'chunk not found' });
+    if (chunk.document_id != null) return res.status(403).json({ error: 'cannot delete file-ingested chunks' });
+    ChunkRepo.deleteById(chunk.id);
+    res.json({ ok: true });
+  } catch (err) {
+    apiLogger.error("Delete chunk error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

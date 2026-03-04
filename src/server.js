@@ -19,7 +19,6 @@ import queryRouter from "./routes/query.js";
 import ingestRouter from "./routes/ingest.js";
 import documentsRouter from "./routes/documents.js";
 import nodesRouter from "./routes/nodes.js";
-import conflictsRouter from "./routes/conflicts.js";
 import embeddingsRouter from "./routes/embeddings.js";
 import statsRouter from "./routes/stats.js";
 import entitiesRouter from "./routes/entities.js";
@@ -31,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 initDb();
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: `${Number(process.env.INGEST_MAX_FILE_MB) || 200}mb` }));
 app.use(requestLogger);
 startIngestionQueue();
 
@@ -63,7 +62,6 @@ app.use(ingestRouter);
 app.use(queryRouter);
 app.use("/documents", documentsRouter);
 app.use(nodesRouter);
-app.use(conflictsRouter);
 app.use(embeddingsRouter);
 app.use(statsRouter);
 app.use(entitiesRouter);

@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
@@ -238,12 +239,8 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
   try {
     const respText = await callLLM({ prompt, taskName: 'metadata_extraction' }) ?? "{}";
 
-    // Extract JSON from response
-    const jsonMatch = respText.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, respText];
-    const jsonStr = jsonMatch[1] || respText;
-
-    const result = JSON.parse(jsonStr);
-    // Ensure language is set correctly
+    const result = await parseLLMJson(respText, 'object', { context: 'metadata_extraction', fallback: null });
+    if (!result) throw new Error('Failed to parse metadata JSON');
     result.language = lang;
     return result;
   } catch (err) {

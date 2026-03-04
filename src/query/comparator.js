@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { retrieveForComparison, buildMultiNodeContext } from "./multiNodeRetriever.js";
 import { logger } from "../utils/logger.js";
 
@@ -103,9 +104,9 @@ Generate a structured comparison. Return JSON:
 
   try {
     const text = await callLLM({ prompt, taskName: 'comparison' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-
-    return JSON.parse(jsonMatch[1] || text);
+    const result = await parseLLMJson(text, 'object', { context: 'comparison', fallback: null });
+    if (!result) throw new Error('Failed to parse comparison JSON');
+    return result;
   } catch (err) {
     logger.warn(`LLM comparison failed: ${err.message}`);
     return generateBasicComparison(comparisonData, aspects);

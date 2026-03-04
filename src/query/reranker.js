@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { logger } from "../utils/logger.js";
@@ -55,26 +56,45 @@ export async function rerankerChunks(query, chunks, options = {}) {
 
     const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 200, taskName: 'reranking' }) || '';
 
-    // Parse scores
-    const jsonMatch = text.match(/\[[\d,\s.]+\]/);
-    if (!jsonMatch) {
-      return candidates.slice(0, topK);
-    }
+    const scores = await parseLLMJson(text, 'array', { context: 'chunk_reranking', fallback: null });
+    if (!Array.isArray(scores)) return candidates.slice(0, topK);
 
-    const scores = JSON.parse(jsonMatch[0]);
-
-    // Attach scores and re-sort
-    const scored = candidates.map((chunk, i) => ({
-      ...chunk,
-      rerank_score: scores[i] || 0,
-      original_rank: i
-    }));
+    // Attach scores and compute blended rank. The LLM reranker (gpt-5-nano) can give
+    // unreliable scores — sometimes rating irrelevant chunks 7-8 and relevant ones 3-4.
+    // Blending with the original retrieval rank (BM25 + hierarchical) prevents a single
+    // bad LLM judgment from completely burying the correct chunk.
+    const scored = candidates.map((chunk, i) => {
+      const llmScore = scores[i] || 0;
+      // Original rank bonus: position 0 → 10 points, position 9 → 1 point
+      const rankBonus = Math.max(0, 10 - i) * 0.3;
+      return {
+        ...chunk,
+        rerank_score: llmScore + rankBonus,
+        rerank_score_raw: llmScore,
+        original_rank: i
+      };
+    });
 
     scored.sort((a, b) => b.rerank_score - a.rerank_score);
 
-    const results = scored
-      .filter(c => c.rerank_score >= minScore * 10)
-      .slice(0, topK);
+    // Filter by absolute minimum score
+    let results = scored.filter(c => c.rerank_score >= minScore * 10);
+
+    // Score-gap cutoff: if there's a significant gap in raw LLM scores between
+    // consecutive chunks, only keep the ones above the gap. Uses raw scores (no rank
+    // bonus) so the gap reflects actual LLM relevance judgments.
+    if (results.length > 3 && (results[0].rerank_score_raw || 0) >= 6) {
+      const GAP_THRESHOLD = 3;
+      for (let i = 1; i < results.length; i++) {
+        const drop = (results[i - 1].rerank_score_raw || 0) - (results[i].rerank_score_raw || 0);
+        if (drop >= GAP_THRESHOLD && i >= 2) {
+          results = results.slice(0, i);
+          break;
+        }
+      }
+    }
+
+    results = results.slice(0, topK);
 
     // Cache results
     rerankerCache.set(cacheKey, { results, timestamp: Date.now() });
@@ -130,13 +150,8 @@ export async function rerankerNodes(query, nodes, options = {}) {
     const prompt = getPrompt('nodeReranking', lang, query, nodeTexts);
 
     const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 100, taskName: 'node_reranking' }) || '';
-    const jsonMatch = text.match(/\[[\d,\s.]+\]/);
-
-    if (!jsonMatch) {
-      return nodes.slice(0, topK);
-    }
-
-    const scores = JSON.parse(jsonMatch[0]);
+    const scores = await parseLLMJson(text, 'array', { context: 'node_reranking', fallback: null });
+    if (!Array.isArray(scores)) return nodes.slice(0, topK);
 
     const scored = nodes.map((node, i) => ({
       ...node,

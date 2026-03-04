@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getNode, getRelatedNodes, getPathToNode, getChildren, getAncestors } from "../kg/graphTraversal.js";
 import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
@@ -216,9 +217,8 @@ Return JSON:
 
   try {
     const text = await callLLM({ prompt, taskName: 'reasoning' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-
-    const result = JSON.parse(jsonMatch[1] || text);
+    const result = await parseLLMJson(text, 'object', { context: 'reasoning', fallback: null });
+    if (!result) throw new Error('Failed to parse reasoning JSON');
 
     return {
       success: true,

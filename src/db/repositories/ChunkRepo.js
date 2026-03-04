@@ -120,12 +120,13 @@ export const ChunkRepo = {
 
   /** BM25 full-text search via chunks_fts. Returns rows with a `score` column. */
   bm25Search(safeQuery, limit = 50) {
+    // Column weights: chunk_id col = 0 (ID, not content), content col = 1.0
     return db.prepare(`
-      SELECT c.*, -bm25(chunks_fts) as score
+      SELECT c.*, -bm25(chunks_fts, 0, 1) as score
       FROM chunks_fts
       JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
       WHERE chunks_fts MATCH ? AND c.status = 'active'
-      ORDER BY bm25(chunks_fts) ASC
+      ORDER BY bm25(chunks_fts, 0, 1) ASC
       LIMIT ?
     `).all(safeQuery, limit);
   },
@@ -270,20 +271,20 @@ export const ChunkRepo = {
     if (!safeQ) return [];
     if (excludeChunkId != null) {
       return db.prepare(`
-        SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
+        SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts, 0, 1) AS bm25_score
         FROM chunks_fts
         JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
         WHERE chunks_fts MATCH ? AND c.node_id = ? AND c.status = 'active' AND c.id != ?
-        ORDER BY bm25(chunks_fts) ASC
+        ORDER BY bm25(chunks_fts, 0, 1) ASC
         LIMIT ?
       `).all(safeQ, nodeId, excludeChunkId, Math.max(1, Math.floor(Number(limit))));
     }
     return db.prepare(`
-      SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts) AS bm25_score
+      SELECT c.id, c.content_clean, c.authority_level, c.source_documents_json, -bm25(chunks_fts, 0, 1) AS bm25_score
       FROM chunks_fts
       JOIN chunks c ON c.id = CAST(chunks_fts.chunk_id AS INTEGER)
       WHERE chunks_fts MATCH ? AND c.node_id = ? AND c.status = 'active'
-      ORDER BY bm25(chunks_fts) ASC
+      ORDER BY bm25(chunks_fts, 0, 1) ASC
       LIMIT ?
     `).all(safeQ, nodeId, Math.max(1, Math.floor(Number(limit))));
   },
@@ -303,6 +304,12 @@ export const ChunkRepo = {
     return db.prepare(
       "UPDATE chunks SET superseded_by = ?, status = 'superseded' WHERE id = ?"
     ).run(newChunkId, existingId);
+  },
+
+  /** Delete a chunk and its FTS entry by primary key. */
+  deleteById(id) {
+    db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?').run(String(id));
+    db.prepare('DELETE FROM chunks WHERE id = ?').run(id);
   },
 
   /** INSERT a Knowledge Point row (includes KP-specific columns). */

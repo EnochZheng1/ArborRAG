@@ -87,6 +87,17 @@ export const JobRepo = {
     ).all();
   },
 
+  saveCheckpoint(jobId, data) {
+    db.prepare(
+      "UPDATE ingestion_jobs SET checkpoint_json = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(data === null ? null : JSON.stringify(data), jobId);
+  },
+
+  loadCheckpoint(jobId) {
+    const row = db.prepare("SELECT checkpoint_json FROM ingestion_jobs WHERE id = ?").get(jobId);
+    return row?.checkpoint_json ? safeJson(row.checkpoint_json, null) : null;
+  },
+
   // ── Pump functions (explicit conn for transaction safety) ───────────────────
 
   claimNext(conn) {
@@ -121,6 +132,7 @@ export const JobRepo = {
     conn.prepare(`
       UPDATE ingestion_jobs
       SET status = 'completed', document_id = ?, result_json = ?,
+          checkpoint_json = NULL,
           finished_at = datetime('now'), updated_at = datetime('now')
       WHERE id = ?
     `).run(documentId, JSON.stringify(result ?? null), jobId);

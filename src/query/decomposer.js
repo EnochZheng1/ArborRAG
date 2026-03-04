@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -74,18 +75,9 @@ JSON only:`;
 
     const text = await callLLM({ prompt, temperature: 0.2, maxOutputTokens: 500, taskName: 'query_decomposition' }) || '';
 
-    // Parse JSON
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return {
-        isComplex: false,
-        original: query,
-        subQueries: [{ query, type: 'direct', priority: 1 }],
-        strategy: 'direct'
-      };
-    }
-
-    const result = JSON.parse(jsonMatch[0]);
+    const simpleFallback = { isComplex: false, original: query, subQueries: [{ query, type: 'direct', priority: 1 }], strategy: 'direct' };
+    const result = await parseLLMJson(text, 'object', { context: 'query_decomposition', fallback: simpleFallback });
+    if (!result || result === simpleFallback) return simpleFallback;
     result.original = query;
 
     // Validate and clean

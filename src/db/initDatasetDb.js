@@ -84,6 +84,7 @@ function runMigrations(conn) {
   ensureColumn(conn, "ingestion_jobs", "started_at", "started_at TEXT");
   ensureColumn(conn, "ingestion_jobs", "finished_at", "finished_at TEXT");
   ensureColumn(conn, "ingestion_jobs", "updated_at", "updated_at TEXT");
+  ensureColumn(conn, "ingestion_jobs", "checkpoint_json", "checkpoint_json TEXT DEFAULT NULL");
 
   // Embeddings
   ensureColumn(conn, "embeddings", "ref_type", "ref_type TEXT");

@@ -56,38 +56,34 @@ export async function generateAnswerWithCitations(query, context, sources, optio
 
     // Use bilingual prompts based on detected language
     const prompt = isChineseLang(detectedLang)
-      ? `使用提供的来源回答问题。使用[n]格式添加内联引用。
+      ? `根据以下来源回答问题。在每个事实性陈述后添加[n]引用。
 
 问题: ${query}
 
 来源:
 ${sourceList}
 
-说明:
-1. 基于来源回答问题
-2. 在引用来源的陈述后添加引用编号[1]、[2]等
-3. 如果多个来源支持一个观点，全部引用: [1][3]
-4. 如果信息不在来源中，请说明
-5. 简洁但全面
-6. 使用中文回答
+规则:
+- 回答前请阅读所有来源——相关信息可能在任何一个来源中。
+- 准确引用数字、日期和名称。
+- 在每个陈述后添加[1]、[2]等引用编号。
+- 简洁直接地回答。
 
-带引用的回答:`
-      : `Answer the question using ONLY the provided sources. Include inline citations using [n] format.
+回答:`
+      : `Answer the question using the provided sources. Add [n] citations after each factual claim.
 
 Question: ${query}
 
 Sources:
 ${sourceList}
 
-Instructions:
-1. Answer the question based on the sources
-2. Add citation numbers [1], [2], etc. after statements from those sources
-3. If multiple sources support a point, cite all: [1][3]
-4. If information isn't in sources, say so
-5. Be concise but thorough
-6. Answer in English
+Rules:
+- Read ALL sources before answering — the relevant information may be in any source.
+- Extract and quote specific numbers, dates, and names exactly as written.
+- Add [1], [2] etc. after each claim to indicate the source.
+- Answer directly and concisely.
 
-Answer with citations:`;
+Answer:`;
 
     const answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
 

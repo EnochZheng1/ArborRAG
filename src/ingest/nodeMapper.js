@@ -3,6 +3,7 @@ import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
@@ -29,9 +30,9 @@ export function findBestNodeMatch(chunk) {
   ].join(" ");
 
   // Use BM25 to find candidates
-  // 20 candidates (was 10) — in large KBs the correct node can rank 11–15;
-  // the old cap meant it was never considered during ingestion mapping.
-  const candidates = bm25RecallNodes(searchTerms, 20);
+  // 30 candidates — in large KBs the correct node can rank 20+;
+  // raising the cap ensures it's always considered during ingestion mapping.
+  const candidates = bm25RecallNodes(searchTerms, 30);
 
   if (candidates.length === 0) {
     return null;
@@ -95,9 +96,12 @@ export async function suggestNodeWithLLM(chunk, candidates) {
   const prompt = getPrompt('nodeSuggestion', lang, chunkPreview, keywords, nodeList, noExisting);
 
   try {
-    const text = await callLLM({ prompt, temperature: 0.1, taskName: 'node_suggestion' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-    return JSON.parse(jsonMatch[1] || text);
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'node_suggestion' }) ?? "{}";
+    return await parseLLMJson(text, 'object', { context: 'node_suggestion', fallback: null }) ?? {
+      selected_index: candidates.length > 0 ? 1 : 0,
+      confidence: 0.3,
+      reasoning: isChineseLang(lang) ? "LLM调用失败,使用后备方案" : "LLM call failed, using fallback"
+    };
   } catch (err) {
     rethrowIfRateLimit(err);
     logger.error("LLM node suggestion failed:", err.message);
@@ -561,10 +565,11 @@ function ensureRootNode() {
 
 // ── KP topical hierarchy helpers ──────────────────────────────────────────────
 
-// Lowered from 0.55 → 0.40: reduces duplicate node creation when LLM produces
-// slightly different phrasings of the same topic across runs (e.g. "Employee Benefits"
-// vs "Benefits" vs "HR Benefits").
-const TOPIC_MATCH_THRESHOLD = 0.40;
+// Lowered from 0.40 → 0.35: slightly more aggressive reuse.
+// Node lookup now uses a direct DB sibling scan (not BM25) so every sibling
+// is considered; a lower threshold is safe because we're comparing against the
+// full sibling set rather than a potentially incomplete BM25 top-10.
+const TOPIC_MATCH_THRESHOLD = 0.35;
 // wordDiceSimilarity imported from knowledgeExtractor.js
 
 // Generic/placeholder topic hints that the LLM returns when it can't classify.
@@ -591,7 +596,8 @@ function normalizeTopicHint(hint) {
 
 /**
  * Find or create a topical node under a given parent.
- * Uses BM25 search + Dice similarity to reuse existing nodes when possible.
+ * Scans ALL direct siblings via DB (not BM25) so no sibling is silently missed,
+ * then uses Dice similarity to reuse an existing node when possible.
  * Returns { ...nodeObject, _created: boolean }.
  */
 async function findOrCreateTopicNode(topicName, parentId, options = {}) {
@@ -601,25 +607,19 @@ async function findOrCreateTopicNode(topicName, parentId, options = {}) {
     return { ...ensureRootNode(), _created: false };
   }
 
-  // Search for existing nodes with similar name
+  // Scan all direct siblings in the DB — guaranteed to see every existing node
+  // under this parent, unlike BM25 which only returns a capped top-N result set.
   try {
-    const candidates = searchNodesByName(topicName, 10);
-
-    // Filter to same parent and score each by name similarity
-    const sameParent = candidates.filter(c => {
-      const node = c.node || c;
-      return node.parent_id === parentId;
-    });
+    const siblings = NodeRepo.findByParent(parentId);
 
     let bestMatch = null;
     let bestScore = 0;
 
-    for (const c of sameParent) {
-      const node = c.node || c;
-      const score = wordDiceSimilarity(topicName.toLowerCase(), (node.name || "").toLowerCase());
+    for (const sibling of siblings) {
+      const score = wordDiceSimilarity(topicName.toLowerCase(), (sibling.name || "").toLowerCase());
       if (score > bestScore) {
         bestScore = score;
-        bestMatch = node;
+        bestMatch = sibling;
       }
     }
 
@@ -628,8 +628,8 @@ async function findOrCreateTopicNode(topicName, parentId, options = {}) {
       return { ...bestMatch, _created: false };
     }
 
-    // Borderline match — ask LLM
-    if (useLLM && bestScore >= 0.35 && bestMatch) {
+    // Borderline match — ask LLM to confirm
+    if (useLLM && bestScore >= 0.25 && bestMatch) {
       try {
         const suggestion = await suggestNodeWithLLM(
           { content: topicName, keywords: [topicName] },
@@ -642,7 +642,7 @@ async function findOrCreateTopicNode(topicName, parentId, options = {}) {
       } catch (_) { /* non-fatal */ }
     }
   } catch (err) {
-    logger.warn(`Topic node search failed for "${topicName}": ${err.message}`);
+    logger.warn(`Topic node sibling scan failed for "${topicName}": ${err.message}`);
   }
 
   // Create new topical node
@@ -659,6 +659,70 @@ async function findOrCreateTopicNode(topicName, parentId, options = {}) {
 }
 
 /**
+ * Canonicalize topic hints before building the hierarchy.
+ *
+ * For each unique (non-General) topic in the incoming KP batch, recall the
+ * top candidate nodes via BM25 and ask the LLM whether the topic is
+ * semantically equivalent to any of them.  If yes, remap the topic to the
+ * existing node's name so `findOrCreateTopicNode` will reuse it.
+ *
+ * Makes one LLM call per unique topic — typically 3–10 calls per ingestion.
+ * Fails silently so ingestion always completes even when the LLM is down.
+ *
+ * @param {string[]} uniqueTopics   - already-normalised unique topic names
+ * @param {boolean}  useLLM
+ * @returns {Map<string, string>}   original topic → canonical name (only remapped entries)
+ */
+async function canonicalizeTopicHints(uniqueTopics, useLLM) {
+  const mapping = new Map();
+  if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) return mapping;
+
+  for (const topic of uniqueTopics) {
+    if (topic === 'General') continue;
+
+    try {
+      // Recall top candidates using BM25 (pre-filter, not all nodes)
+      const candidates = searchNodesByName(topic, 12);
+      if (!candidates.length) continue;
+
+      const candidateNames = candidates
+        .map(c => (c.node || c).name)
+        .filter(Boolean)
+        .filter((n, i, arr) => arr.indexOf(n) === i) // deduplicate
+        .slice(0, 12);
+
+      const prompt = `You are organizing a knowledge graph. A new document has a topic category.
+
+New topic: "${topic}"
+
+Candidate existing nodes in the graph:
+${candidateNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}
+
+Is the new topic semantically equivalent to any candidate (same concept, possibly different phrasing)?
+- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim)
+- If NO: respond with EXACTLY "${topic}"
+
+Respond with ONLY the chosen name, nothing else.`;
+
+      const result = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'topic_canonicalization' });
+      if (!result) continue;
+
+      const canonical = result.trim().replace(/^["']|["']$/g, '');
+
+      // Only accept the LLM's answer if it exactly matches a candidate name
+      if (candidateNames.includes(canonical) && canonical !== topic) {
+        mapping.set(topic, canonical);
+        logger.info(`Topic canonicalized: "${topic}" → "${canonical}"`);
+      }
+    } catch (err) {
+      logger.warn(`Topic canonicalization failed for "${topic}": ${err.message}`);
+    }
+  }
+
+  return mapping;
+}
+
+/**
  * Group KPs into a 2–3 level topical hierarchy and return a map of
  * kp.index → nodeId for every KP, plus a list of newly created nodes.
  */
@@ -666,6 +730,21 @@ async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
   const { useLLM = true } = options;
 
   ensureRootNode();
+
+  // ── Step 0: Canonicalize topic hints via LLM (pre-filters duplicates) ─────
+  // Collect unique (non-General) topics from this batch and ask the LLM
+  // whether any map to an existing node under a different phrasing.
+  const uniqueTopics = [...new Set(kps.map(kp => normalizeTopicHint(kp.topic_hint)))];
+  const topicMapping = await canonicalizeTopicHints(uniqueTopics, useLLM);
+  if (topicMapping.size > 0) {
+    for (const kp of kps) {
+      const normalized = normalizeTopicHint(kp.topic_hint);
+      if (topicMapping.has(normalized)) {
+        kp.topic_hint = topicMapping.get(normalized);
+      }
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const nodeMap  = new Map();    // kp.index → nodeId
   const newNodes = [];
@@ -794,47 +873,69 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
     const { nodeMap, newNodes } = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });
     results.newNodes.push(...newNodes);
 
-    for (const kp of chunks) {
-      const targetNodeId = nodeMap.get(kp.index) || "root";
+    // Phase 1 — parallel LLM decisions (batches of 8)
+    const KP_BATCH = 8;
+    const allDecisions = [];
 
-      const decision = await resolveKPAction(kp, targetNodeId, documentId, { useLLM });
+    for (let b = 0; b < chunks.length; b += KP_BATCH) {
+      const batch = chunks.slice(b, b + KP_BATCH);
+      const settled = await Promise.allSettled(
+        batch.map(kp => {
+          const targetNodeId = nodeMap.get(kp.index) || "root";
+          return resolveKPAction(kp, targetNodeId, documentId, { useLLM })
+            .then(decision => ({ kp, decision, targetNodeId }));
+        })
+      );
+      allDecisions.push(...settled);
+    }
 
-      switch (decision.action) {
-        case "IGNORE":
-          results.ignored = (results.ignored || 0) + 1;
-          logger.debug(`KP ignored: ${decision.reason}`);
-          break;
-
-        case "MERGE":
-          results.mapped.push({
-            chunkIndex: kp.index, chunkId: decision.chunkId,
-            nodeId: targetNodeId, merge: true, queued: false
-          });
-          break;
-
-        case "REPLACE": {
-          // Insert the new KP first, then supersede the old one
-          const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
-          ChunkRepo.supersede(decision.chunkId, newChunkId);
-          results.mapped.push({
-            chunkIndex: kp.index, chunkId: newChunkId,
-            nodeId: targetNodeId, replace: true
-          });
-          break;
+    // Phase 2 — single-transaction batch DB writes
+    // better-sqlite3 promotes inner .transaction() calls to SAVEPOINT when an outer
+    // transaction is active, so nesting is safe and well-documented.
+    runTransaction(() => {
+      for (const outcome of allDecisions) {
+        if (outcome.status === 'rejected') {
+          rethrowIfRateLimit(outcome.reason);
+          logger.warn(`KP decision failed: ${outcome.reason.message}`);
+          continue;
         }
+        const { kp, decision, targetNodeId } = outcome.value;
+        switch (decision.action) {
+          case "IGNORE":
+            results.ignored = (results.ignored || 0) + 1;
+            logger.debug(`KP ignored: ${decision.reason}`);
+            break;
 
-        case "NORMALIZE_THEN_STORE":
-        case "STORE":
-        default: {
-          const chunkId = assignKPToNode(kp, targetNodeId, documentId);
-          results.mapped.push({
-            chunkIndex: kp.index, chunkId, nodeId: targetNodeId,
-            queued: decision.queued ?? false
-          });
-          break;
+          case "MERGE":
+            results.mapped.push({
+              chunkIndex: kp.index, chunkId: decision.chunkId,
+              nodeId: targetNodeId, merge: true, queued: false
+            });
+            break;
+
+          case "REPLACE": {
+            const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
+            ChunkRepo.supersede(decision.chunkId, newChunkId);
+            results.mapped.push({
+              chunkIndex: kp.index, chunkId: newChunkId,
+              nodeId: targetNodeId, replace: true
+            });
+            break;
+          }
+
+          case "NORMALIZE_THEN_STORE":
+          case "STORE":
+          default: {
+            const chunkId = assignKPToNode(kp, targetNodeId, documentId);
+            results.mapped.push({
+              chunkIndex: kp.index, chunkId,
+              nodeId: targetNodeId, queued: decision.queued ?? false
+            });
+            break;
+          }
         }
       }
-    }
+    });
 
     // Generate aliases for new nodes
     if (useLLM && results.newNodes.length > 0) {
@@ -1073,8 +1174,7 @@ export async function generateNodeAliases(nodeId, options = {}) {
 
   try {
     const text = await callLLM({ prompt, taskName: 'alias_generation' }) ?? "[]";
-    const jsonMatch = text.match(/\[[\s\S]*?\]/);
-    const aliases = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    const aliases = await parseLLMJson(text, 'array', { context: 'alias_generation', fallback: [] });
 
     // Filter and clean aliases
     const validAliases = aliases

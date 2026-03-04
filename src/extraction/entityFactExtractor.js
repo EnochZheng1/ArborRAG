@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { safeJson } from "../db/db.js";
 import { EntityFactRepo } from "../db/repositories/EntityFactRepo.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
@@ -73,8 +74,12 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     try {
       extracted = JSON.parse(jsonStr);
     } catch (parseError) {
-      // Try to repair common JSON issues
+      // Pass 1: fast string-based repairs (trailing commas, unclosed brackets, etc.)
       extracted = tryRepairAndParseJSON(jsonStr);
+      // Pass 2: LLM repair fallback if string repair also failed
+      if (!extracted) {
+        extracted = await parseLLMJson(jsonStr, 'object', { context: 'entity_extraction', fallback: null });
+      }
       if (!extracted) {
         logger.warn('Entity extraction: JSON repair failed, falling back to rules');
         return extractWithRules(content, chunk);

@@ -69,8 +69,14 @@ function escapeRegex(str) {
  * @returns {{start: number, end: number, score: number}}
  */
 function findBestWindow(content, queryTerms, windowSize = 200) {
-  if (!content || content.length <= windowSize) {
-    return { start: 0, end: content?.length || 0, score: 0 };
+  if (!content) {
+    return { start: 0, end: 0, score: 0 };
+  }
+  // When content fits within the window, the whole content IS the snippet.
+  // Still score it so short KP chunks (atomic statements) aren't silently dropped.
+  if (content.length <= windowSize) {
+    const score = scoreWindow(content, queryTerms);
+    return { start: 0, end: content.length, score };
   }
 
   let bestWindow = { start: 0, end: windowSize, score: 0 };

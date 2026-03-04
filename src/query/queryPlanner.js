@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { classifyQuery, QUERY_TYPES } from "./classifier.js";
 import { logger } from "../utils/logger.js";
 
@@ -229,9 +230,7 @@ Return JSON only:
 
   try {
     const text = await callLLM({ prompt, taskName: 'query_planning' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-
-    return JSON.parse(jsonMatch[1] || text);
+    return await parseLLMJson(text, 'object', { context: 'query_planning', fallback: null });
   } catch (err) {
     logger.warn(`LLM planning failed: ${err.message}`);
     return null;

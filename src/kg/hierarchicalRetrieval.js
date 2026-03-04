@@ -254,15 +254,26 @@ function getNodeChunks(nodeId, query, limit = 10) {
       }
     }
 
-    // Numeric exact-match bonus — BM25 IDF down-weights short numbers ("8", "20",
-    // "50") because they appear across many chunks. Compensate so the answer chunk
-    // containing the exact figure the user asked about isn't buried by prose chunks.
-    for (const num of (query.match(/\b\d+(?:\.\d+)?\b/g) || [])) {
+    // Numeric boost — query-aware scoring instead of a flat +0.35 for any number.
+    // BM25 IDF down-weights short numbers ("3","8","20") because they appear in
+    // many chunks. Differentiated boost ensures the chunk containing the exact
+    // figure the user asked for surfaces above prose-heavy chunks.
+    const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
+    const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长/i.test(query);
+
+    let numericBoost = 0;
+    for (const num of queryNumbers) {
       if (new RegExp(`\\b${num}\\b`).test(contentLower)) {
-        relevance += 0.35;
-        break; // one numeric match per chunk is sufficient
+        numericBoost = Math.max(numericBoost, 0.5);
       }
     }
+    // Numeric-seeking query ("how many...") with no exact number match:
+    // mildly boost any chunk that contains numbers — it's more likely to hold
+    // the answer than a pure-prose chunk.
+    if (isNumericQuery && numericBoost === 0 && /\d/.test(contentLower)) {
+      numericBoost = 0.25;
+    }
+    relevance += numericBoost;
 
     return {
       id: r.id,
@@ -735,7 +746,13 @@ export async function hierarchicalRetrieve(query, options = {}) {
     {
       top_nodes: topNodes,
       paths: topPaths,
-      max_depth_reached: maxDepthReached
+      max_depth_reached: maxDepthReached,
+      all_nodes: relevantNodes.map(n => ({
+        name: n.name,
+        score: Number((n.relevance_score || 0).toFixed(3)),
+        depth: n.depth,
+        path: formatPath(n.path)
+      }))
     }
   );
 

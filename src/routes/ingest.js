@@ -47,7 +47,7 @@ const upload = multer({
       cb(new Error(`Unsupported file type. Supported: ${getSupportedExtensions().join(", ")}`));
     }
   },
-  limits: { fileSize: 50 * 1024 * 1024 } // 50 MB
+  limits: { fileSize: (Number(process.env.INGEST_MAX_FILE_MB) || 200) * 1024 * 1024 }
 });
 
 // ==================== UPLOAD ====================
@@ -59,11 +59,10 @@ router.post("/upload", upload.single("file"), (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+      const { targetNodeId, useLLM = true, sync = false } = req.body || {};
       const processOptions = {
         targetNodeId,
         useLLM: useLLM === "true" || useLLM === true,
-        detectConflicts: detectConflicts === "true" || detectConflicts === true,
         originalName: req.file.originalname
       };
 
@@ -99,7 +98,7 @@ router.post("/upload", upload.single("file"), (req, res) => {
 });
 
 // Upload and process multiple files
-router.post("/upload/batch", upload.array("files", 20), (req, res) => {
+router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX_BATCH_FILES) || 100), (req, res) => {
   // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
   runWithDb(req.datasetConn, async () => {
     try {
@@ -107,11 +106,10 @@ router.post("/upload/batch", upload.array("files", 20), (req, res) => {
         return res.status(400).json({ error: "No files uploaded" });
       }
 
-      const { targetNodeId, useLLM = true, detectConflicts = true, sync = false } = req.body || {};
+      const { targetNodeId, useLLM = true, sync = false } = req.body || {};
       const processOptions = {
         targetNodeId,
-        useLLM: useLLM === "true" || useLLM === true,
-        detectConflicts: detectConflicts === "true" || detectConflicts === true
+        useLLM: useLLM === "true" || useLLM === true
       };
 
       if (sync === "true" || sync === true) {

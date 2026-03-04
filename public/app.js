@@ -49,6 +49,36 @@ function initWebSocket() {
   _ws.addEventListener('error', () => { /* close will fire next */ });
 }
 
+// ── Pipeline stage definitions for the progress tracker ──────────────────────
+const PIPELINE_STAGES = [
+  { key: 'parse',              label: 'Parse' },
+  { key: 'register',          label: 'Register' },
+  { key: 'kp_extraction',     label: 'Extract KPs' },
+  { key: 'mapping_chunks',    label: 'Map to Tree' },
+  { key: 'entity_extraction', label: 'Entities' },
+  { key: 'finalizing',        label: 'Finalize' },
+];
+// Maps every pipeline step name → PIPELINE_STAGES index (0-5).
+// Terminal steps (completed/failed) are handled before _renderStageTracker is
+// called, so they don't need entries here.
+const STEP_TO_STAGE = {
+  parse: 0, register: 1,
+  kp_extraction: 2,
+  mapping_chunks: 3, generating_aliases: 3,
+  entity_extraction: 4,
+  finalizing: 5,
+};
+
+/** Render the 6-step stage tracker row. */
+function _renderStageTracker(activeStageIdx) {
+  return `<div class="job-stage-tracker">` +
+    PIPELINE_STAGES.map((s, i) => {
+      const cls = i < activeStageIdx ? 'done' : i === activeStageIdx ? 'active' : 'pending';
+      return `<div class="stage-step ${cls}"><div class="stage-dot"></div><span class="stage-label">${s.label}</span></div>`;
+    }).join('') +
+  `</div>`;
+}
+
 function _handleJobProgress({ jobId, step, progress, message, status }) {
   const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
 
@@ -59,10 +89,11 @@ function _handleJobProgress({ jobId, step, progress, message, status }) {
       progressEl.innerHTML = '';
     } else {
       const pct = Math.max(0, Math.min(100, progress || 0));
-      const stepLabel = (step || '').replace(/_/g, ' ');
+      const stageIdx = STEP_TO_STAGE[step] ?? 0;
       progressEl.innerHTML = `
         <div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>
-        <p class="job-stage-msg">${escapeHtml(stepLabel)}${message ? ' — ' + escapeHtml(message) : ''}</p>
+        ${_renderStageTracker(stageIdx)}
+        ${message ? `<p class="job-stage-msg">${escapeHtml(message)}</p>` : ''}
       `;
     }
   }
@@ -96,7 +127,6 @@ const i18n = {
     supported_formats: 'Supported: PDF, DOCX, XLSX, HTML, TXT, MD, CSV, JSON',
     target_node: 'Target Node (optional)',
     use_llm_extraction: 'Use LLM for metadata extraction',
-    detect_conflicts: 'Detect conflicts',
     selected_files: 'Selected Files',
     upload_btn: 'Upload & Process',
     documents_title: 'Documents',
@@ -107,7 +137,6 @@ const i18n = {
     chunks: 'Chunks',
     uploaded: 'Uploaded',
     actions: 'Actions',
-    conflicts_title: 'Conflicts',
     stats_title: 'System Statistics',
     sync_embeddings: 'Sync Embeddings',
     node_id: 'Node ID',
@@ -118,9 +147,6 @@ const i18n = {
     create: 'Create',
     delete: 'Delete',
     resolve: 'Resolve',
-    keep_a: 'Keep Chunk A',
-    keep_b: 'Keep Chunk B',
-    keep_both: 'Keep Both',
     no_results: 'No results found',
     error: 'An error occurred',
     success: 'Operation successful',
@@ -200,24 +226,8 @@ const i18n = {
     graph_view: 'Graph View',
     theme_light: 'Light Mode',
     theme_dark: 'Dark Mode',
-    conflict_explainer_title: 'What is a conflict?',
-    conflict_explainer_body: 'A conflict means two chunks under the same node contain incompatible facts or requirements. Review both chunks and keep the one you trust.',
-    conflict_reason: 'Why this is flagged',
-    conflict_recommendation: 'Recommendation',
-    conflict_type_numeric_contradiction: 'Numeric contradiction',
-    conflict_type_statement_contradiction: 'Statement contradiction',
-    conflict_type_semantic_conflict: 'Semantic conflict',
-    conflict_type_factual_conflict: 'Factual conflict',
-    total_conflicts: 'Total Conflicts',
-    unresolved: 'Unresolved',
-    resolved: 'Resolved',
-    no_unresolved_conflicts: 'No unresolved conflicts',
-    conflict_node_label: 'Node',
-    conflict_chunk_a: 'Chunk A',
-    conflict_chunk_b: 'Chunk B',
     unknown: 'Unknown',
     no_content: 'No content',
-    conflict_reason_default: 'Potentially incompatible information detected between these two chunks.',
     datasets_title: 'Datasets',
     new_dataset: '+ New Dataset',
     dataset_active: 'Active',
@@ -268,7 +278,6 @@ const i18n = {
     chunks: '分块数',
     uploaded: '上传时间',
     actions: '操作',
-    conflicts_title: '冲突管理',
     stats_title: '系统统计',
     sync_embeddings: '同步嵌入向量',
     node_id: '节点 ID',
@@ -279,9 +288,6 @@ const i18n = {
     create: '创建',
     delete: '删除',
     resolve: '解决',
-    keep_a: '保留分块 A',
-    keep_b: '保留分块 B',
-    keep_both: '保留两者',
     no_results: '未找到结果',
     error: '发生错误',
     success: '操作成功',
@@ -361,24 +367,8 @@ const i18n = {
     graph_view: '图形视图',
     theme_light: '浅色模式',
     theme_dark: '深色模式',
-    conflict_explainer_title: '什么是冲突？',
-    conflict_explainer_body: '冲突意味着同一节点下的两段内容存在事实或要求不一致。请对比两段内容，保留你信任的版本。',
-    conflict_reason: '标记原因',
-    conflict_recommendation: '处理建议',
-    conflict_type_numeric_contradiction: '数值冲突',
-    conflict_type_statement_contradiction: '陈述冲突',
-    conflict_type_semantic_conflict: '语义冲突',
-    conflict_type_factual_conflict: '事实冲突',
-    total_conflicts: '总冲突数',
-    unresolved: '未解决',
-    resolved: '已解决',
-    no_unresolved_conflicts: '当前没有未解决的冲突',
-    conflict_node_label: '节点',
-    conflict_chunk_a: '分块 A',
-    conflict_chunk_b: '分块 B',
     unknown: '未知',
     no_content: '无内容',
-    conflict_reason_default: '系统检测到这两段内容可能互相不一致。',
     datasets_title: '数据集',
     new_dataset: '+ 新建数据集',
     dataset_active: '当前',
@@ -416,6 +406,7 @@ let currentGraphView = 'list'; // 'list' or 'graph'
 let currentDatasetId = 'default';
 let currentDatasetName = 'Default';
 let allDatasets = [];
+let selectedDatasetIds = new Set();
 const DATASET_KEY = 'treekb_dataset_id';
 
 // Query History Management
@@ -547,7 +538,6 @@ document.addEventListener('DOMContentLoaded', () => {
   initTree();
   initUpload();
   initDocuments();
-  initConflicts();
   initDecisions();
   initTests();
   initStats();
@@ -610,7 +600,6 @@ function initTabs() {
       // Load data for specific tabs
       if (tabId === 'tree') loadTree();
       if (tabId === 'documents') loadDocuments();
-      if (tabId === 'conflicts') loadConflicts();
       if (tabId === 'decisions') loadDecisions();
       if (tabId === 'tests') loadTests();
       if (tabId === 'stats') loadStats();
@@ -1723,6 +1712,182 @@ function shouldExpandTraceStepByDefault(step, index, totalSteps) {
   return stepName.includes('hierarchical retrieval complete') || stepName.includes('final chunk selection');
 }
 
+// ── Query Visualization ────────────────────────────────────────────────────
+
+function buildTreeFromPaths(allNodes) {
+  if (!Array.isArray(allNodes) || allNodes.length === 0) return null;
+  const root = { name: 'Knowledge Tree', children: [], score: 0, depth: -1 };
+  for (const node of allNodes) {
+    const path = Array.isArray(node.path) && node.path.length > 0
+      ? node.path
+      : [node.name];
+    let cur = root;
+    for (let d = 0; d < path.length; d++) {
+      const segName = path[d];
+      let child = cur.children.find(c => c.name === segName);
+      if (!child) {
+        const match = allNodes.find(n => n.name === segName && n.depth === d);
+        child = { name: segName, children: [], score: match ? match.score : 0, depth: d };
+        cur.children.push(child);
+      }
+      cur = child;
+    }
+  }
+  return root;
+}
+
+function renderTreeSvg(root) {
+  const NODE_W = 140, NODE_H = 32, COL_W = 170, MARGIN = 12, ROW_GAP = 8;
+
+  // Count leaves for height calculation
+  function countLeaves(node) {
+    if (node.children.length === 0) return 1;
+    return node.children.reduce((s, c) => s + countLeaves(c), 0);
+  }
+
+  // Assign layout positions: y is the vertical center of the node's allocated band
+  function assignPositions(node, depth, yStart, yEnd) {
+    const x = depth * COL_W + MARGIN;
+    const y = (yStart + yEnd) / 2;
+    node._x = x;
+    node._y = y;
+    node._depth = depth;
+
+    if (node.children.length > 0) {
+      const totalLeaves = countLeaves(node);
+      let yOff = yStart;
+      for (const child of node.children) {
+        const childLeaves = countLeaves(child);
+        const childHeight = (yEnd - yStart) * (childLeaves / totalLeaves);
+        assignPositions(child, depth + 1, yOff, yOff + childHeight);
+        yOff += childHeight;
+      }
+    }
+  }
+
+  // Decide whether to show virtual root
+  const showRoot = root.children.length > 1;
+  const topNodes = showRoot ? [root] : root.children;
+
+  // Calculate canvas dimensions
+  const leafCount = countLeaves(root);
+  const svgHeight = Math.max(60, leafCount * (NODE_H + ROW_GAP));
+  const maxDepth = (function getMaxDepth(n, d) {
+    if (n.children.length === 0) return d;
+    return Math.max(...n.children.map(c => getMaxDepth(c, d + 1)));
+  })(root, 0);
+  const svgWidth = (showRoot ? maxDepth + 1 : maxDepth) * COL_W + NODE_W + MARGIN * 2;
+
+  // Assign positions
+  if (showRoot) {
+    assignPositions(root, 0, 0, svgHeight);
+  } else {
+    // Place children as if root is hidden — distribute vertically
+    let yOff = 0;
+    const totalLeaves = countLeaves(root);
+    for (const child of root.children) {
+      const childLeaves = countLeaves(child);
+      const childHeight = svgHeight * (childLeaves / totalLeaves);
+      assignPositions(child, 0, yOff, yOff + childHeight);
+      yOff += childHeight;
+    }
+  }
+
+  // Collect all nodes and edges
+  const nodes = [];
+  const edges = [];
+  function collect(node) {
+    if (node === root && !showRoot) {
+      node.children.forEach(collect);
+      return;
+    }
+    nodes.push(node);
+    for (const child of node.children) {
+      edges.push({ parent: node, child });
+      collect(child);
+    }
+  }
+  collect(root);
+
+  // Render edges
+  let svgContent = '';
+  for (const { parent, child } of edges) {
+    const x1 = parent._x + NODE_W;
+    const y1 = parent._y;
+    const x2 = child._x;
+    const y2 = child._y;
+    const cx1 = x1 + (x2 - x1) * 0.5;
+    const cx2 = x2 - (x2 - x1) * 0.5;
+    svgContent += `<path class="tv-edge" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}"/>`;
+  }
+
+  // Render nodes
+  for (const node of nodes) {
+    const s = node.score || 0;
+    const cls = s >= 0.5 ? 'tv-node--high' : s >= 0.25 ? 'tv-node--med' : 'tv-node--low';
+    const label = node.name.length > 17 ? node.name.slice(0, 15) + '…' : node.name;
+    const scoreText = node.depth >= 0 && s > 0 ? s.toFixed(2) : '';
+    const nodeY = node._y - NODE_H / 2;
+    svgContent += `<g class="tv-node ${cls}" transform="translate(${node._x},${nodeY})">
+      <rect width="${NODE_W}" height="${NODE_H}" rx="5"/>
+      <text class="tv-label" x="${NODE_W / 2}" y="13" text-anchor="middle" dominant-baseline="auto">${escapeHtml(label)}</text>
+      ${scoreText ? `<text class="tv-score" x="${NODE_W - 4}" y="${NODE_H - 4}" text-anchor="end">${scoreText}</text>` : ''}
+    </g>`;
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" style="display:block">${svgContent}</svg>`;
+}
+
+function renderQueryVizPanel(trace) {
+  if (!trace || !trace.steps) return '';
+
+  const treeStep = trace.steps.find(s => s.name === 'Hierarchy: Top-Down Navigation');
+  const classifyStep = trace.steps.find(s => s.name === 'Query Classification');
+  const completeStep = trace.steps.find(s => s.name === 'Hierarchical Retrieval Complete');
+
+  // Classification pill
+  const queryType = classifyStep && classifyStep.result && classifyStep.result.type
+    ? classifyStep.result.type
+    : (classifyStep && classifyStep.result && typeof classifyStep.result === 'string'
+      ? classifyStep.result : null);
+  const typePill = queryType
+    ? `<span class="query-viz-pill query-viz-pill--type">${escapeHtml(queryType)}</span>`
+    : '';
+
+  // Retrieval source counts
+  let sourceHtml = '';
+  if (completeStep && completeStep.result) {
+    const r = completeStep.result;
+    const hier = r.hierarchical_chunks != null ? r.hierarchical_chunks : (r.from_hierarchy != null ? r.from_hierarchy : null);
+    const direct = r.direct_chunks != null ? r.direct_chunks : (r.from_direct != null ? r.from_direct : null);
+    const total = r.total_chunks != null ? r.total_chunks : null;
+    if (hier != null) sourceHtml += `<span class="query-viz-pill">hierarchical&nbsp;${hier}</span>`;
+    if (direct != null) sourceHtml += `<span class="query-viz-pill">direct&nbsp;${direct}</span>`;
+    if (total != null) sourceHtml += `<span class="query-viz-pill query-viz-pill--total">total&nbsp;${total}</span>`;
+  }
+
+  // Tree SVG
+  let treeHtml = '';
+  if (treeStep && treeStep.result && Array.isArray(treeStep.result.all_nodes) && treeStep.result.all_nodes.length > 0) {
+    const treeData = buildTreeFromPaths(treeStep.result.all_nodes);
+    if (treeData) {
+      treeHtml = `<div class="query-viz-tree">${renderTreeSvg(treeData)}</div>`;
+    }
+  }
+
+  // Only render panel if we have something to show
+  if (!typePill && !sourceHtml && !treeHtml) return '';
+
+  return `<div class="query-viz-panel">
+    <div class="query-viz-header">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;flex-shrink:0"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 2 12h2a8 8 0 0 1 13.66-5.66l-2.12 2.12A5 5 0 0 0 7 12H5a7 7 0 0 1 11.95-5"/></svg>
+      <span class="query-viz-title">Query Trace</span>
+      ${typePill}${sourceHtml}
+    </div>
+    ${treeHtml}
+  </div>`;
+}
+
 function renderTrace(trace) {
   if (!trace || !trace.steps || trace.steps.length === 0) {
     return '<p class="trace-empty">No trace information available</p>';
@@ -1747,8 +1912,11 @@ function renderTrace(trace) {
   });
   progressHtml += '</div>';
 
+  // Visualization panel (prepended before the toggle/step timeline)
+  const vizHtml = renderQueryVizPanel(trace);
+
   // Toggle button
-  let html = `
+  let html = vizHtml + `
     <button class="trace-toggle-btn expanded" type="button">
       <span class="trace-toggle-left">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Processing Trace (${successCount}/${stepCount} steps${totalMs ? ` \u00B7 ${totalMs}ms` : ''})
@@ -1824,6 +1992,9 @@ function initTree() {
   document.getElementById('close-add-node-modal').addEventListener('click', hideAddNodeModal);
   document.getElementById('cancel-add-node').addEventListener('click', hideAddNodeModal);
   document.getElementById('add-node-form').addEventListener('submit', handleAddNode);
+  document.getElementById('close-add-chunk-modal').addEventListener('click', hideAddChunkModal);
+  document.getElementById('cancel-add-chunk').addEventListener('click', hideAddChunkModal);
+  document.getElementById('add-chunk-form').addEventListener('submit', handleAddChunk);
 }
 
 async function handleEmptyTree() {
@@ -1976,7 +2147,20 @@ async function loadNodeDetail(nodeId) {
       api(`/nodes/${encodeURIComponent(nodeId)}/entities?debug=true`).catch(() => ({ entities: [], facts: [], debug: null }))
     ]);
 
-    nameEl.textContent = node.node?.name || node.name;
+    const nodeName = node.node?.name || node.name;
+    nameEl.textContent = nodeName;
+    // Add Content button alongside the name (insert into the header row)
+    const detailHeader = detailDiv.querySelector('.node-detail-header');
+    const existingAddBtn = detailHeader.querySelector('.add-content-btn');
+    if (!existingAddBtn) {
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn btn-primary btn-sm add-content-btn';
+      addBtn.textContent = '+ Add Content';
+      addBtn.onclick = () => showAddChunkModal(nodeId);
+      detailHeader.insertBefore(addBtn, detailHeader.querySelector('.close-btn'));
+    } else {
+      existingAddBtn.onclick = () => showAddChunkModal(nodeId);
+    }
 
     const n = node.node || node;
     const chunks = chunksData.chunks || [];
@@ -2137,12 +2321,14 @@ async function loadNodeDetail(nodeId) {
           ? sourceDocs.map(d => escapeHtml(d.doc_title || '')).join(', ')
           : escapeHtml(chunk.doc_title || 'Unknown source');
 
+        const isManual = chunk.document_id == null;
         html += `
           <div class="chunk-item">
             <div class="chunk-header">
               <span class="kp-type-badge kp-type-${escapeHtml(kpType)}">${escapeHtml(kpType)}</span>
               <span class="chunk-source">${escapeHtml(chunk.doc_title || 'Unknown source')}</span>
               ${sourceCount > 1 ? `<span class="kp-source-count" title="${sourceTitle}">📄 ${sourceCount} sources</span>` : ''}
+              ${isManual ? `<button class="btn-icon btn-danger-ghost" title="Delete" data-chunk-id="${chunk.id}" data-node-id="${escapeHtml(nodeId)}">✕</button>` : ''}
             </div>
             <p class="chunk-preview">${escapeHtml(fullContent).replace(/\n/g, '<br>')}</p>
             ${keywords.length ? `<div class="chunk-keywords">${keywords.map(k => `<span class="keyword-tag">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
@@ -2156,6 +2342,11 @@ async function loadNodeDetail(nodeId) {
     }
 
     contentEl.innerHTML = html;
+
+    // Wire up manual chunk delete buttons
+    contentEl.querySelectorAll('.btn-danger-ghost[data-chunk-id]').forEach(btn => {
+      btn.addEventListener('click', () => handleDeleteChunk(btn.dataset.chunkId, btn.dataset.nodeId));
+    });
 
     // Wire up child node items to navigate on click
     contentEl.querySelectorAll('.node-child-item').forEach(item => {
@@ -2185,6 +2376,48 @@ function showAddNodeModal() {
 function hideAddNodeModal() {
   document.getElementById('add-node-modal').classList.add('hidden');
   document.getElementById('add-node-form').reset();
+}
+
+let addChunkTargetNodeId = null;
+
+function showAddChunkModal(nodeId) {
+  addChunkTargetNodeId = nodeId;
+  document.getElementById('add-chunk-modal').classList.remove('hidden');
+}
+
+function hideAddChunkModal() {
+  addChunkTargetNodeId = null;
+  document.getElementById('add-chunk-modal').classList.add('hidden');
+  document.getElementById('add-chunk-form').reset();
+}
+
+async function handleAddChunk(e) {
+  e.preventDefault();
+  const content = document.getElementById('chunk-content').value.trim();
+  const kp_type = document.getElementById('chunk-kp-type').value;
+  const doc_title = document.getElementById('chunk-doc-title').value.trim() || 'Manual Entry';
+  if (!content) return;
+  try {
+    await api(`/nodes/${addChunkTargetNodeId}/chunks`, {
+      method: 'POST',
+      body: JSON.stringify({ content, kp_type, doc_title })
+    });
+    showToast('Content added', 'success');
+    hideAddChunkModal();
+    loadNodeDetail(addChunkTargetNodeId);
+  } catch (err) {
+    showToast(err.message || 'Error adding content', 'error');
+  }
+}
+
+async function handleDeleteChunk(chunkId, nodeId) {
+  if (!confirm('Delete this content item?')) return;
+  try {
+    await api(`/chunks/${chunkId}`, { method: 'DELETE' });
+    loadNodeDetail(nodeId);
+  } catch (err) {
+    showToast(err.message || 'Error deleting content', 'error');
+  }
 }
 
 function populateNodeSelects() {
@@ -2303,7 +2536,6 @@ async function handleUpload() {
 
   const targetNodeId = document.getElementById('target-node').value;
   const useLLM = document.getElementById('upload-use-llm').checked;
-  const detectConflicts = document.getElementById('upload-detect-conflicts').checked;
 
   try {
     const formData = new FormData();
@@ -2312,7 +2544,6 @@ async function handleUpload() {
       formData.append('file', selectedFiles[0]);
       if (targetNodeId) formData.append('targetNodeId', targetNodeId);
       formData.append('useLLM', useLLM);
-      formData.append('detectConflicts', detectConflicts);
 
       const response = await fetch('/upload', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
       const result = await response.json();
@@ -2329,7 +2560,6 @@ async function handleUpload() {
       selectedFiles.forEach(f => formData.append('files', f));
       if (targetNodeId) formData.append('targetNodeId', targetNodeId);
       formData.append('useLLM', useLLM);
-      formData.append('detectConflicts', detectConflicts);
 
       const response = await fetch('/upload/batch', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
       const result = await response.json();
@@ -2385,18 +2615,29 @@ function _renderUploadJobRow(r, liveJob) {
   const result = job?.result || null;
   const chunkCount = result?.stats?.chunkCount ?? r.stats?.chunkCount;
 
+  // Initial stage tracker state shown immediately after upload (before first WS event)
+  const initialTracker = isQueued && job?.id ? `
+    <div class="job-live-progress" id="job-progress-${job.id}">
+      <div class="job-progress-bar"><div class="job-progress-fill" style="width:${jobStatus === 'queued' ? 0 : 5}%"></div></div>
+      ${_renderStageTracker(0)}
+      <p class="job-stage-msg">${jobStatus === 'queued' ? 'Waiting in queue…' : 'Starting…'}</p>
+    </div>` : '';
+
   return `
-    <div style="padding: 12px; background: var(--bg-main); border-radius: 8px; margin-top: 12px;">
-      <strong>${filename}</strong>
-      <span class="status-badge status-${statusClass}">${statusText}</span>
-      ${job?.id ? `<span style="margin-left: 8px; color: var(--text-secondary); font-size: 12px;">Job #${job.id}</span>` : ''}
-      ${isQueued ? `<p style="margin-top: 8px; color: var(--text-secondary); font-size: 13px;">⏳ Background processing in progress…</p>` : ''}
-      ${job?.id && isQueued ? `<div class="job-live-progress" id="job-progress-${job.id}"></div>` : ''}
-      ${chunkCount ? `<p style="margin-top: 8px; color: var(--text-secondary); font-size: 13px;">${chunkCount} chunks created</p>` : ''}
-      ${job?.document_id ? `<p style="margin-top: 6px; color: var(--text-secondary); font-size: 12px;">Document #${job.document_id}</p>` : ''}
-      ${result?.errors?.length ? `<p style="margin-top: 6px; color: var(--danger); font-size: 13px;">${result.errors.join(', ')}</p>` : ''}
-      ${job?.error_message && !isQueued ? `<p style="margin-top: 6px; color: var(--danger); font-size: 13px;">${job.error_message}</p>` : ''}
-      ${isRateLimited ? `<p style="margin-top: 6px; color: var(--warning, #f59e0b); font-size: 13px;">Paused — API rate limit hit. Go to the Documents tab to resume.</p>` : ''}
+    <div class="upload-job-card">
+      <div class="upload-job-card-header">
+        <span class="upload-job-filename" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
+        <div class="upload-job-meta">
+          <span class="status-badge status-${statusClass}">${statusText}</span>
+          ${job?.id ? `<span class="upload-job-id">Job #${job.id}</span>` : ''}
+        </div>
+      </div>
+      ${initialTracker}
+      ${chunkCount ? `<p class="upload-job-detail">${chunkCount} knowledge points extracted</p>` : ''}
+      ${job?.document_id ? `<p class="upload-job-detail muted">Document #${job.document_id}</p>` : ''}
+      ${result?.errors?.length ? `<p class="upload-job-detail error">${escapeHtml(result.errors.join(', '))}</p>` : ''}
+      ${job?.error_message && !isQueued ? `<p class="upload-job-detail error">${escapeHtml(job.error_message)}</p>` : ''}
+      ${isRateLimited ? `<p class="upload-job-detail warning">Paused — API rate limit hit. Go to the Documents tab to resume.</p>` : ''}
     </div>
   `;
 }
@@ -2422,13 +2663,21 @@ function _startUploadJobPoller(jobId, resultIndex, allResults) {
     try {
       const job = await api(`/ingest/jobs/${jobId}`);
 
-      // Update just this card in the result div
+      // Update just this card in the result div.
+      // Save the live progress element's innerHTML before replacing the card so
+      // the WS-managed tracker state is not reset to stage-0 on every poll cycle.
       const resultDiv = document.getElementById('upload-result');
       if (resultDiv) {
         const cards = resultDiv.querySelectorAll('[data-job-id]');
         for (const card of cards) {
           if (String(card.dataset.jobId) === String(jobId)) {
+            const savedProgress = document.getElementById(`job-progress-${jobId}`)?.innerHTML ?? null;
             card.outerHTML = `<div data-job-id="${jobId}">${_renderUploadJobRow(allResults[resultIndex], job)}</div>`;
+            // Restore the live WS progress state (only while still processing)
+            if (savedProgress !== null && !TERMINAL.has(job.status)) {
+              const el = document.getElementById(`job-progress-${jobId}`);
+              if (el) el.innerHTML = savedProgress;
+            }
             break;
           }
         }
@@ -2609,175 +2858,6 @@ window.deleteDocument = async function(id) {
   }
 };
 
-// Conflicts Tab
-function initConflicts() {
-  document.getElementById('refresh-conflicts-btn').addEventListener('click', loadConflicts);
-}
-
-function getConflictTypeLabel(conflictType) {
-  if (!conflictType) return t('unknown');
-
-  const normalized = String(conflictType).toLowerCase().replace(/[^a-z0-9]+/g, '_');
-  const key = `conflict_type_${normalized}`;
-  return i18n[currentLang][key] || conflictType;
-}
-
-function formatConflictReason(conflict) {
-  const reason = conflict?.reason || {};
-  const recommendation = typeof reason.recommendation === 'string'
-    ? reason.recommendation.trim()
-    : '';
-
-  if (typeof reason.explanation === 'string' && reason.explanation.trim()) {
-    return {
-      explanation: reason.explanation.trim(),
-      recommendation
-    };
-  }
-
-  if (conflict?.conflict_type === 'numeric_contradiction') {
-    const contextA = reason.chunk_a_context || t('conflict_chunk_a');
-    const contextB = reason.chunk_b_context || t('conflict_chunk_b');
-    const valueA = reason.chunk_a_value ?? '?';
-    const valueB = reason.chunk_b_value ?? '?';
-
-    return {
-      explanation: `${t('conflict_type_numeric_contradiction')}: ${contextA} (${valueA}) vs ${contextB} (${valueB})`,
-      recommendation
-    };
-  }
-
-  if (conflict?.conflict_type === 'statement_contradiction' && reason.pattern_found) {
-    return {
-      explanation: reason.pattern_found,
-      recommendation
-    };
-  }
-
-  return {
-    explanation: t('conflict_reason_default'),
-    recommendation
-  };
-}
-
-async function loadConflicts() {
-  const statsDiv = document.getElementById('conflict-stats');
-  const listDiv = document.getElementById('conflict-list');
-
-  // Keep skeleton visible initially
-
-  try {
-    const data = await api('/conflicts');
-
-    // Stats
-    statsDiv.innerHTML = `
-      <div class="stat-card">
-        <div class="stat-value">${data.stats?.total || 0}</div>
-        <div class="stat-label">${t('total_conflicts')}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${data.stats?.unresolved || 0}</div>
-        <div class="stat-label">${t('unresolved')}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${data.stats?.resolved || 0}</div>
-        <div class="stat-label">${t('resolved')}</div>
-      </div>
-    `;
-
-    // List
-    if (!data.conflicts || data.conflicts.length === 0) {
-      listDiv.innerHTML = renderEmptyState(
-        '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
-        t('no_unresolved_conflicts'),
-        ''
-      );
-      return;
-    }
-
-    listDiv.innerHTML = data.conflicts.map(c => {
-      const reason = formatConflictReason(c);
-      const typeLabel = escapeHtml(getConflictTypeLabel(c.conflict_type));
-      const nodeName = escapeHtml(c.node_name || t('unknown'));
-      const chunkAContent = escapeHtml(c.chunk_a?.content || t('no_content'));
-      const chunkBContent = escapeHtml(c.chunk_b?.content || t('no_content'));
-      const reasonText = escapeHtml(reason.explanation || t('conflict_reason_default'));
-      const recommendationText = reason.recommendation ? escapeHtml(reason.recommendation) : '';
-      const chunkAId = c.chunk_a?.id ?? '-';
-      const chunkBId = c.chunk_b?.id ?? '-';
-      const keepAId = c.chunk_a?.id ?? 'null';
-      const keepBId = c.chunk_b?.id ?? 'null';
-
-      return `
-        <div class="conflict-card">
-          <div class="conflict-header">
-            <span class="conflict-type">${typeLabel}</span>
-            <span>${t('conflict_node_label')}: ${nodeName}</span>
-          </div>
-          <div class="conflict-body">
-            <div class="conflict-reason">
-              <h5>${t('conflict_reason')}</h5>
-              <p>${reasonText}</p>
-              ${recommendationText ? `<p class="conflict-recommendation"><strong>${t('conflict_recommendation')}:</strong> ${recommendationText}</p>` : ''}
-            </div>
-            <div class="conflict-chunk">
-              <h5>${t('conflict_chunk_a')} (ID: ${chunkAId})</h5>
-              <p>${chunkAContent}</p>
-            </div>
-            <div class="conflict-chunk">
-              <h5>${t('conflict_chunk_b')} (ID: ${chunkBId})</h5>
-              <p>${chunkBContent}</p>
-            </div>
-            <div class="conflict-actions">
-              <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepAId}, ${keepBId})">${t('keep_a')}</button>
-              <button class="btn btn-primary btn-sm" onclick="resolveConflict(${c.id}, ${keepBId}, ${keepAId})">${t('keep_b')}</button>
-              <button class="btn btn-secondary btn-sm" onclick="keepBothChunks(${c.id})">${t('keep_both')}</button>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-  } catch (error) {
-    listDiv.innerHTML = `<p class="loading-text error">${escapeHtml(error.message)}</p>`;
-  }
-}
-
-window.resolveConflict = async function(conflictId, keepId, archiveId) {
-  try {
-    await api(`/conflicts/${conflictId}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify({
-        resolution: 'manual',
-        keepChunkId: keepId,
-        archiveChunkId: archiveId,
-        notes: 'Resolved via UI'
-      })
-    });
-
-    showToast(t('success'), 'success');
-    loadConflicts();
-  } catch (error) {
-    showToast(error.message, 'error');
-  }
-};
-
-window.keepBothChunks = async function(conflictId) {
-  try {
-    await api(`/conflicts/${conflictId}/resolve`, {
-      method: 'POST',
-      body: JSON.stringify({
-        resolution: 'keep_both',
-        notes: 'Kept both chunks via UI'
-      })
-    });
-
-    showToast(t('success'), 'success');
-    loadConflicts();
-  } catch (error) {
-    showToast(error.message, 'error');
-  }
-};
-
 // Stats Tab
 function initStats() {
   document.getElementById('refresh-stats-btn').addEventListener('click', loadStats);
@@ -2942,20 +3022,6 @@ async function loadStats() {
           <div class="stats-item">
             <div class="value">${data.embeddings?.chunks?.coverage || 'N/A'}</div>
             <div class="label">Chunk Coverage</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="stats-card">
-        <h3>⚠️ Conflicts</h3>
-        <div class="stats-grid">
-          <div class="stats-item">
-            <div class="value">${data.conflicts?.total || 0}</div>
-            <div class="label">Total</div>
-          </div>
-          <div class="stats-item">
-            <div class="value">${data.conflicts?.unresolved || 0}</div>
-            <div class="label">Unresolved</div>
           </div>
         </div>
       </div>
@@ -3520,6 +3586,19 @@ async function initDatasets() {
   });
 
   document.getElementById('confirm-create-dataset')?.addEventListener('click', handleCreateDataset);
+
+  document.getElementById('dataset-batch-delete-btn')?.addEventListener('click', handleBatchDelete);
+  document.getElementById('dataset-select-all')?.addEventListener('change', (e) => {
+    const checkboxes = document.querySelectorAll('.dataset-checkbox:not(:disabled)');
+    checkboxes.forEach(cb => {
+      cb.checked = e.target.checked;
+      const id = cb.dataset.datasetId;
+      if (e.target.checked) selectedDatasetIds.add(id);
+      else selectedDatasetIds.delete(id);
+      cb.closest('.dataset-card').classList.toggle('dataset-card--selected', cb.checked);
+    });
+    updateBatchToolbar();
+  });
 }
 
 function renderDatasetDropdown() {
@@ -3552,12 +3631,56 @@ function switchDataset(id, name, reload = true) {
       if (result) result.classList.add('hidden');
     }
     else if (activeTab === 'documents') loadDocuments();
-    else if (activeTab === 'conflicts') loadConflicts();
     else if (activeTab === 'decisions') loadDecisions();
     else if (activeTab === 'tests') loadTests();
     else if (activeTab === 'stats') loadStats();
     else if (activeTab === 'datasets') loadDatasets();
   }
+}
+
+function updateBatchToolbar() {
+  const toolbar = document.getElementById('dataset-batch-toolbar');
+  if (!toolbar) return;
+  const count = selectedDatasetIds.size;
+  toolbar.classList.toggle('hidden', count === 0);
+  document.getElementById('dataset-batch-count').textContent =
+    `${count} dataset${count !== 1 ? 's' : ''} selected`;
+  const selectAll = document.getElementById('dataset-select-all');
+  if (!selectAll) return;
+  const selectableBoxes = document.querySelectorAll('.dataset-checkbox:not(:disabled)');
+  const selectableCount = selectableBoxes.length;
+  selectAll.checked = count > 0 && count === selectableCount;
+  selectAll.indeterminate = count > 0 && count < selectableCount;
+}
+
+async function handleBatchDelete() {
+  const ids = [...selectedDatasetIds];
+  if (ids.length === 0) return;
+
+  const confirmation = prompt(
+    `You are about to permanently delete ${ids.length} dataset${ids.length !== 1 ? 's' : ''}.\n\nType DELETE to confirm.`
+  );
+  if (confirmation !== 'DELETE') return;
+
+  let deleted = 0;
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      await api(`/datasets/${id}?confirm=yes`, { method: 'DELETE' });
+      deleted++;
+    } catch (_err) {
+      failed++;
+    }
+  }
+
+  selectedDatasetIds.clear();
+  showToast(
+    failed > 0
+      ? `Deleted ${deleted} dataset${deleted !== 1 ? 's' : ''}; ${failed} failed`
+      : `Deleted ${deleted} dataset${deleted !== 1 ? 's' : ''}`,
+    failed > 0 ? 'error' : 'success'
+  );
+  loadDatasets();
 }
 
 async function loadDatasets() {
@@ -3588,6 +3711,21 @@ async function loadDatasets() {
       return renderDatasetCard(d, stats, langInfo);
     }).join('');
 
+    // Reset selection on reload
+    selectedDatasetIds.clear();
+    updateBatchToolbar();
+
+    // Wire dataset checkboxes
+    list.querySelectorAll('.dataset-checkbox').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = cb.dataset.datasetId;
+        if (cb.checked) selectedDatasetIds.add(id);
+        else selectedDatasetIds.delete(id);
+        cb.closest('.dataset-card').classList.toggle('dataset-card--selected', cb.checked);
+        updateBatchToolbar();
+      });
+    });
+
     // Wire up card action buttons via delegation
     list.addEventListener('click', handleDatasetCardAction);
   } catch (err) {
@@ -3604,14 +3742,16 @@ function renderDatasetCard(dataset, stats = {}, langInfo = { language: 'auto', l
   const createdDate = dataset.created_at ? new Date(dataset.created_at).toLocaleDateString() : '';
   const langLabel = LANG_LABELS[langInfo.language] || langInfo.language;
   const langBadge = `<span class="lang-badge ${langInfo.locked ? 'lang-badge--locked' : 'lang-badge--auto'}">${escapeHtml(langLabel)}</span>`;
-  const lockBtn = !langInfo.locked
-    ? `<button class="btn btn-secondary btn-small" data-action="lock-language">Set Language</button>`
-    : '';
 
   return `
     <div class="dataset-card" data-dataset-id="${escapeHtml(dataset.id)}">
       <div class="dataset-card-header">
         <div class="dataset-card-title">
+          <label class="dataset-card-check" onclick="event.stopPropagation()">
+            <input type="checkbox" class="dataset-checkbox"
+              data-dataset-id="${escapeHtml(dataset.id)}"
+              ${isActive ? 'disabled title="Switch away from this dataset to include it in batch operations"' : ''}>
+          </label>
           <h3 class="dataset-name">${escapeHtml(dataset.name)}</h3>
           ${isActive ? `<span class="dataset-active-badge">${t('dataset_active')}</span>` : ''}
           ${langBadge}
@@ -3627,7 +3767,6 @@ function renderDatasetCard(dataset, stats = {}, langInfo = { language: 'auto', l
         <button class="btn btn-secondary btn-small" data-action="rename">${t('dataset_rename')}</button>
         <button class="btn btn-secondary btn-small" data-action="duplicate">${t('dataset_duplicate')}</button>
         <button class="btn btn-secondary btn-small" data-action="export">${t('dataset_export')}</button>
-        ${lockBtn}
         <button class="btn btn-danger btn-small" data-action="delete">${t('dataset_delete')}</button>
       </div>
       <div class="dataset-rename-form hidden" data-rename-form>
@@ -3689,23 +3828,6 @@ async function handleDatasetCardAction(e) {
     } catch (err) { showToast(err.message, 'error'); }
   } else if (action === 'export') {
     window.location.href = `/datasets/${datasetId}/export`;
-  } else if (action === 'lock-language') {
-    const options = [
-      { value: 'zh-CN', label: '简体中文 (Simplified Chinese)' },
-      { value: 'zh-TW', label: '繁體中文 (Traditional Chinese)' },
-      { value: 'en', label: 'English' }
-    ];
-    const choice = prompt(`Select dataset language (cannot be changed after):\n${options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')}`);
-    const idx = parseInt(choice, 10) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= options.length) return;
-    try {
-      await api(`/datasets/${datasetId}/config/language`, {
-        method: 'POST',
-        body: JSON.stringify({ language: options[idx].value })
-      });
-      showToast(`Language locked to ${options[idx].label}`, 'success');
-      loadDatasets();
-    } catch (err) { showToast(err.message, 'error'); }
   } else if (action === 'delete') {
     const confirmation = prompt(t('confirm_delete_dataset'));
     if (confirmation !== 'DELETE') return;
@@ -4237,7 +4359,6 @@ const BUILTIN_TESTS = [
       const fd   = new FormData();
       fd.append('file', file);
       fd.append('useLLM', 'true');
-      fd.append('detectConflicts', 'false');
 
       const uploadResp = await fetch('/upload', {
         method: 'POST',
@@ -4706,7 +4827,6 @@ const BUILTIN_TESTS = [
       const fd   = new FormData();
       fd.append('file', file);
       fd.append('useLLM', 'true');
-      fd.append('detectConflicts', 'false');
 
       const uploadResp = await fetch('/upload', {
         method: 'POST',

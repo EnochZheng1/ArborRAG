@@ -1,6 +1,7 @@
 import { safeJson, logAudit, runTransaction } from "../db/db.js";
 import { ConflictRepo } from "../db/repositories/ConflictRepo.js";
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
@@ -123,9 +124,8 @@ export async function detectConflictWithLLM(chunkA, chunkB) {
   const prompt = getPrompt('conflictDetection', lang, chunkA, chunkB);
 
   try {
-    const text = await callLLM({ prompt, taskName: 'conflict_detection' }) ?? "{}";
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [null, text];
-    const result = JSON.parse(jsonMatch[1] || text);
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'conflict_detection' }) ?? "{}";
+    const result = await parseLLMJson(text, 'object', { context: 'conflict_detection', fallback: {} });
 
     if (result.has_conflict) {
       return {

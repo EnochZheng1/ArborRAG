@@ -1,4 +1,5 @@
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
 import { logger } from "../utils/logger.js";
@@ -202,11 +203,8 @@ Return JSON array with both English and Chinese versions:
 JSON only:`;
 
     const text = await callLLM({ prompt, temperature: 0.7, maxOutputTokens: 300, taskName: 'related_questions' }) || '';
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-
-    if (!jsonMatch) return [];
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = await parseLLMJson(text, 'array', { context: 'related_questions', fallback: [] });
+    if (!Array.isArray(parsed) || !parsed.length) return [];
 
     return parsed.map(q => ({
       text: q.en,

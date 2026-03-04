@@ -19,7 +19,7 @@ import { recordTokenUsage } from "./tokenTracker.js";
 export const llmConfig = {
   provider: process.env.LLM_PROVIDER || 'openai',
   openai: {
-    model:          process.env.OPENAI_MODEL           || 'gpt-5-nano',
+    model:          process.env.OPENAI_MODEL           || 'gpt-5-mini',
     embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-large',
     apiKey:         process.env.OPENAI_API_KEY         || '',
   },
@@ -76,6 +76,7 @@ export async function callLLM({
   prompt,
   temperature     = 0.2,
   maxOutputTokens = null,   // null = no limit (model default)
+  seed            = null,   // integer seed for reproducible outputs (OpenAI only)
   taskName        = 'llm_call',
 } = {}) {
   if (llmConfig.provider === 'openai') {
@@ -89,6 +90,8 @@ export async function callLLM({
       verbosity: 'low',
       // Only set max_completion_tokens when explicitly requested
       ...(maxOutputTokens != null && { max_completion_tokens: maxOutputTokens }),
+      // Seed for reproducible outputs — ensures same prompt → same response
+      ...(seed != null && { seed }),
     };
 
     // Some models (o-series reasoning models) reject custom temperature values.

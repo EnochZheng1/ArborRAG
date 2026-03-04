@@ -9,6 +9,7 @@
  */
 
 import { callLLM, llmConfig } from "../utils/llm.js";
+import { parseLLMJson } from "../utils/parseJSON.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
@@ -41,6 +42,12 @@ const BOILERPLATE_PATTERNS = [
   /^(confidential|internal use only|proprietary)$/i,
   /^(header|footer):/i,
   /^\s*[\d]+\s*$/,                   // lone number
+  /^draft(\s*[-–—]\s*.+)?$/i,        // "DRAFT" or "DRAFT - Do Not Distribute"
+  /^do\s+not\s+(distribute|copy|reproduce|share)/i,
+  /^all\s+rights\s+reserved/i,
+  /^copyright\s*©?\s*\d{4}/i,
+  /^\[\s*\]$/,                       // empty brackets placeholder
+  /^(version|rev\.?|revision)\s*\d[\d.]*$/i,  // "Version 1.2", "Rev 3"
 ];
 
 function isBoilerplate(content) {
@@ -87,11 +94,9 @@ Statement B: "${existingContent.slice(0, 400)}"
 Return JSON only: {"canonical": "...", "confidence": 0.0-1.0}`;
 
   try {
-    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 300, taskName: 'kp_normalize' });
-    const jsonMatch = text?.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (typeof parsed.canonical === "string" && parsed.canonical.length >= 10) {
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 300, taskName: 'kp_normalize' });
+    const parsed = await parseLLMJson(text, 'object', { context: 'kp_normalize', fallback: null });
+    if (parsed && typeof parsed.canonical === "string" && parsed.canonical.length >= 10) {
       return { canonical: parsed.canonical, confidence: parsed.confidence ?? 0.8 };
     }
     return null;
@@ -139,7 +144,7 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
 
   // ── [2] Similarity scan ───────────────────────────────────────────────────
 
-  const candidates = ChunkRepo.findSimilarInNode(nodeId, content, 8, excludeChunkId);
+  const candidates = ChunkRepo.findSimilarInNode(nodeId, content, 15, excludeChunkId);
 
   let bestSim = 0;
   let bestCandidate = null;
