@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Top-Level Topic A",
+    "description": "Describe what this topic covers — used by the mapper to match KP topic hints.",
+    "children": [
+      {
+        "name": "Subtopic A1",
+        "description": "More specific area under Topic A.",
+        "children": [
+          {
+            "name": "Leaf Node A1a",
+            "description": "Most specific level — keep to 2-3 levels max."
+          }
+        ]
+      },
+      {
+        "name": "Subtopic A2",
+        "description": "Another area under Topic A."
+      }
+    ]
+  },
+  {
+    "name": "Top-Level Topic B",
+    "description": "A second major topic area.",
+    "children": [
+      {
+        "name": "Subtopic B1",
+        "description": "Specific area under Topic B."
+      }
+    ]
+  },
+  {
+    "name": "Top-Level Topic C",
+    "description": "A third major topic with no subtopics defined — KPs will map directly here.",
+    "children": []
+  }
+]

@@ -8,7 +8,7 @@ import express from "express";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { SchemaTemplateRepo } from "../db/repositories/SchemaTemplateRepo.js";
-import { generateNodeId } from "../ingest/nodeHierarchy.js";
+import { generateNodeId, ensureRootNode } from "../ingest/nodeHierarchy.js";
 import { runTransaction, safeJson } from "../db/db.js";
 
 const router = express.Router();
@@ -86,9 +86,15 @@ function importSchemaNodes(rawNodes, mode) {
     }
   }
 
+  // Top-level nodes in the JSON always go under the dataset root node.
+  // This keeps the tree connected — floating roots only occur if a node
+  // explicitly sets parent_id to null AND is the actual root node itself.
+  const rootNode = ensureRootNode();
+
   for (const node of rawNodes) {
-    const parentId = node.parent_id || null;
-    const level    = parentId ? (NodeRepo.getLevel(parentId) ?? 0) + 1 : 1;
+    // Allow explicit parent override; default to dataset root
+    const parentId = node.parent_id ?? rootNode.node_id;
+    const level    = (NodeRepo.getLevel(parentId) ?? 0) + 1;
     walk(node, parentId, level);
   }
 
