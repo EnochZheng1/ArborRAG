@@ -5,7 +5,6 @@
  */
 
 export * from "./classifier.js";
-export * from "./queryPlanner.js";
 export * from "./multiNodeRetriever.js";
 export * from "./comparator.js";
 export * from "./recommender.js";

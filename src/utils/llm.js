@@ -14,6 +14,13 @@ import OpenAI from "openai";
 import { logger } from "./logger.js";
 import { recordTokenUsage } from "./tokenTracker.js";
 
+// Per-call LLM timeout: 8 minutes. Long enough for big-document KP extraction,
+// short enough to detect a truly hung network call and release the retry budget.
+const LLM_TIMEOUT_MS = Math.max(
+  30_000,
+  Number.parseInt(process.env.LLM_TIMEOUT_MS || "480000", 10) || 480_000
+);
+
 // ── Runtime-mutable config ────────────────────────────────────────────────────
 
 export const llmConfig = {
@@ -99,14 +106,17 @@ export async function callLLM({
     const withTemp = !_noTemperatureModels.has(model);
     let resp;
     try {
+      const signal = AbortSignal.timeout(LLM_TIMEOUT_MS);
       resp = await openaiClient().chat.completions.create(
-        withTemp ? { ...baseParams, temperature } : baseParams
+        withTemp ? { ...baseParams, temperature } : baseParams,
+        { signal }
       );
     } catch (err) {
       if (withTemp && err.status === 400 && err.message?.toLowerCase().includes('temperature')) {
         _noTemperatureModels.add(model);
         logger.info(`Model '${model}' does not support custom temperature — disabling for future calls`);
-        resp = await openaiClient().chat.completions.create(baseParams);
+        const signal = AbortSignal.timeout(LLM_TIMEOUT_MS);
+        resp = await openaiClient().chat.completions.create(baseParams, { signal });
       } else {
         throw err;
       }
@@ -144,11 +154,20 @@ export async function callLLM({
   } else {
     if (!llmConfig.gemini.apiKey) throw new Error('GEMINI_API_KEY is not configured');
 
-    const resp = await geminiClient().models.generateContent({
-      model:    llmConfig.gemini.model,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config:   { temperature, maxOutputTokens },
-    });
+    let _geminiTimeoutId;
+    const resp = await Promise.race([
+      geminiClient().models.generateContent({
+        model:    llmConfig.gemini.model,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config:   { temperature, maxOutputTokens },
+      }),
+      new Promise((_, reject) => {
+        _geminiTimeoutId = setTimeout(
+          () => reject(new Error(`Gemini LLM call timed out after ${LLM_TIMEOUT_MS / 1000}s`)),
+          LLM_TIMEOUT_MS
+        );
+      })
+    ]).finally(() => clearTimeout(_geminiTimeoutId));
 
     recordTokenUsage(resp, taskName, { provider: 'gemini', model: llmConfig.gemini.model });
 

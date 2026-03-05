@@ -1,6 +1,7 @@
 import { safeJson, logAudit, runTransaction } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
@@ -10,6 +11,19 @@ import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { resolveKPAction } from "./kpDecisionEngine.js";
+import {
+  buildTopicalHierarchy,
+  assignKPToNode
+} from "./kpNormaliser.js";
+import { buildGuidedTopicalHierarchy } from "./guidedMapper.js";
+import {
+  generateNodeId,
+  analyzeDocumentStructure,
+  createDocumentHierarchy,
+  generateNodeFromChunk,
+  updateNodeSummaries,
+  ensureRootNode
+} from "./nodeHierarchy.js";
 
 /**
  * Map chunks to appropriate tree nodes
@@ -264,582 +278,6 @@ export function getTreeStructure() {
 }
 
 /**
- * Generate a unique node ID from text
- * @param {string} text - Text to generate ID from
- * @returns {string} Node ID
- */
-function generateNodeId(text) {
-  // Clean and normalize text
-  const clean = text
-    .toLowerCase()
-    .replace(/[^\w\u4e00-\u9fa5]+/g, "_")  // Keep alphanumeric and Chinese chars
-    .replace(/^_+|_+$/g, "")               // Trim underscores
-    .slice(0, 50);                          // Limit length
-
-  // Add timestamp suffix to ensure uniqueness
-  const suffix = Date.now().toString(36).slice(-4);
-  return `${clean}_${suffix}`;
-}
-
-/**
- * Use LLM to analyze document structure and suggest hierarchy
- * @param {string} docTitle - Document title
- * @param {Array} chunks - All chunks from document
- * @param {string} lang - Language code detected by caller
- * @returns {Promise<object>} Suggested hierarchy
- */
-async function analyzeDocumentStructure(docTitle, chunks, lang) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
-    return null;
-  }
-
-  // Build a summary of chunk contents for analysis
-  const chunkLabel = isChineseLang(lang) ? '片段' : 'Chunk';
-  const keywordsLabel = isChineseLang(lang) ? '关键词' : 'Keywords';
-  const chunkSummaries = chunks.slice(0, 10).map((c, i) => {
-    const preview = c.content.slice(0, 200).replace(/\n/g, " ");
-    const keywords = c.keywords?.slice(0, 5).join(", ") || "";
-    return `${chunkLabel} ${i + 1}: ${preview}... [${keywordsLabel}: ${keywords}]`;
-  }).join("\n\n");
-
-  // Use bilingual prompt based on document language
-  const prompt = getPrompt('documentStructure', lang, docTitle, chunkSummaries);
-
-  try {
-    const text = await callLLM({ prompt, temperature: 0.1, taskName: 'document_structure' }) ?? "{}";
-
-    // Robust JSON extraction: try markdown code block first, then bare JSON object
-    let jsonStr = text.trim();
-    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (codeBlockMatch) {
-      jsonStr = codeBlockMatch[1].trim();
-    } else {
-      // Find the outermost JSON object, ignoring surrounding text
-      const objMatch = jsonStr.match(/\{[\s\S]*\}/);
-      if (objMatch) jsonStr = objMatch[0];
-    }
-    return JSON.parse(jsonStr);
-  } catch (err) {
-    rethrowIfRateLimit(err);
-    logger.warn("Document structure analysis failed:", err.message);
-    return null;
-  }
-}
-
-/**
- * Create document hierarchy - document node with section children
- * @param {string} docTitle - Document title
- * @param {Array} chunks - Document chunks
- * @param {object} structure - LLM suggested structure (optional)
- * @param {string} lang - Language code ('zh-TW', 'zh-CN', or 'en')
- * @returns {object} Created hierarchy with document node and section nodes
- */
-function createDocumentHierarchy(docTitle, chunks, structure = null, lang = 'en') {
-  ensureRootNode();
-
-  const cleanTitle = docTitle.replace(/\.(docx?|pdf|txt|md|xlsx?)$/i, "").trim();
-  const docNodeId = generateNodeId(cleanTitle);
-
-  // Create document-level node
-  let docSummary = "";
-  if (structure?.document_node?.summary) {
-    docSummary = structure.document_node.summary;
-  } else {
-    // Generate summary from first chunk
-    const firstContent = chunks[0]?.content || "";
-    docSummary = firstContent.slice(0, 200).replace(/\n/g, " ").trim();
-    if (firstContent.length > 200) docSummary += "...";
-  }
-
-  const docNode = createNode({
-    node_id: docNodeId,
-    name: structure?.document_node?.name || cleanTitle,
-    parent_id: "root",
-    summary: docSummary,
-    scope: {}
-  });
-
-  logger.info(`Created document node: ${docNode.node_id} (${docNode.name})`);
-
-  const sectionNodes = [];
-  const chunkToSection = new Map(); // Map chunk index to section node
-
-  if (structure?.sections?.length > 0) {
-    // Create section nodes based on LLM analysis
-    for (const section of structure.sections) {
-      const sectionNodeId = generateNodeId(section.name);
-      const sectionNode = createNode({
-        node_id: sectionNodeId,
-        name: section.name,
-        parent_id: docNode.node_id,
-        summary: section.summary || "",
-        scope: {}
-      });
-      sectionNodes.push(sectionNode);
-
-      // Map chunks to this section
-      if (section.chunk_indices?.length > 0) {
-        for (const idx of section.chunk_indices) {
-          chunkToSection.set(idx, sectionNode);
-        }
-      }
-
-      logger.info(`Created section node: ${sectionNode.node_id} (${sectionNode.name})`);
-    }
-  }
-
-  // If no sections or not all chunks mapped, create a language-appropriate fallback section
-  const unmappedChunks = chunks.filter((_, i) => !chunkToSection.has(i));
-  if (unmappedChunks.length > 0 && sectionNodes.length === 0) {
-    // Create default sections based on chunk count
-    if (chunks.length <= 3) {
-      // Few chunks - put directly under document node
-      for (let i = 0; i < chunks.length; i++) {
-        chunkToSection.set(i, docNode);
-      }
-    } else {
-      // Multiple chunks - create a localized content section
-      const contentName = lang === 'zh-TW' ? '內容' : isChineseLang(lang) ? '内容' : 'Content';
-      const contentSummary = lang === 'zh-TW'
-        ? `來自「${cleanTitle}」的主要內容`
-        : isChineseLang(lang)
-          ? `来自「${cleanTitle}」的主要内容`
-          : `Main content from ${cleanTitle}`;
-      const contentNode = createNode({
-        node_id: generateNodeId("content"),
-        name: contentName,
-        parent_id: docNode.node_id,
-        summary: contentSummary,
-        scope: {}
-      });
-      sectionNodes.push(contentNode);
-
-      for (let i = 0; i < chunks.length; i++) {
-        if (!chunkToSection.has(i)) {
-          chunkToSection.set(i, contentNode);
-        }
-      }
-    }
-  }
-
-  return {
-    documentNode: docNode,
-    sectionNodes,
-    chunkToSection
-  };
-}
-
-/**
- * Generate node data from chunk metadata (fallback for single chunk)
- * @param {object} chunk - Chunk with metadata
- * @param {string} parentId - Parent node ID
- * @returns {object} Node data for creation
- */
-function generateNodeFromChunk(chunk, parentId = "root") {
-  const { doc_title, keywords = [], content } = chunk;
-
-  // Determine node name from doc_title or keywords
-  let nodeName = doc_title;
-
-  if (!nodeName || nodeName.trim().length === 0) {
-    // Use first keyword or first words of content
-    if (keywords.length > 0) {
-      nodeName = keywords.slice(0, 3).join(" ");
-    } else if (content) {
-      // Extract first meaningful phrase
-      const firstLine = content.split(/[\n.。]/)[0].trim();
-      nodeName = firstLine.slice(0, 50) || "Unnamed Document";
-    } else {
-      nodeName = "Unnamed Document";
-    }
-  }
-
-  // Remove file extension from name if present
-  nodeName = nodeName.replace(/\.(docx?|pdf|txt|md|xlsx?)$/i, "").trim();
-
-  const nodeId = generateNodeId(nodeName);
-
-  // Generate meaningful summary from content
-  let summary = "";
-  if (content) {
-    summary = content.slice(0, 300).replace(/\n/g, " ").trim();
-    if (content.length > 300) summary += "...";
-  } else if (keywords.length > 0) {
-    summary = `Topics: ${keywords.join(", ")}`;
-  }
-
-  logger.info(`Generating new node: ${nodeId} (${nodeName})`);
-
-  return {
-    node_id: nodeId,
-    name: nodeName,
-    parent_id: parentId,
-    summary,
-    scope: chunk.scope || {}
-  };
-}
-
-/**
- * Update node summaries based on the chunks assigned to them
- * @param {Array} nodes - Nodes to update
- * @param {Array} chunks - All chunks
- * @param {Array} mappings - Chunk to node mappings
- * @param {string} lang - Language code ('zh-TW', 'zh-CN', or 'en')
- */
-function updateNodeSummaries(nodes, chunks, mappings, lang = 'en') {
-  // Group chunks by node
-  const chunksByNode = new Map();
-  for (const mapping of mappings) {
-    if (!chunksByNode.has(mapping.nodeId)) {
-      chunksByNode.set(mapping.nodeId, []);
-    }
-    const chunk = chunks.find(c => c.index === mapping.chunkIndex);
-    if (chunk) {
-      chunksByNode.set(mapping.nodeId, [...chunksByNode.get(mapping.nodeId), chunk]);
-    }
-  }
-
-  // Update each node's summary based on its chunks
-  for (const node of nodes) {
-    const nodeChunks = chunksByNode.get(node.node_id) || [];
-    if (nodeChunks.length === 0) continue;
-
-    // Collect all keywords from chunks
-    const allKeywords = new Set();
-    for (const chunk of nodeChunks) {
-      if (chunk.keywords) {
-        chunk.keywords.forEach(k => allKeywords.add(k));
-      }
-    }
-
-    // Build a better summary from chunk content
-    let summary = "";
-    if (nodeChunks.length === 1) {
-      // Single chunk - use its content as summary
-      const content = nodeChunks[0].content || "";
-      summary = content.slice(0, 500).replace(/\n/g, " ").trim();
-      if (content.length > 500) summary += "...";
-    } else {
-      // Multiple chunks - create overview with localized label
-      const firstChunkPreview = nodeChunks[0].content?.slice(0, 200).replace(/\n/g, " ").trim() || "";
-      const containsLabel = lang === 'zh-TW'
-        ? `包含 ${nodeChunks.length} 個部分。`
-        : isChineseLang(lang)
-          ? `包含 ${nodeChunks.length} 个部分。`
-          : `Contains ${nodeChunks.length} sections.`;
-      summary = `${containsLabel} ${firstChunkPreview}`;
-      if (firstChunkPreview.length >= 200) summary += "...";
-    }
-
-    // Add keywords if available
-    if (allKeywords.size > 0) {
-      const keywordStr = Array.from(allKeywords).slice(0, 10).join(", ");
-      const topicsLabel = lang === 'zh-TW'
-        ? '\n\n主要主題：'
-        : isChineseLang(lang)
-          ? '\n\n主要主题：'
-          : '\n\nKey topics: ';
-      summary += `${topicsLabel}${keywordStr}`;
-    }
-
-    // Update node in database
-    try {
-      NodeRepo.updateSummaryAndFts(node.node_id, summary, node.name);
-    } catch (err) {
-      logger.warn(`Failed to update summary for node ${node.node_id}: ${err.message}`);
-    }
-  }
-}
-
-/**
- * Ensure a root node exists, create one if not
- * @returns {object} Root node
- */
-function ensureRootNode() {
-  const root = NodeRepo.findAnyRoot();
-  if (root) return root;
-
-  logger.info("No root node found, creating default root node");
-  return NodeRepo.insertRoot();
-}
-
-// ── KP topical hierarchy helpers ──────────────────────────────────────────────
-
-// Lowered from 0.40 → 0.35: slightly more aggressive reuse.
-// Node lookup now uses a direct DB sibling scan (not BM25) so every sibling
-// is considered; a lower threshold is safe because we're comparing against the
-// full sibling set rather than a potentially incomplete BM25 top-10.
-const TOPIC_MATCH_THRESHOLD = 0.35;
-// wordDiceSimilarity imported from knowledgeExtractor.js
-
-// Generic/placeholder topic hints that the LLM returns when it can't classify.
-// These all collapse to "General" so they don't pollute the tree with noise nodes.
-const GENERIC_TOPIC_HINTS = new Set([
-  // English
-  'general', 'unknown', 'other', 'content', 'information', 'document',
-  'n/a', 'na', 'misc', 'miscellaneous', 'undefined', 'unclassified', 'none',
-  // Chinese Simplified
-  '无信息', '文档内容', '内容', '一般', '未知', '其他', '通用', '无', '一般信息', '文档', '信息',
-  // Chinese Traditional
-  '文件內容', '內容', '一般', '未知', '其他', '通用', '文件',
-]);
-
-function normalizeTopicHint(hint) {
-  const trimmed = (hint || '').trim();
-  if (!trimmed) return 'General';
-  // Match on both original casing and lowercased
-  if (GENERIC_TOPIC_HINTS.has(trimmed) || GENERIC_TOPIC_HINTS.has(trimmed.toLowerCase())) {
-    return 'General';
-  }
-  return trimmed;
-}
-
-/**
- * Find or create a topical node under a given parent.
- * Scans ALL direct siblings via DB (not BM25) so no sibling is silently missed,
- * then uses Dice similarity to reuse an existing node when possible.
- * Returns { ...nodeObject, _created: boolean }.
- */
-async function findOrCreateTopicNode(topicName, parentId, options = {}) {
-  const { useLLM = true } = options;
-
-  if (!topicName || topicName.trim().length === 0) {
-    return { ...ensureRootNode(), _created: false };
-  }
-
-  // Scan all direct siblings in the DB — guaranteed to see every existing node
-  // under this parent, unlike BM25 which only returns a capped top-N result set.
-  try {
-    const siblings = NodeRepo.findByParent(parentId);
-
-    let bestMatch = null;
-    let bestScore = 0;
-
-    for (const sibling of siblings) {
-      const score = wordDiceSimilarity(topicName.toLowerCase(), (sibling.name || "").toLowerCase());
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = sibling;
-      }
-    }
-
-    if (bestScore >= TOPIC_MATCH_THRESHOLD) {
-      logger.debug(`Topic node reused: "${bestMatch.name}" (score=${bestScore.toFixed(2)}) for "${topicName}"`);
-      return { ...bestMatch, _created: false };
-    }
-
-    // Borderline match — ask LLM to confirm
-    if (useLLM && bestScore >= 0.25 && bestMatch) {
-      try {
-        const suggestion = await suggestNodeWithLLM(
-          { content: topicName, keywords: [topicName] },
-          [{ node: bestMatch }]
-        );
-        if (suggestion.confidence >= 0.65 && suggestion.selected_index === 1) {
-          logger.debug(`LLM confirmed topic node reuse: "${bestMatch.name}" for "${topicName}"`);
-          return { ...bestMatch, _created: false };
-        }
-      } catch (_) { /* non-fatal */ }
-    }
-  } catch (err) {
-    logger.warn(`Topic node sibling scan failed for "${topicName}": ${err.message}`);
-  }
-
-  // Create new topical node
-  const parentLevel = parentId ? (NodeRepo.getLevel(parentId) ?? 0) : 0;
-  const node = createNode({
-    node_id:   generateNodeId(topicName),
-    name:      topicName,
-    parent_id: parentId,
-    level:     Number(parentLevel) + 1,
-    summary:   ""
-  });
-  logger.info(`Created topical node: ${node.node_id} (${node.name}) under ${parentId || "root"}`);
-  return { ...node, _created: true };
-}
-
-/**
- * Canonicalize topic hints before building the hierarchy.
- *
- * For each unique (non-General) topic in the incoming KP batch, recall the
- * top candidate nodes via BM25 and ask the LLM whether the topic is
- * semantically equivalent to any of them.  If yes, remap the topic to the
- * existing node's name so `findOrCreateTopicNode` will reuse it.
- *
- * Makes one LLM call per unique topic — typically 3–10 calls per ingestion.
- * Fails silently so ingestion always completes even when the LLM is down.
- *
- * @param {string[]} uniqueTopics   - already-normalised unique topic names
- * @param {boolean}  useLLM
- * @returns {Map<string, string>}   original topic → canonical name (only remapped entries)
- */
-async function canonicalizeTopicHints(uniqueTopics, useLLM) {
-  const mapping = new Map();
-  if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) return mapping;
-
-  for (const topic of uniqueTopics) {
-    if (topic === 'General') continue;
-
-    try {
-      // Recall top candidates using BM25 (pre-filter, not all nodes)
-      const candidates = searchNodesByName(topic, 12);
-      if (!candidates.length) continue;
-
-      const candidateNames = candidates
-        .map(c => (c.node || c).name)
-        .filter(Boolean)
-        .filter((n, i, arr) => arr.indexOf(n) === i) // deduplicate
-        .slice(0, 12);
-
-      const prompt = `You are organizing a knowledge graph. A new document has a topic category.
-
-New topic: "${topic}"
-
-Candidate existing nodes in the graph:
-${candidateNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}
-
-Is the new topic semantically equivalent to any candidate (same concept, possibly different phrasing)?
-- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim)
-- If NO: respond with EXACTLY "${topic}"
-
-Respond with ONLY the chosen name, nothing else.`;
-
-      const result = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'topic_canonicalization' });
-      if (!result) continue;
-
-      const canonical = result.trim().replace(/^["']|["']$/g, '');
-
-      // Only accept the LLM's answer if it exactly matches a candidate name
-      if (candidateNames.includes(canonical) && canonical !== topic) {
-        mapping.set(topic, canonical);
-        logger.info(`Topic canonicalized: "${topic}" → "${canonical}"`);
-      }
-    } catch (err) {
-      logger.warn(`Topic canonicalization failed for "${topic}": ${err.message}`);
-    }
-  }
-
-  return mapping;
-}
-
-/**
- * Group KPs into a 2–3 level topical hierarchy and return a map of
- * kp.index → nodeId for every KP, plus a list of newly created nodes.
- */
-async function buildTopicalHierarchy(kps, docTitle, documentId, options = {}) {
-  const { useLLM = true } = options;
-
-  ensureRootNode();
-
-  // ── Step 0: Canonicalize topic hints via LLM (pre-filters duplicates) ─────
-  // Collect unique (non-General) topics from this batch and ask the LLM
-  // whether any map to an existing node under a different phrasing.
-  const uniqueTopics = [...new Set(kps.map(kp => normalizeTopicHint(kp.topic_hint)))];
-  const topicMapping = await canonicalizeTopicHints(uniqueTopics, useLLM);
-  if (topicMapping.size > 0) {
-    for (const kp of kps) {
-      const normalized = normalizeTopicHint(kp.topic_hint);
-      if (topicMapping.has(normalized)) {
-        kp.topic_hint = topicMapping.get(normalized);
-      }
-    }
-  }
-  // ─────────────────────────────────────────────────────────────────────────
-
-  const nodeMap  = new Map();    // kp.index → nodeId
-  const newNodes = [];
-
-  // Group by topic_hint (generic LLM placeholders are normalized to "General")
-  const byTopic = new Map();
-  for (const kp of kps) {
-    const topic = normalizeTopicHint(kp.topic_hint);
-    if (!byTopic.has(topic)) byTopic.set(topic, []);
-    byTopic.get(topic).push(kp);
-  }
-
-  for (const [topicName, topicKPs] of byTopic) {
-    const domainNode = await findOrCreateTopicNode(topicName, "root", { useLLM });
-    if (domainNode._created) newNodes.push(domainNode);
-
-    // Decide whether to add a subtopic level
-    const bySubtopic = new Map();
-    for (const kp of topicKPs) {
-      const sub = (kp.subtopic_hint || "").trim();
-      const key = sub || "__none__";
-      if (!bySubtopic.has(key)) bySubtopic.set(key, []);
-      bySubtopic.get(key).push(kp);
-    }
-
-    const uniqueSubs = [...bySubtopic.keys()].filter(k => k !== "__none__");
-
-    // Use a subtopic level only when subtopics are dissimilar enough on average.
-    // Previously used minimum pairwise similarity, which is unstable: a single
-    // outlier pair (e.g. "Onboarding" vs "Payroll" in a set of otherwise similar
-    // subtopics) would flip the decision for the entire node. Mean similarity is
-    // robust to outliers and reflects the overall structure of the subtopic set.
-    let useSubtopic = false;
-    if (uniqueSubs.length >= 2) {
-      const sims = [];
-      for (let i = 0; i < uniqueSubs.length; i++) {
-        for (let j = i + 1; j < uniqueSubs.length; j++) {
-          sims.push(wordDiceSimilarity(uniqueSubs[i], uniqueSubs[j]));
-        }
-      }
-      const meanSim = sims.reduce((a, b) => a + b, 0) / sims.length;
-      useSubtopic = meanSim < 0.6;
-    }
-
-    if (useSubtopic) {
-      for (const [subKey, subKPs] of bySubtopic) {
-        let targetNode = domainNode;
-        if (subKey !== "__none__") {
-          targetNode = await findOrCreateTopicNode(subKey, domainNode.node_id, { useLLM });
-          if (targetNode._created) newNodes.push(targetNode);
-        }
-        for (const kp of subKPs) nodeMap.set(kp.index, targetNode.node_id);
-      }
-    } else {
-      for (const kp of topicKPs) nodeMap.set(kp.index, domainNode.node_id);
-    }
-  }
-
-  // Strip internal _created flag before returning
-  const cleanNodes = newNodes.map(({ _created: _, ...rest }) => rest);
-  return { nodeMap, newNodes: cleanNodes };
-}
-
-/**
- * Insert a KP into the DB and update the FTS index.
- * @returns {number} new chunk ID
- */
-function assignKPToNode(kp, nodeId, documentId) {
-  return runTransaction(() => {
-    const result = ChunkRepo.insertKP({
-      doc_title:            kp.doc_title,
-      content:              kp.content,
-      chunk_type:           kp.chunk_type || kp.kp_type || "fact",
-      kp_type:              kp.kp_type || "fact",
-      keywords:             kp.keywords || [],
-      fields:               kp.fields || {},
-      scope:                kp.scope || {},
-      authority_level:      kp.authority_level || "sop",
-      source_excerpt:       kp.source_excerpt || "",
-      source_documents_json: kp.source_documents_json || "[]",
-      nodeId,
-      documentId,
-      index: kp.index
-    });
-
-    const chunkId = result.lastInsertRowid;
-    ChunkRepo.insertFts(chunkId, kp.content);
-    NodeRepo.touch(nodeId);
-    logAudit("create", "chunks", chunkId, null, { node_id: nodeId, doc_title: kp.doc_title, kp_type: kp.kp_type });
-
-    return Number(chunkId);
-  });
-}
-
-/**
  * Auto-map multiple chunks to nodes
  * @param {Array} chunks - Chunks to map
  * @param {number} documentId - Document ID
@@ -870,7 +308,23 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
     const docTitle = chunks[0]?.doc_title || "Untitled";
     logger.info(`KP mapping mode: ${chunks.length} KPs from "${docTitle}"`);
 
-    const { nodeMap, newNodes } = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });
+    const mappingMode       = options.mappingMode       ?? DatasetConfigRepo.get('mapping_mode')       ?? 'free';
+    const mappingStrictness = options.mappingStrictness ?? DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
+
+    let nodeMapResult;
+    if (mappingMode === 'guided') {
+      const schemaNodes = NodeRepo.findSchemaNodes();
+      if (schemaNodes.length > 0) {
+        nodeMapResult = await buildGuidedTopicalHierarchy(chunks, docTitle, documentId, schemaNodes, { useLLM, mappingStrictness });
+      } else {
+        logger.warn('Guided mode: no schema nodes found, falling back to free mapping');
+        nodeMapResult = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });
+      }
+    } else {
+      nodeMapResult = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });
+    }
+
+    const { nodeMap, newNodes } = nodeMapResult;
     results.newNodes.push(...newNodes);
 
     // Phase 1 — parallel LLM decisions (batches of 8)
@@ -916,6 +370,9 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
           case "REPLACE": {
             const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
             ChunkRepo.supersede(decision.chunkId, newChunkId);
+            if (kp.keywords?.length > 0) {
+              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (_) { /* non-fatal */ }
+            }
             results.mapped.push({
               chunkIndex: kp.index, chunkId: newChunkId,
               nodeId: targetNodeId, replace: true
@@ -927,6 +384,9 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
           case "STORE":
           default: {
             const chunkId = assignKPToNode(kp, targetNodeId, documentId);
+            if (kp.keywords?.length > 0) {
+              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (_) { /* non-fatal */ }
+            }
             results.mapped.push({
               chunkIndex: kp.index, chunkId,
               nodeId: targetNodeId, queued: decision.queued ?? false

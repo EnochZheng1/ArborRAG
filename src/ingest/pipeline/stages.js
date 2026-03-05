@@ -16,11 +16,11 @@
 
 import { logAudit, runTransaction } from "../../db/db.js";
 import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
+import { DatasetConfigRepo } from "../../db/repositories/DatasetConfigRepo.js";
 import { parseFile, isSupportedFileType } from "../fileParser.js";
 import { extractKnowledgePoints } from "../knowledgeExtractor.js";
 import { detectAuthorityLevel } from "../metadataExtractor.js";
 import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
-import { processDocumentForExtraction } from "../../extraction/entityFactExtractor.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import crypto from "crypto";
 import fs from "fs";
@@ -151,7 +151,9 @@ export async function stageMapChunks(ctx) {
     }
   } else {
     // Auto-map chunks to the best-fitting nodes
-    const mappingResult = await autoMapChunks(enrichedChunks, documentId, { useLLM, createNewNodes });
+    const mappingMode       = DatasetConfigRepo.get('mapping_mode')       ?? 'free';
+    const mappingStrictness = DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
+    const mappingResult = await autoMapChunks(enrichedChunks, documentId, { useLLM, createNewNodes, mappingMode, mappingStrictness });
     ctx.results.mappings = mappingResult;
     ctx.results.chunks = mappingResult.mapped;
     // Track newly-created node IDs so rollback can clean them up if a later stage fails
@@ -182,29 +184,15 @@ export async function stageMapChunks(ctx) {
 }
 
 // ── Stage 5: Extract entities and facts from chunks ───────────────────────────
+// NOTE: Entity/fact LLM extraction is disabled — schema and tables are preserved
+// for future use but the LLM call is suppressed to reduce cost and latency.
 
 export async function stageExtractEntities(ctx) {
-  const { documentId, options } = ctx;
-  const { useLLM } = options;
-
-  try {
-    ctx.setStep(documentId, "entity_extraction", "Extracting entities and facts from chunks.", 96);
-    const extractionResult = await processDocumentForExtraction(documentId, { useLLM });
-
-    ctx.results.stats.entitiesExtracted = extractionResult.total_entities;
-    ctx.results.stats.factsExtracted = extractionResult.total_facts;
-    ctx.results.extraction = {
-      entities: extractionResult.total_entities,
-      facts: extractionResult.total_facts,
-      chunks_processed: extractionResult.chunks_processed,
-      errors: extractionResult.errors
-    };
-    logger.info(`Entity extraction complete: ${extractionResult.total_entities} entities, ${extractionResult.total_facts} facts`);
-  } catch (err) {
-    logger.warn(`Entity-fact extraction failed: ${err.message}`);
-    ctx.results.extraction = { error: err.message };
-    // Non-fatal — continue to finalize
-  }
+  const { documentId } = ctx;
+  ctx.setStep(documentId, "entity_extraction", "Entity extraction skipped (disabled).", 96);
+  ctx.results.stats.entitiesExtracted = 0;
+  ctx.results.stats.factsExtracted = 0;
+  ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [] };
 }
 
 // ── Stage 6: Mark document as processed ──────────────────────────────────────

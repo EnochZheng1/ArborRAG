@@ -1,127 +1,73 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
-import { parseLLMJson } from "../utils/parseJSON.js";
-import { getPrompt, isChineseLang } from "../utils/langDetect.js";
-import { getEffectiveLang } from "../utils/datasetLang.js";
 import { logger } from "../utils/logger.js";
 
 /**
- * LLM Re-ranking Module
+ * Heuristic Re-ranking Module
  *
- * Re-ranks retrieval results using LLM for more accurate relevance scoring
+ * Scores chunks using three signals:
+ *   - Keyword overlap with query (weight 0.4)
+ *   - Original BM25 recall rank position (weight 0.4)
+ *   - Embedding cosine similarity if available (weight 0.2)
+ *
+ * No LLM calls — deterministic and fast.
  */
-
-const rerankerCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 /**
- * Re-rank chunks using LLM
- * @param {string} query - Original query
- * @param {Array} chunks - Chunks to re-rank
- * @param {object} options - Options
- * @returns {Promise<Array>} Re-ranked chunks with LLM scores
+ * Re-rank chunks using a heuristic score.
+ * @param {string} query
+ * @param {Array}  chunks  - Already sorted by BM25 recall rank (position 0 = best BM25)
+ * @param {number} maxChunks
+ * @returns {Promise<Array>}
  */
-export async function rerankerChunks(query, chunks, options = {}) {
-  const { topK = 10, minScore = 0.3 } = options;
-
+export async function rerankerChunks(query, chunks, maxChunks = 10) {
   if (!chunks || chunks.length === 0) return [];
-  if (chunks.length <= 3) return chunks; // Not worth re-ranking few items
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
-    return chunks.slice(0, topK);
-  }
+  const queryTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
+  const n = chunks.length;
 
-  // Take top candidates for re-ranking (limit to avoid token limits).
-  // Raised from 20 → 40: with the expanded retrieval pool (hierarchical + direct
-  // + keyword-tag paths) the answer chunk can now sit beyond position 20.
-  const candidates = chunks.slice(0, Math.min(40, chunks.length));
-
-  // Check cache
-  const cacheKey = `${query}:${candidates.map(c => c.id || c.chunk?.id).join(',')}`;
-  const cached = rerankerCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.results;
-  }
-
-  try {
-    // Build prompt for batch scoring
-    const chunkTexts = candidates.map((c, i) => {
-      const content = c.content || c.chunk?.content || c.content_clean || '';
-      const preview = content.slice(0, 300).replace(/\n/g, ' ');
-      return `[${i}] ${preview}`;
-    }).join('\n\n');
-
-    // Detect language from query and use appropriate prompt
-    const lang = getEffectiveLang(query);
-    const prompt = getPrompt('reranking', lang, query, chunkTexts);
-
-    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 200, taskName: 'reranking' }) || '';
-
-    const scores = await parseLLMJson(text, 'array', { context: 'chunk_reranking', fallback: null });
-    if (!Array.isArray(scores)) return candidates.slice(0, topK);
-
-    // Attach scores and compute blended rank. The LLM reranker (gpt-5-nano) can give
-    // unreliable scores — sometimes rating irrelevant chunks 7-8 and relevant ones 3-4.
-    // Blending with the original retrieval rank (BM25 + hierarchical) prevents a single
-    // bad LLM judgment from completely burying the correct chunk.
-    const scored = candidates.map((chunk, i) => {
-      const llmScore = scores[i] || 0;
-      // Original rank bonus: position 0 → 10 points, position 9 → 1 point
-      const rankBonus = Math.max(0, 10 - i) * 0.3;
-      return {
-        ...chunk,
-        rerank_score: llmScore + rankBonus,
-        rerank_score_raw: llmScore,
-        original_rank: i
-      };
-    });
-
-    scored.sort((a, b) => b.rerank_score - a.rerank_score);
-
-    // Filter by absolute minimum score
-    let results = scored.filter(c => c.rerank_score >= minScore * 10);
-
-    // Score-gap cutoff: if there's a significant gap in raw LLM scores between
-    // consecutive chunks, only keep the ones above the gap. Uses raw scores (no rank
-    // bonus) so the gap reflects actual LLM relevance judgments.
-    if (results.length > 3 && (results[0].rerank_score_raw || 0) >= 6) {
-      const GAP_THRESHOLD = 3;
-      for (let i = 1; i < results.length; i++) {
-        const drop = (results[i - 1].rerank_score_raw || 0) - (results[i].rerank_score_raw || 0);
-        if (drop >= GAP_THRESHOLD && i >= 2) {
-          results = results.slice(0, i);
-          break;
-        }
-      }
+  const scored = chunks.map((chunk, i) => {
+    // Signal 1 — keyword overlap (0–1)
+    let overlapScore = 0;
+    if (queryTerms.length > 0) {
+      const content = (chunk.content || chunk.chunk?.content || chunk.content_clean || "").toLowerCase();
+      const matches = queryTerms.filter(t => content.includes(t)).length;
+      overlapScore = matches / queryTerms.length;
     }
 
-    results = results.slice(0, topK);
+    // Signal 2 — BM25 rank position (0–1, pos 0 → 1.0)
+    const rankScore = n > 1 ? 1 - i / (n - 1) : 1;
 
-    // Cache results
-    rerankerCache.set(cacheKey, { results, timestamp: Date.now() });
+    // Signal 3 — embedding cosine similarity (default 0.5 if missing)
+    const embScore = chunk.similarity != null ? chunk.similarity : 0.5;
 
-    // Clean old cache entries
-    if (rerankerCache.size > 100) {
-      const now = Date.now();
-      for (const [key, value] of rerankerCache) {
-        if (now - value.timestamp > CACHE_TTL) {
-          rerankerCache.delete(key);
-        }
+    const score = 0.4 * overlapScore + 0.4 * rankScore + 0.2 * embScore;
+
+    return { ...chunk, rerank_score: score, rerank_score_raw: score, original_rank: i };
+  });
+
+  scored.sort((a, b) => b.rerank_score - a.rerank_score);
+
+  // Score-gap cutoff: if top score is strong and there's a large drop, cut there
+  let results = scored;
+  if (results.length > 3 && results[0].rerank_score >= 0.6) {
+    const GAP_THRESHOLD = 0.3;
+    for (let i = 1; i < results.length; i++) {
+      const drop = results[i - 1].rerank_score - results[i].rerank_score;
+      if (drop >= GAP_THRESHOLD && i >= 2) {
+        results = results.slice(0, i);
+        break;
       }
     }
-
-    return results;
-  } catch (error) {
-    logger.warn(`Re-ranking error: ${error.message}`);
-    return candidates.slice(0, topK);
   }
+
+  return results.slice(0, maxChunks);
 }
 
 /**
- * Re-rank nodes using LLM
- * @param {string} query - Original query
- * @param {Array} nodes - Nodes to re-rank
- * @param {object} options - Options
- * @returns {Promise<Array>} Re-ranked nodes
+ * Re-rank nodes using keyword overlap with query terms.
+ * @param {string} query
+ * @param {Array}  nodes
+ * @param {object} options
+ * @returns {Promise<Array>}
  */
 export async function rerankerNodes(query, nodes, options = {}) {
   const { topK = 5 } = options;
@@ -129,40 +75,25 @@ export async function rerankerNodes(query, nodes, options = {}) {
   if (!nodes || nodes.length === 0) return [];
   if (nodes.length <= 2) return nodes;
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
-    return nodes.slice(0, topK);
-  }
+  const queryTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
+  const n = nodes.length;
 
-  try {
-    // Detect language from query
-    const lang = getEffectiveLang(query);
-    const aliasLabel = isChineseLang(lang) ? '别名' : 'aliases';
+  const scored = nodes.map((nodeItem, i) => {
+    const node = nodeItem.node || nodeItem;
+    const text = ((node.name || "") + " " + (node.node_summary || "") + " " + (node.aliases || "")).toLowerCase();
 
-    const nodeTexts = nodes.map((n, i) => {
-      const node = n.node || n;
-      const name = node.name || node.node_id;
-      const summary = node.node_summary || '';
-      const aliases = node.aliases ? ` (${aliasLabel}: ${node.aliases})` : '';
-      return `[${i}] ${name}${aliases}: ${summary.slice(0, 200)}`;
-    }).join('\n');
+    let overlapScore = 0;
+    if (queryTerms.length > 0) {
+      const matches = queryTerms.filter(t => text.includes(t)).length;
+      overlapScore = matches / queryTerms.length;
+    }
 
-    // Use bilingual prompt
-    const prompt = getPrompt('nodeReranking', lang, query, nodeTexts);
+    const rankScore = n > 1 ? 1 - i / (n - 1) : 1;
+    const score = 0.5 * overlapScore + 0.5 * rankScore;
 
-    const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 100, taskName: 'node_reranking' }) || '';
-    const scores = await parseLLMJson(text, 'array', { context: 'node_reranking', fallback: null });
-    if (!Array.isArray(scores)) return nodes.slice(0, topK);
+    return { ...nodeItem, rerank_score: score };
+  });
 
-    const scored = nodes.map((node, i) => ({
-      ...node,
-      rerank_score: scores[i] || 0
-    }));
-
-    scored.sort((a, b) => b.rerank_score - a.rerank_score);
-
-    return scored.slice(0, topK);
-  } catch (error) {
-    logger.warn(`Node re-ranking error: ${error.message}`);
-    return nodes.slice(0, topK);
-  }
+  scored.sort((a, b) => b.rerank_score - a.rerank_score);
+  return scored.slice(0, topK);
 }

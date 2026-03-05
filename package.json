@@ -1,6 +1,6 @@
 {
   "name": "kg-mvp",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Tree-based Knowledge Graph with intelligent retrieval and reasoning",
   "main": "src/server.js",
   "scripts": {

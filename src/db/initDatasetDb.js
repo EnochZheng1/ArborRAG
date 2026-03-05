@@ -33,6 +33,9 @@ function runMigrations(conn) {
   ensureColumn(conn, "nodes", "authority_level_mode", "authority_level_mode TEXT DEFAULT 'sop'");
   ensureColumn(conn, "nodes", "conflict_score", "conflict_score INTEGER DEFAULT 0");
   ensureColumn(conn, "nodes", "updated_at", "updated_at TEXT");
+  ensureColumn(conn, "nodes", "node_description", "node_description TEXT DEFAULT ''");
+  ensureColumn(conn, "nodes", "is_schema_node",   "is_schema_node INTEGER DEFAULT 0");
+  ensureColumn(conn, "nodes", "keywords_json",    "keywords_json TEXT DEFAULT '[]'");
 
   // Chunks
   ensureColumn(conn, "chunks", "doc_title", "doc_title TEXT");
@@ -125,6 +128,7 @@ function ensureIndexes(conn) {
     { name: "idx_conflicts_node", sql: "CREATE INDEX IF NOT EXISTS idx_conflicts_node ON conflicts(node_id)" },
     { name: "idx_conflicts_resolution", sql: "CREATE INDEX IF NOT EXISTS idx_conflicts_resolution ON conflicts(resolution)" },
     { name: "idx_chunks_kp_type", sql: "CREATE INDEX IF NOT EXISTS idx_chunks_kp_type ON chunks(kp_type, node_id)" },
+    { name: "idx_nodes_schema", sql: "CREATE INDEX IF NOT EXISTS idx_nodes_schema ON nodes(is_schema_node) WHERE is_schema_node = 1" },
   ];
 
   for (const idx of indexes) {
@@ -271,6 +275,8 @@ function initDatasetConfigTable(conn) {
     );
   `);
   conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('language', 'auto')`).run();
+  conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('mapping_mode', 'free')`).run();
+  conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('mapping_strictness', 'soft')`).run();
 }
 
 function initFeedbackTables(conn) {

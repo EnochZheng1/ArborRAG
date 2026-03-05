@@ -14,7 +14,6 @@ import express from "express";
 import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { executeMerge } from "../ingest/nodeMerger.js";
-import { runCleanupJob } from "../ingest/cleanupJob.js";
 import { apiLogger as logger } from "../utils/logger.js";
 
 const router = express.Router();
@@ -47,23 +46,10 @@ router.get("/decisions/stats", (req, res) => {
   }
 });
 
-// ── Cleanup dry-run (must come before /:id) ───────────────────────────────────
+// ── Cleanup dry-run (disabled) ────────────────────────────────────────────────
 
-router.get("/decisions/cleanup/dry-run", async (req, res) => {
-  try {
-    const { batchSize = "100", maxBatches = "10" } = req.query;
-    const result = await runCleanupJob({
-      batchSize:  Math.min(500, Math.max(1, parseInt(batchSize, 10) || 100)),
-      maxBatches: Math.min(100, Math.max(1, parseInt(maxBatches, 10) || 10)),
-      useLLM: false,
-      dryRun: true,
-      includeNodeMerge: false
-    });
-    res.json(result);
-  } catch (err) {
-    logger.error("GET /decisions/cleanup/dry-run error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+router.get("/decisions/cleanup/dry-run", (_req, res) => {
+  res.status(410).json({ error: "Cleanup job has been removed" });
 });
 
 // ── Single decision ───────────────────────────────────────────────────────────
@@ -164,24 +150,10 @@ router.post("/decisions/:id/reject", (req, res) => {
   }
 });
 
-// ── Run cleanup job ───────────────────────────────────────────────────────────
+// ── Run cleanup job (disabled) ────────────────────────────────────────────────
 
-router.post("/decisions/cleanup", async (req, res) => {
-  try {
-    const { batchSize = 100, maxBatches = 50, useLLM = true } = req.body || {};
-    // Run async without blocking response
-    res.json({ started: true, message: "Cleanup job started in background" });
-    runCleanupJob({
-      batchSize:  Math.min(500, Math.max(1, parseInt(batchSize, 10) || 100)),
-      maxBatches: Math.min(200, Math.max(1, parseInt(maxBatches, 10) || 50)),
-      useLLM:     Boolean(useLLM),
-      dryRun:     false,
-      includeNodeMerge: true
-    }).catch(err => logger.error("Cleanup job failed:", err.message));
-  } catch (err) {
-    logger.error("POST /decisions/cleanup error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+router.post("/decisions/cleanup", (_req, res) => {
+  res.status(410).json({ error: "Cleanup job has been removed" });
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -257,6 +257,7 @@
         <div class="tab-header">
           <h2 data-i18n="tree_title">Knowledge Tree</h2>
           <div class="header-actions">
+            <span id="schema-mode-badge" class="schema-mode-badge hidden" title="Click to open schema settings" style="cursor:pointer"></span>
             <div class="view-toggle">
               <button class="view-btn active" data-view="list" title="List View">
                 <svg class="view-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
@@ -276,6 +277,31 @@
             </button>
           </div>
         </div>
+
+        <!-- Schema Panel -->
+        <div class="schema-panel" id="schema-panel">
+          <div class="schema-panel-header" id="schema-panel-toggle">
+            <span class="schema-panel-title">Schema</span>
+            <div class="schema-panel-actions">
+              <button class="btn btn-small btn-secondary" id="schema-import-btn" title="Import schema from JSON">Import JSON</button>
+              <button class="btn btn-small btn-secondary" id="schema-export-btn" title="Export schema as JSON">Export JSON</button>
+              <button class="btn btn-small btn-secondary" id="schema-save-template-btn" title="Save current schema as a global template">Save as Template</button>
+              <button class="btn btn-small btn-secondary" id="schema-settings-btn" title="Schema mapping settings">Settings</button>
+              <span class="schema-panel-chevron" id="schema-panel-chevron">&#9654;</span>
+            </div>
+          </div>
+          <div class="schema-panel-body hidden" id="schema-panel-body">
+            <div class="schema-templates-section" id="schema-templates-section">
+              <h4 class="schema-section-title">Global Templates</h4>
+              <div id="schema-templates-list" class="schema-templates-list"></div>
+            </div>
+            <div class="schema-nodes-section">
+              <h4 class="schema-section-title">Schema Nodes</h4>
+              <div id="schema-nodes-tree" class="schema-nodes-tree"></div>
+            </div>
+          </div>
+        </div>
+        <input type="file" id="schema-import-file" accept=".json" hidden>
 
         <div class="tree-container">
           <div class="tree-view" id="tree-view">
@@ -342,6 +368,58 @@
                 <button type="submit" class="btn btn-primary" data-i18n="create">Create</button>
               </div>
             </form>
+          </div>
+        </div>
+
+        <!-- Schema Settings Modal -->
+        <div class="modal hidden" id="schema-settings-modal">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3>Schema Mapping Settings</h3>
+              <button class="close-btn" id="close-schema-settings-modal">&times;</button>
+            </div>
+            <div class="form-group">
+              <label>Mapping Mode</label>
+              <div class="toggle-group" id="mapping-mode-toggle">
+                <button class="toggle-btn active" data-value="free">Free</button>
+                <button class="toggle-btn" data-value="guided">Guided</button>
+              </div>
+              <p class="option-hint">Free: LLM invents topic names. Guided: KPs map to your schema nodes.</p>
+            </div>
+            <div class="form-group" id="strictness-group">
+              <label>Strictness (Guided only)</label>
+              <div class="toggle-group" id="mapping-strictness-toggle">
+                <button class="toggle-btn active" data-value="soft">Soft</button>
+                <button class="toggle-btn" data-value="hard">Hard</button>
+              </div>
+              <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-secondary" id="cancel-schema-settings">Cancel</button>
+              <button class="btn btn-primary" id="save-schema-settings">Save</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Save Template Modal -->
+        <div class="modal hidden" id="save-template-modal">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h3>Save Schema as Template</h3>
+              <button class="close-btn" id="close-save-template-modal">&times;</button>
+            </div>
+            <div class="form-group">
+              <label for="template-name">Template Name</label>
+              <input type="text" id="template-name" placeholder="e.g. HR Knowledge Base">
+            </div>
+            <div class="form-group">
+              <label for="template-description">Description (optional)</label>
+              <input type="text" id="template-description" placeholder="Brief description">
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-secondary" id="cancel-save-template">Cancel</button>
+              <button class="btn btn-primary" id="confirm-save-template">Save</button>
+            </div>
           </div>
         </div>
 
@@ -431,18 +509,18 @@
           <h2 data-i18n="documents_title">Documents</h2>
           <div class="header-actions">
             <select id="doc-status-filter" class="filter-select">
-              <option value="">All Status</option>
+              <option value="">All</option>
+              <option value="queued">Queued</option>
               <option value="processing">Processing</option>
+              <option value="rate_limited">Rate Limited</option>
               <option value="processed">Processed</option>
-              <option value="pending">Pending</option>
               <option value="failed">Failed</option>
             </select>
+            <button id="retry-all-docs-btn"  class="btn btn-warning btn-sm" style="display:none">Retry All Paused</button>
+            <button id="cancel-all-docs-btn" class="btn btn-danger  btn-sm" style="display:none">Cancel All</button>
             <button id="refresh-docs-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
           </div>
         </div>
-
-        <!-- Rate-limited jobs banner (hidden when no paused jobs) -->
-        <div id="rate-limited-banner" class="rate-limited-banner hidden"></div>
 
         <div class="documents-container">
           <table class="data-table" id="documents-table">
@@ -452,9 +530,9 @@
                 <th data-i18n="filename">Filename</th>
                 <th data-i18n="type">Type</th>
                 <th data-i18n="status">Status</th>
-                <th data-i18n="processing_step">Current Step</th>
-                <th data-i18n="chunks">Chunks</th>
-                <th data-i18n="uploaded">Uploaded</th>
+                <th>Progress / Step</th>
+                <th data-i18n="chunks">KPs</th>
+                <th data-i18n="uploaded">Time</th>
                 <th data-i18n="actions">Actions</th>
               </tr>
             </thead>

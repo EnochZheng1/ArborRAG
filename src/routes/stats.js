@@ -4,7 +4,6 @@ import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { EntityRepo } from "../db/repositories/EntityRepo.js";
 import { getTreeStats } from "../kg/graphTraversal.js";
 import { getEmbeddingCoverage } from "../embedding/chunkEmbeddings.js";
-import { getConflictStats } from "../ingest/conflictDetector.js";
 import { getIngestionQueueStats } from "../ingest/jobQueue.js";
 import { emptyTree, getSupportedExtensions } from "../ingest/index.js";
 import { getTokenStats, cleanupTokenHistory } from "../utils/tokenTracker.js";
@@ -26,7 +25,7 @@ router.get("/stats", (req, res) => {
   try {
     const treeStats = getTreeStats();
     const embeddingCoverage = getEmbeddingCoverage();
-    const conflictStats = getConflictStats();
+    const conflictStats = { total: 0, unresolved: 0, resolved: 0 };
     const queueStats = getIngestionQueueStats();
 
     const docStats = DocumentRepo.getStats();

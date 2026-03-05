@@ -24,5 +24,18 @@ export const DatasetConfigRepo = {
 
   isLocked() {
     return DatasetConfigRepo.getLanguage() !== 'auto';
+  },
+
+  /** Generic key read — returns value string or null if not set. */
+  get(key) {
+    return db.prepare("SELECT value FROM dataset_config WHERE key = ?").get(key)?.value ?? null;
+  },
+
+  /** Generic key write — upsert. */
+  set(key, value) {
+    db.prepare(
+      `INSERT INTO dataset_config (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(key, String(value));
   }
 };

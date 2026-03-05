@@ -21,8 +21,6 @@ export * from "./fileParser.js";
 export * from "./chunker.js";
 export * from "./metadataExtractor.js";
 export * from "./nodeMapper.js";
-export * from "./conflictDetector.js";
-
 // Re-export pipeline entry points
 export { processDocument, processDocumentBatch } from "./pipeline/index.js";
 

@@ -85,6 +85,10 @@ function detectSectionHeadings(text) {
     const trimmed = line.trim();
 
     if (trimmed.length >= 3 && trimmed.length <= 80) {
+      // Skip URL-like strings and percent-encoded paths (e.g. from PDF metadata)
+      if (/^https?:\/\//i.test(trimmed) || /%[0-9A-Fa-f]{2}/.test(trimmed) ||
+          /^[a-z0-9._-]+\.[a-z]{2,5}\//i.test(trimmed)) continue;
+
       // ALL-CAPS heading (allow digits, spaces, punctuation — but no lowercase)
       if (/^[^a-z]*$/.test(trimmed) && /[A-Z]{2,}/.test(trimmed)) {
         headings.push({ heading: trimmed, startIndex: charOffset });
@@ -206,7 +210,12 @@ function normaliseKP(raw, index, docTitle, documentId, authorityLevel) {
   const sourceExcerpt = String(raw.source_excerpt || "").slice(0, 200).trim();
   // Always include the verbatim excerpt in content so exact numbers/phrases
   // ("90-day", "twice per year") survive LLM paraphrasing and remain searchable.
-  const fullContent = sourceExcerpt && sourceExcerpt !== statement
+  // Skip appending if the excerpt is already contained within the statement
+  // (avoids "statement\nexcerpt" where excerpt is a prefix/suffix of statement).
+  const shouldAppendExcerpt = sourceExcerpt
+    && sourceExcerpt !== statement
+    && !statement.includes(sourceExcerpt);
+  const fullContent = shouldAppendExcerpt
     ? `${statement}\n${sourceExcerpt}`
     : statement;
 

@@ -34,6 +34,10 @@ function initWebSocket() {
         // Ignore progress events for other datasets (user may have switched while job ran)
         if (msg.datasetId && msg.datasetId !== currentDatasetId) return;
         _handleJobProgress(msg);
+      } else if (msg.type === 'queue_update') {
+        // A job was enqueued or finished — refresh the Documents view immediately
+        // instead of waiting for the next polling cycle.
+        _scheduleUnifiedReload();
       }
     } catch { /* ignore */ }
   });
@@ -48,6 +52,32 @@ function initWebSocket() {
 
   _ws.addEventListener('error', () => { /* close will fire next */ });
 }
+
+// ── WS-driven reload (replaces 2s polling for the Documents tab) ──────────────
+
+// Debounce: if multiple queue_update events arrive within 150ms, only reload once.
+let _reloadDebounce = null;
+function _scheduleUnifiedReload() {
+  if (document.hidden) return; // tab not visible — skip, visibilitychange will reload on return
+  if (_reloadDebounce) clearTimeout(_reloadDebounce);
+  _reloadDebounce = setTimeout(() => {
+    _reloadDebounce = null;
+    const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
+    if (docsTabActive) loadUnifiedView().catch(console.error);
+  }, 150);
+}
+
+// Pause all polling when tab is hidden; resume with an immediate reload when visible again.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    // Tab became visible — refresh immediately so we catch anything we missed
+    const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
+    if (docsTabActive) loadUnifiedView().catch(console.error);
+  } else {
+    // Tab hidden — cancel any pending poll to avoid wasted requests
+    if (_unifiedPollTimer) { clearTimeout(_unifiedPollTimer); _unifiedPollTimer = null; }
+  }
+});
 
 // ── Pipeline stage definitions for the progress tracker ──────────────────────
 const PIPELINE_STAGES = [
@@ -82,15 +112,30 @@ function _renderStageTracker(activeStageIdx) {
 function _handleJobProgress({ jobId, step, progress, message, status }) {
   const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'rate_limited']);
 
-  // Update live progress strip inside the job card
+  // Update live progress in the unified Documents table row (if visible)
   const progressEl = document.getElementById(`job-progress-${jobId}`);
   if (progressEl) {
     if (TERMINAL.has(status)) {
+      // Row will be refreshed by the poll timer; clear the progress bar now
       progressEl.innerHTML = '';
     } else {
       const pct = Math.max(0, Math.min(100, progress || 0));
-      const stageIdx = STEP_TO_STAGE[step] ?? 0;
       progressEl.innerHTML = `
+        <div class="doc-progress-bar"><div class="doc-progress-fill" style="width:${pct}%"></div></div>
+        <span class="doc-progress-msg">${message ? escapeHtml(message) : ''} ${pct > 0 ? `(${pct}%)` : ''}</span>
+      `;
+    }
+  }
+
+  // Also update the upload result card (for the current-session upload area)
+  const uploadCard = document.querySelector(`[data-job-id="${jobId}"] .job-live-progress`);
+  if (uploadCard) {
+    if (TERMINAL.has(status)) {
+      uploadCard.innerHTML = '';
+    } else {
+      const pct = Math.max(0, Math.min(100, progress || 0));
+      const stageIdx = STEP_TO_STAGE[step] ?? 0;
+      uploadCard.innerHTML = `
         <div class="job-progress-bar"><div class="job-progress-fill" style="width:${pct}%"></div></div>
         ${_renderStageTracker(stageIdx)}
         ${message ? `<p class="job-stage-msg">${escapeHtml(message)}</p>` : ''}
@@ -99,13 +144,15 @@ function _handleJobProgress({ jobId, step, progress, message, status }) {
   }
 
   if (TERMINAL.has(status)) {
-    // Trigger an immediate poll to get the full final job state
+    // Trigger an immediate poll to get the full final job state (upload card)
     const entry = _uploadJobPollers.get(String(jobId));
     if (entry) {
       clearTimeout(entry.timer);
       entry.pollFn();
     }
     _wsSend({ type: 'unwatch', jobId: String(jobId) });
+    // Refresh the unified table so the row moves to its final state
+    loadUnifiedView().catch(console.error);
   }
 }
 
@@ -396,7 +443,7 @@ const i18n = {
 
 let currentLang = 'en';
 let allNodes = [];
-let documentsPollTimer = null;
+let documentsPollTimer = null; // legacy, superseded by _unifiedPollTimer
 let currentQueryResult = null; // Store current result for feedback
 let suggestionTimeout = null;
 let graphSimulation = null; // D3 force simulation
@@ -598,7 +645,7 @@ function initTabs() {
       closeMobileSidebar();
 
       // Load data for specific tabs
-      if (tabId === 'tree') loadTree();
+      if (tabId === 'tree') { loadTree(); initSchemaPanel(); }
       if (tabId === 'documents') loadDocuments();
       if (tabId === 'decisions') loadDecisions();
       if (tabId === 'tests') loadTests();
@@ -2172,17 +2219,22 @@ async function loadNodeDetail(nodeId) {
       .replace(/\n/g, '<br>')
       .replace(/Key topics:/g, '<strong>Key topics:</strong>');
 
+    const isSchema   = n.is_schema_node === 1 || n.is_schema_node === true;
+    const nodeKws    = (() => { try { return JSON.parse(n.keywords_json || '[]'); } catch(_){return [];} })();
+
     let html = `
       <div class="node-meta">
         <dl>
           <dt>ID</dt>
-          <dd><code>${n.node_id}</code></dd>
+          <dd><code>${n.node_id}</code>${isSchema ? ' <span class="schema-badge" title="Schema node">&#128204;</span>' : ''}</dd>
           <dt>Level</dt>
           <dd>${n.level}</dd>
           <dt>Parent</dt>
           <dd>${n.parent_id || '(root)'}</dd>
         </dl>
       </div>
+      ${isSchema && n.node_description ? `<div class="node-description"><h4>Description</h4><p>${escapeHtml(n.node_description)}</p></div>` : ''}
+      ${nodeKws.length > 0 ? `<div class="node-keywords-section"><h4>Keywords</h4><div class="keyword-chips">${nodeKws.map(k => `<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div></div>` : ''}
 
       <div class="node-summary">
         <h4>Summary</h4>
@@ -2686,9 +2738,8 @@ function _startUploadJobPoller(jobId, resultIndex, allResults) {
       if (TERMINAL.has(job.status)) {
         _stopUploadJobPoller(jobId);
         _wsSend({ type: 'unwatch', jobId: String(jobId) });
-        // Refresh the Documents tab list in the background
-        if (job.status === 'completed') loadDocuments();
-        if (job.status === 'rate_limited') loadRateLimitedJobs();
+        // Refresh the unified Documents tab view in the background
+        loadUnifiedView().catch(console.error);
         return;
       }
     } catch {
@@ -2697,12 +2748,15 @@ function _startUploadJobPoller(jobId, resultIndex, allResults) {
 
     const entry = _uploadJobPollers.get(jobId);
     if (entry) {
-      entry.timer = setTimeout(poll, 2000);
+      // When WebSocket is connected, poll infrequently — WS handles live progress.
+      // When WS is down, fall back to 3s polling so the UI still updates.
+      const wsHealthy = _ws && _ws.readyState === WebSocket.OPEN;
+      entry.timer = setTimeout(poll, wsHealthy ? 15000 : 3000);
     }
   }
 
-  // Store pollFn so the WS handler can trigger an immediate poll
-  _uploadJobPollers.set(jobId, { timer: setTimeout(poll, 2000), pollFn: poll });
+  // Store pollFn so the WS handler can trigger an immediate poll on terminal events
+  _uploadJobPollers.set(jobId, { timer: setTimeout(poll, 3000), pollFn: poll });
 }
 
 function displayUploadResult(results) {
@@ -2731,71 +2785,116 @@ function displayUploadResult(results) {
 
 // Documents Tab
 function initDocuments() {
-  document.getElementById('refresh-docs-btn').addEventListener('click', loadDocuments);
-  document.getElementById('doc-status-filter').addEventListener('change', loadDocuments);
+  document.getElementById('refresh-docs-btn').addEventListener('click',  loadUnifiedView);
+  document.getElementById('doc-status-filter').addEventListener('change', loadUnifiedView);
+  document.getElementById('retry-all-docs-btn')?.addEventListener('click',  retryAllJobs);
+  document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
 }
 
-async function loadRateLimitedJobs() {
-  const banner = document.getElementById('rate-limited-banner');
-  if (!banner) return;
-  try {
-    const data = await api('/ingest/jobs?status=rate_limited&limit=50');
-    const jobs = data.jobs || [];
-    if (jobs.length === 0) {
-      banner.classList.add('hidden');
-      return;
-    }
-    banner.classList.remove('hidden');
-    banner.innerHTML = `
-      <div class="rate-limit-banner-header">
-        <span class="rate-limit-icon">⏸</span>
-        <strong>${jobs.length} job${jobs.length > 1 ? 's' : ''} paused — API rate limit (429)</strong>
-        <span class="rate-limit-hint">Resume after your Gemini quota resets (usually within a minute or an hour).</span>
-      </div>
-      <div class="rate-limit-jobs">
-        ${jobs.map(job => {
-          const jobName = escapeHtml(job.original_name || job.file_path || '');
-          const errMsg = escapeHtml((job.error_message || '').replace(/^Rate limit hit \(429\) — resume when quota resets: /, ''));
-          return `
-          <div class="rate-limit-job">
-            <span class="rate-limit-job-name">${jobName}</span>
-            <span class="rate-limit-job-err">${errMsg}</span>
-            <button class="btn btn-sm btn-warning resume-job-btn" data-job-id="${job.id}">Resume</button>
-          </div>`;
-        }).join('')}
-      </div>
-    `;
-  } catch {
-    banner.classList.add('hidden');
-  }
-}
-
-window.resumeRateLimitedJob = async function(jobId) {
+window.retryJob = async function(jobId) {
   try {
     await api(`/ingest/jobs/${jobId}/retry`, { method: 'POST' });
-    showToast('Job resumed — processing will restart shortly.', 'success');
-    loadRateLimitedJobs();
-    loadDocuments();
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
+    showToast('Job queued for retry.', 'success');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
 };
 
-async function loadDocuments() {
-  loadRateLimitedJobs().catch(console.error);
-  const tbody = document.getElementById('documents-tbody');
-  if (documentsPollTimer) {
-    clearTimeout(documentsPollTimer);
-    documentsPollTimer = null;
-  }
+window.cancelJob = async function(jobId) {
+  try {
+    await api(`/ingest/jobs/${jobId}/cancel`, { method: 'POST' });
+    showToast('Job cancelled.', 'info');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
+};
 
-  // Keep skeleton rows visible initially
-  const status = document.getElementById('doc-status-filter').value;
+window.cancelAndDeleteJob = async function(jobId, docId) {
+  if (!confirm('Cancel this job and permanently delete all extracted content from the dataset?')) return;
+  try {
+    // Cancel the job first (may already be cancelled — ignore error)
+    try { await api(`/ingest/jobs/${jobId}/cancel`, { method: 'POST' }); } catch (_) {}
+    // Then delete the document and all its data
+    await api(`/documents/${docId}`, { method: 'DELETE' });
+    showToast('Job cancelled and document data deleted.', 'info');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
+};
+
+async function retryAllJobs() {
+  try {
+    const r = await api('/ingest/jobs/retry-all', { method: 'POST' });
+    showToast(`${r.retried} job${r.retried !== 1 ? 's' : ''} queued for retry.`, 'success');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function cancelAllJobs() {
+  if (!confirm('Cancel all queued, processing, and rate-limited jobs?')) return;
+  try {
+    const r = await api('/ingest/jobs/cancel-all', { method: 'POST' });
+    showToast(`${r.cancelled} job${r.cancelled !== 1 ? 's' : ''} cancelled.`, 'info');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+let _unifiedPollTimer = null;
+// Map of jobId → name for active jobs seen in last poll (to detect completions)
+let _prevActiveJobs = new Map();
+
+async function loadUnifiedView() {
+  const tbody = document.getElementById('documents-tbody');
+  if (!tbody) return;
+
+  if (_unifiedPollTimer) { clearTimeout(_unifiedPollTimer); _unifiedPollTimer = null; }
+
+  const statusFilter = document.getElementById('doc-status-filter')?.value || '';
 
   try {
-    const data = await api(`/documents${status ? `?status=${status}` : ''}`);
+    const data = await api('/documents/unified');
+    let rows = data.rows || [];
 
-    if (!data.documents || data.documents.length === 0) {
+    // Detect completed jobs (were active last poll, now gone from active list → completed/cancelled)
+    const currentActiveJobs = new Map(
+      rows.filter(r => r.row_type === 'job' && ['queued','processing','rate_limited'].includes(r.status) && r.job_id)
+          .map(r => [r.job_id, r.name || `Job #${r.job_id}`])
+    );
+    if (_prevActiveJobs.size > 0) {
+      for (const [jid, name] of _prevActiveJobs) {
+        if (!currentActiveJobs.has(jid)) {
+          // Job transitioned out of active state — find its terminal row if present
+          const finalRow = rows.find(r => r.job_id === jid || (r.doc_id && rows.find(x => x.job_id === jid)?.doc_id === r.doc_id));
+          const finalStatus = finalRow?.status;
+          if (!finalStatus || finalStatus === 'completed' || finalStatus === 'processed') {
+            showToast(`"${name}" finished processing`, 'success');
+          } else if (finalStatus === 'failed') {
+            showToast(`"${name}" failed. Check error for details.`, 'error');
+          }
+          // Silently ignore cancelled — user triggered it intentionally
+        }
+      }
+    }
+    _prevActiveJobs = currentActiveJobs;
+
+    // Client-side filter
+    if (statusFilter) {
+      rows = rows.filter(r => {
+        if (statusFilter === 'queued')       return r.status === 'queued';
+        if (statusFilter === 'processing')   return r.status === 'processing';
+        if (statusFilter === 'rate_limited') return r.status === 'rate_limited';
+        if (statusFilter === 'processed')    return r.status === 'processed';
+        if (statusFilter === 'failed')       return r.status === 'failed';
+        return true;
+      });
+    }
+
+    // Update bulk action button visibility
+    const hasQueued  = rows.some(r => r.status === 'queued' || r.status === 'processing' || r.status === 'rate_limited');
+    const hasPaused  = rows.some(r => r.status === 'rate_limited' || r.status === 'failed');
+    const retryBtn   = document.getElementById('retry-all-docs-btn');
+    const cancelBtn  = document.getElementById('cancel-all-docs-btn');
+    if (retryBtn)  retryBtn.style.display  = hasPaused ? '' : 'none';
+    if (cancelBtn) cancelBtn.style.display = hasQueued  ? '' : 'none';
+
+    if (rows.length === 0) {
       tbody.innerHTML = `<tr><td colspan="8">${renderEmptyState(
         '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
         'No documents yet',
@@ -2804,55 +2903,144 @@ async function loadDocuments() {
       return;
     }
 
-    tbody.innerHTML = data.documents.map(doc => `
-      <tr>
-        <td>${doc.id}</td>
-        <td>${escapeHtml(doc.original_name || doc.filename || '')}</td>
-        <td>${escapeHtml(doc.file_type || '-')}</td>
-        <td><span class="status-badge status-${escapeHtml(doc.status || '')}">${escapeHtml(doc.status || '')}</span></td>
-        <td>${formatDocumentStep(doc)}</td>
-        <td>${Math.max(0, doc.chunk_count || 0)}</td>
-        <td>${doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleDateString() : '-'}</td>
-        <td>
-          <button class="btn btn-sm btn-danger" onclick="deleteDocument(${doc.id})">${t('delete')}</button>
-        </td>
-      </tr>
-    `).join('');
+    tbody.innerHTML = rows.map(row => _renderUnifiedRow(row)).join('');
 
-    const hasInProgress = data.documents.some(doc => doc.status === 'processing');
+    // Register WebSocket watch for active processing jobs
+    rows.filter(r => r.row_type === 'job' && r.status === 'processing' && r.job_id)
+        .forEach(r => _wsSend({ type: 'watch', jobId: String(r.job_id) }));
+
+    // Auto-refresh while jobs are queued or processing
+    const hasActive = rows.some(r => r.status === 'queued' || r.status === 'processing');
     const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
-    if (hasInProgress && docsTabActive) {
-      documentsPollTimer = setTimeout(() => {
-        loadDocuments();
-      }, 1500);
+    if (hasActive && docsTabActive) {
+      // 20s fallback poll — only a safety net; queue_update WS events handle most refreshes
+    _unifiedPollTimer = setTimeout(() => loadUnifiedView().catch(console.error), 20000);
     }
   } catch (error) {
-    tbody.innerHTML = `<tr><td colspan="8" class="loading-text error">${error.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="loading-text error">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
-function formatDocumentStep(doc) {
-  const message = doc.processing_message || doc.processing_step || '-';
-  const progress = Number.isFinite(doc.processing_progress) ? doc.processing_progress : null;
+function _renderUnifiedRow(row) {
+  const isJob = row.row_type === 'job';
+  const id    = isJob ? `J${row.job_id}` : `D${row.doc_id}`;
+  const name  = escapeHtml(row.name || '');
+  const type  = escapeHtml(row.file_type || '-');
+  const time  = row.time ? _timeAgo(row.time) : '-';
+  const kps   = row.chunk_count != null ? row.chunk_count : '-';
 
-  if (doc.status === 'processing' && progress !== null) {
-    return `${message} (${progress}%)`;
+  // Status badge
+  const statusClass = {
+    queued:       'status-queued',
+    processing:   'status-processing',
+    rate_limited: 'status-rate_limited',
+    processed:    'status-processed',
+    failed:       'status-failed',
+    pending:      'status-pending',
+  }[row.status] || '';
+  const statusLabel = {
+    queued:       'queued',
+    processing:   'processing',
+    rate_limited: 'rate limited',
+    processed:    'processed',
+    failed:       'failed',
+    pending:      'pending',
+  }[row.status] || row.status;
+  const badge = `<span class="status-badge ${statusClass}">${statusLabel}</span>`;
+
+  // Progress / step cell
+  let progressCell = '-';
+  if (row.status === 'processing' && isJob && row.job_id) {
+    const pct = row.processing_progress ?? 0;
+    const msg = escapeHtml(row.processing_message || row.processing_step || 'Processing…');
+    const elapsedStr = row.started_at ? ` · ${_elapsedSince(row.started_at)}` : '';
+    progressCell = `
+      <div class="doc-progress-wrap" id="job-progress-${row.job_id}">
+        <div class="doc-progress-bar"><div class="doc-progress-fill" style="width:${pct}%"></div></div>
+        <span class="doc-progress-msg">${msg}<span class="doc-progress-elapsed">${elapsedStr}</span></span>
+      </div>`;
+  } else if (row.status === 'queued') {
+    const posLabel = row.queue_position != null ? `Position ${row.queue_position} in queue` : 'Waiting in queue…';
+    progressCell = `<span class="muted">${posLabel}</span>`;
+  } else if (row.status === 'rate_limited') {
+    const err = row.error_message
+      ? escapeHtml(row.error_message.replace(/^Rate limit hit \(429\) — resume when quota resets: /, ''))
+      : 'API quota exceeded';
+    progressCell = `<span class="text-warning" title="${err}">Rate limited</span>`;
+  } else if (row.status === 'failed' && row.error_message) {
+    progressCell = `<span class="text-danger" title="${escapeHtml(row.error_message)}">${escapeHtml(row.error_message.slice(0, 60))}${row.error_message.length > 60 ? '…' : ''}</span>`;
+  } else if (row.processing_step || row.processing_message) {
+    progressCell = escapeHtml(row.processing_message || row.processing_step);
   }
-  return message;
+
+  // Actions
+  const actions = [];
+  if (row.status === 'queued') {
+    actions.push(`<button class="btn btn-xs btn-secondary" onclick="cancelJob(${row.job_id})">Cancel</button>`);
+    if (row.doc_id) actions.push(`<button class="btn btn-xs btn-danger" onclick="cancelAndDeleteJob(${row.job_id},${row.doc_id})">Cancel &amp; Delete</button>`);
+  }
+  if (row.status === 'processing') {
+    actions.push(`<button class="btn btn-xs btn-secondary" onclick="cancelJob(${row.job_id})">Cancel</button>`);
+    if (row.doc_id) actions.push(`<button class="btn btn-xs btn-danger" onclick="cancelAndDeleteJob(${row.job_id},${row.doc_id})">Cancel &amp; Delete</button>`);
+  }
+  if (row.status === 'rate_limited') {
+    actions.push(`<button class="btn btn-xs btn-warning" onclick="retryJob(${row.job_id})">Retry</button>`);
+    actions.push(`<button class="btn btn-xs btn-secondary" onclick="cancelJob(${row.job_id})">Cancel</button>`);
+    if (row.doc_id) actions.push(`<button class="btn btn-xs btn-danger" onclick="cancelAndDeleteJob(${row.job_id},${row.doc_id})">Cancel &amp; Delete</button>`);
+  }
+  if (row.status === 'failed' && isJob) actions.push(`<button class="btn btn-xs btn-warning" onclick="retryJob(${row.job_id})">Retry</button>`);
+  if (row.doc_id && (row.status === 'processed' || row.status === 'failed' || row.status === 'cancelled' || row.status === 'pending')) {
+    actions.push(`<button class="btn btn-xs btn-danger" onclick="deleteDocument(${row.doc_id})">${t('delete')}</button>`);
+  }
+
+  const trClass = isJob && row.status !== 'processed' ? `doc-row doc-row--${row.status}` : 'doc-row';
+  return `
+    <tr class="${trClass}" data-job-id="${row.job_id || ''}" data-doc-id="${row.doc_id || ''}">
+      <td class="muted">${id}</td>
+      <td class="doc-name" title="${name}">${name}</td>
+      <td>${type}</td>
+      <td>${badge}</td>
+      <td class="doc-progress-cell">${progressCell}</td>
+      <td>${kps}</td>
+      <td class="muted">${time}</td>
+      <td><div class="row-actions">${actions.join('')}</div></td>
+    </tr>`;
 }
 
-document.getElementById('tab-documents')?.addEventListener('click', (e) => {
-  const btn = e.target.closest('.resume-job-btn');
-  if (btn) resumeRateLimitedJob(Number(btn.dataset.jobId));
-});
+function _timeAgo(dateStr) {
+  if (!dateStr) return '-';
+  const diff = Date.now() - new Date(dateStr).getTime();
+  if (diff < 60000)   return `${Math.round(diff / 1000)}s ago`;
+  if (diff < 3600000) return `${Math.round(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.round(diff / 3600000)}h ago`;
+  return new Date(dateStr).toLocaleDateString();
+}
+
+function _elapsedSince(dateStr) {
+  if (!dateStr) return '';
+  // SQLite datetime is "YYYY-MM-DD HH:MM:SS" (UTC, no timezone marker).
+  // Replace space with T and append Z so JS parses it as UTC, consistent with
+  // how the server stores timestamps via datetime('now').
+  const normalized = String(dateStr).replace(' ', 'T') + 'Z';
+  const sec = Math.floor((Date.now() - new Date(normalized).getTime()) / 1000);
+  if (sec < 0) return '';
+  if (sec < 60)   return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
+// Keep loadDocuments as an alias so any existing callers still work
+const loadDocuments = loadUnifiedView;
+
+document.getElementById('retry-all-docs-btn')?.addEventListener('click',  retryAllJobs);
+document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
 
 window.deleteDocument = async function(id) {
   if (!confirm(t('confirm_delete'))) return;
-
   try {
     await api(`/documents/${id}`, { method: 'DELETE' });
     showToast(t('success'), 'success');
-    loadDocuments();
+    loadUnifiedView();
   } catch (error) {
     showToast(error.message, 'error');
   }
@@ -5824,6 +6012,274 @@ async function saveSettings() {
         `<span class="api-status-badge api-status-badge--${ok ? 'ok' : 'missing'}">${label}: ${ok ? '✓ configured' : '✗ not configured'}</span>`;
       statusEl.innerHTML = badge('OpenAI', data.openaiConfigured) + badge('Gemini', data.geminiConfigured);
     }
+  } catch (err) {
+    showToast('Save failed: ' + err.message, 'error');
+  }
+}
+
+// ── Schema Panel ──────────────────────────────────────────────────────────────
+
+let _schemaPanelInitialized = false;
+
+function initSchemaPanel() {
+  if (_schemaPanelInitialized) {
+    // Already wired — just refresh data
+    loadSchemaSettings();
+    loadSchemaTemplates();
+    loadSchemaNodes();
+    return;
+  }
+  _schemaPanelInitialized = true;
+
+  // Toggle panel body
+  document.getElementById('schema-panel-toggle')?.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return; // button clicks handled separately
+    const body    = document.getElementById('schema-panel-body');
+    const chevron = document.getElementById('schema-panel-chevron');
+    body.classList.toggle('hidden');
+    chevron.innerHTML = body.classList.contains('hidden') ? '&#9654;' : '&#9660;';
+    if (!body.classList.contains('hidden')) {
+      loadSchemaTemplates();
+      loadSchemaNodes();
+    }
+  });
+
+  // Import JSON
+  document.getElementById('schema-import-btn')?.addEventListener('click', () => {
+    document.getElementById('schema-import-file').click();
+  });
+  document.getElementById('schema-import-file')?.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) handleSchemaImport(file);
+    e.target.value = '';
+  });
+
+  // Export JSON
+  document.getElementById('schema-export-btn')?.addEventListener('click', handleSchemaExport);
+
+  // Save as Template
+  document.getElementById('schema-save-template-btn')?.addEventListener('click', () => {
+    document.getElementById('template-name').value = '';
+    document.getElementById('template-description').value = '';
+    document.getElementById('save-template-modal').classList.remove('hidden');
+  });
+  document.getElementById('close-save-template-modal')?.addEventListener('click', () => {
+    document.getElementById('save-template-modal').classList.add('hidden');
+  });
+  document.getElementById('cancel-save-template')?.addEventListener('click', () => {
+    document.getElementById('save-template-modal').classList.add('hidden');
+  });
+  document.getElementById('confirm-save-template')?.addEventListener('click', async () => {
+    const name = document.getElementById('template-name').value.trim();
+    const description = document.getElementById('template-description').value.trim();
+    if (!name) { showToast('Template name is required', 'error'); return; }
+    try {
+      await api('/schema/templates', { method: 'POST', body: JSON.stringify({ name, description }) });
+      showToast('Template saved', 'success');
+      document.getElementById('save-template-modal').classList.add('hidden');
+      loadSchemaTemplates();
+    } catch (err) {
+      showToast(err.message || 'Save failed', 'error');
+    }
+  });
+
+  // Schema Settings modal
+  document.getElementById('schema-settings-btn')?.addEventListener('click', openSchemaSettings);
+  document.getElementById('schema-mode-badge')?.addEventListener('click', openSchemaSettings);
+  document.getElementById('close-schema-settings-modal')?.addEventListener('click', () => {
+    document.getElementById('schema-settings-modal').classList.add('hidden');
+  });
+  document.getElementById('cancel-schema-settings')?.addEventListener('click', () => {
+    document.getElementById('schema-settings-modal').classList.add('hidden');
+  });
+  document.getElementById('save-schema-settings')?.addEventListener('click', saveSchemaSettings);
+
+  // Toggle buttons in settings modal
+  document.getElementById('mapping-mode-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const strictness = document.getElementById('strictness-group');
+    if (strictness) strictness.style.display = btn.dataset.value === 'guided' ? '' : 'none';
+  });
+  document.getElementById('mapping-strictness-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+
+  loadSchemaSettings();
+  loadSchemaTemplates();
+  loadSchemaNodes();
+}
+
+async function loadSchemaSettings() {
+  try {
+    const s = await api('/schema/settings');
+    const badge = document.getElementById('schema-mode-badge');
+    if (badge) {
+      if (s.mapping_mode === 'guided') {
+        badge.textContent = `Guided (${s.mapping_strictness})`;
+        badge.classList.remove('hidden');
+        badge.classList.add('badge-guided');
+        badge.classList.remove('badge-free');
+      } else {
+        badge.textContent = 'Free';
+        badge.classList.remove('hidden');
+        badge.classList.remove('badge-guided');
+        badge.classList.add('badge-free');
+      }
+    }
+    return s;
+  } catch (_) {
+    return { mapping_mode: 'free', mapping_strictness: 'soft' };
+  }
+}
+
+async function loadSchemaNodes() {
+  const container = document.getElementById('schema-nodes-tree');
+  if (!container) return;
+  try {
+    const data = await api('/schema');
+    if (!data.nodes?.length) {
+      container.innerHTML = '<p class="empty-state">No schema nodes defined. Import a JSON schema or add nodes via the tree.</p>';
+      return;
+    }
+    container.innerHTML = renderSchemaNodeTree(data.tree || []);
+  } catch (err) {
+    container.innerHTML = `<p class="empty-state">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderSchemaNodeTree(nodes, depth = 0) {
+  return nodes.map(node => {
+    const indent = depth * 16;
+    const kws = (() => { try { return JSON.parse(node.keywords_json || '[]'); } catch(_){return[];} })();
+    return `
+      <div class="schema-node-item" style="padding-left:${indent}px">
+        <span class="schema-node-name">${escapeHtml(node.name)}</span>
+        ${node.node_description ? `<span class="schema-node-desc">${escapeHtml(node.node_description)}</span>` : ''}
+        ${kws.length ? `<div class="keyword-chips">${kws.slice(0,6).map(k=>`<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
+        ${(node.children||[]).length ? renderSchemaNodeTree(node.children, depth+1) : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadSchemaTemplates() {
+  const container = document.getElementById('schema-templates-list');
+  if (!container) return;
+  try {
+    const templates = await api('/schema/templates');
+    if (!templates.length) {
+      container.innerHTML = '<p class="empty-state">No global templates yet.</p>';
+      return;
+    }
+    container.innerHTML = templates.map(t => `
+      <div class="schema-template-item">
+        <span class="template-name" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</span>
+        <div class="template-actions">
+          <button class="btn btn-small btn-primary" onclick="applySchemaTemplate('${t.id}')">Apply</button>
+          <button class="btn btn-small btn-danger" onclick="deleteSchemaTemplate('${t.id}', '${escapeHtml(t.name)}')">Delete</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    container.innerHTML = `<p class="empty-state">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function handleSchemaImport(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const nodes = Array.isArray(data) ? data : (data.nodes || data.tree || []);
+    if (!nodes.length) { showToast('No nodes found in file', 'error'); return; }
+
+    const mode = confirm('Replace existing schema? (OK = replace, Cancel = merge)')
+      ? 'replace' : 'merge';
+
+    const result = await api('/schema/import', {
+      method: 'POST',
+      body: JSON.stringify({ nodes, mode })
+    });
+    showToast(`Schema imported: ${result.created} created, ${result.updated} updated`, 'success');
+    loadSchemaNodes();
+    loadTree();
+  } catch (err) {
+    showToast('Import failed: ' + err.message, 'error');
+  }
+}
+
+async function handleSchemaExport() {
+  try {
+    const resp = await fetch(`${API_BASE}/schema/export`, {
+      headers: { 'X-Dataset-ID': currentDatasetId }
+    });
+    if (!resp.ok) throw new Error('Export failed');
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `schema-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast('Export failed: ' + err.message, 'error');
+  }
+}
+
+async function applySchemaTemplate(id) {
+  if (!confirm('Apply this template to the current dataset? It will set mapping mode to Guided.')) return;
+  try {
+    const result = await api(`/schema/templates/${id}/apply`, { method: 'POST', body: JSON.stringify({ mode: 'merge' }) });
+    showToast(`Template "${result.template_name}" applied — mode set to Guided`, 'success');
+    loadSchemaSettings();
+    loadSchemaNodes();
+    loadTree();
+  } catch (err) {
+    showToast('Apply failed: ' + err.message, 'error');
+  }
+}
+
+async function deleteSchemaTemplate(id, name) {
+  if (!confirm(`Delete template "${name}"?`)) return;
+  try {
+    await api(`/schema/templates/${id}`, { method: 'DELETE' });
+    showToast('Template deleted', 'success');
+    loadSchemaTemplates();
+  } catch (err) {
+    showToast('Delete failed: ' + err.message, 'error');
+  }
+}
+
+async function openSchemaSettings() {
+  const s = await loadSchemaSettings();
+  // Set toggle state
+  document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === s.mapping_mode);
+  });
+  document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === s.mapping_strictness);
+  });
+  const strictness = document.getElementById('strictness-group');
+  if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
+  document.getElementById('schema-settings-modal').classList.remove('hidden');
+}
+
+async function saveSchemaSettings() {
+  const mode       = document.querySelector('#mapping-mode-toggle .toggle-btn.active')?.dataset.value || 'free';
+  const strictness = document.querySelector('#mapping-strictness-toggle .toggle-btn.active')?.dataset.value || 'soft';
+  try {
+    await api('/schema/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness })
+    });
+    showToast('Schema settings saved', 'success');
+    document.getElementById('schema-settings-modal').classList.add('hidden');
+    loadSchemaSettings();
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
   }

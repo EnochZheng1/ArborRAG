@@ -201,11 +201,14 @@ export const NodeRepo = {
   // ── Full inserts (ingest pipeline) ────────────────────────────────────────────
 
   /** INSERT a new node row. scope_json should be pre-serialized JSON string. */
-  insert({ node_id, name, parent_id, level, node_summary, scope_json }) {
+  insert({ node_id, name, parent_id, level, node_summary, scope_json,
+           node_description = '', is_schema_node = 0, keywords_json = '[]' }) {
     return db.prepare(`
-      INSERT INTO nodes (node_id, name, parent_id, level, node_summary, scope_json, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(node_id, name, parent_id ?? null, level, node_summary ?? null, scope_json ?? null);
+      INSERT INTO nodes (node_id, name, parent_id, level, node_summary, scope_json,
+                         node_description, is_schema_node, keywords_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(node_id, name, parent_id ?? null, level, node_summary ?? null, scope_json ?? null,
+           node_description, is_schema_node ? 1 : 0, keywords_json);
   },
 
   /** Touch updated_at for a node (called after a chunk is assigned). */
@@ -274,5 +277,66 @@ export const NodeRepo = {
   countByPrefix(prefix) {
     return db.prepare("SELECT COUNT(*) as count FROM nodes WHERE node_id LIKE ?")
       .get(`${prefix}%`)?.count ?? 0;
+  },
+
+  // ── Schema node methods ───────────────────────────────────────────────────────
+
+  /** All nodes marked as schema nodes, ordered by level then name. */
+  findSchemaNodes() {
+    return db.prepare(`
+      SELECT node_id, name, parent_id, level, node_description, keywords_json,
+             aliases_json, node_summary
+      FROM nodes WHERE is_schema_node = 1 ORDER BY level ASC, name ASC
+    `).all();
+  },
+
+  /** Set or clear the is_schema_node flag for a node. */
+  setSchemaNode(nodeId, flag) {
+    return db.prepare("UPDATE nodes SET is_schema_node = ?, updated_at = datetime('now') WHERE node_id = ?")
+      .run(flag ? 1 : 0, nodeId).changes;
+  },
+
+  /** Clear is_schema_node flag on all nodes. */
+  clearSchemaFlags() {
+    return db.prepare("UPDATE nodes SET is_schema_node = 0, updated_at = datetime('now')").run().changes;
+  },
+
+  /** Update node_description and refresh FTS. */
+  updateDescription(nodeId, description) {
+    db.prepare("UPDATE nodes SET node_description = ?, updated_at = datetime('now') WHERE node_id = ?")
+      .run(description, nodeId);
+    const row = db.prepare("SELECT name, node_summary, keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
+    if (row) {
+      const kws = JSON.parse(row.keywords_json || '[]').join(' ');
+      db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
+      db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
+        nodeId,
+        `${row.name} ${row.node_summary || ''} ${description} ${kws}`
+      );
+    }
+  },
+
+  /**
+   * Merge new keywords into a node's keywords_json, deduplicating (lowercased).
+   * Also refreshes the FTS entry to include the keyword text.
+   */
+  mergeKeywords(nodeId, newKeywords) {
+    if (!newKeywords?.length) return;
+    const row = db.prepare("SELECT name, node_summary, node_description, keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
+    if (!row) return;
+
+    const existing = JSON.parse(row.keywords_json || '[]');
+    const merged = [...new Set([...existing, ...newKeywords.map(k => String(k).toLowerCase())])];
+    const mergedJson = JSON.stringify(merged);
+
+    db.prepare("UPDATE nodes SET keywords_json = ?, updated_at = datetime('now') WHERE node_id = ?")
+      .run(mergedJson, nodeId);
+
+    const kwText = merged.join(' ');
+    db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
+    db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
+      nodeId,
+      `${row.name} ${row.node_summary || ''} ${row.node_description || ''} ${kwText}`
+    );
   }
 };

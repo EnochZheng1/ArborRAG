@@ -38,6 +38,16 @@ export function initRegistryDb() {
       updated_at  TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at);
+
+    CREATE TABLE IF NOT EXISTS schema_templates (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL UNIQUE,
+      description TEXT DEFAULT '',
+      schema_json TEXT NOT NULL,
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_schema_templates_created ON schema_templates(created_at);
   `);
 }
 
@@ -45,6 +55,8 @@ function getRegistry() {
   if (!registryDb) throw new Error("Registry not initialized — call initRegistryDb() first");
   return registryDb;
 }
+
+export function getRegistryDb() { return getRegistry(); }
 
 export function listDatasets() {
   return getRegistry()

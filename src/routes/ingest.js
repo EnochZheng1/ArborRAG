@@ -9,8 +9,11 @@ import {
   enqueueIngestionJobs,
   getIngestionJob,
   listIngestionJobs,
+  listActiveIngestionJobs,
   retryIngestionJob,
   cancelIngestionJob,
+  cancelAllIngestionJobs,
+  retryAllIngestionJobs,
   getIngestionQueueStats
 } from "../ingest/jobQueue.js";
 import { runWithDb } from "../db/activeDb.js";
@@ -133,6 +136,36 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
 });
 
 // ==================== INGESTION JOBS ====================
+
+router.get("/ingest/jobs/active", (req, res) => {
+  try {
+    const jobs = listActiveIngestionJobs();
+    res.json({ jobs, count: jobs.length });
+  } catch (err) {
+    apiLogger.error("List active jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/ingest/jobs/cancel-all", (req, res) => {
+  try {
+    const cancelled = cancelAllIngestionJobs();
+    res.json({ success: true, cancelled });
+  } catch (err) {
+    apiLogger.error("Cancel all jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/ingest/jobs/retry-all", (req, res) => {
+  try {
+    const retried = retryAllIngestionJobs();
+    res.json({ success: true, retried });
+  } catch (err) {
+    apiLogger.error("Retry all jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get("/ingest/jobs", (req, res) => {
   try {

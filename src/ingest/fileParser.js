@@ -1,9 +1,18 @@
 import fs from "fs";
 import path from "path";
-import { PDFParse } from "pdf-parse";
+import { fileURLToPath, pathToFileURL } from "url";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import * as cheerio from "cheerio";
+
+// Point pdfjs at its worker and CMap directory
+const _dir = path.dirname(fileURLToPath(import.meta.url));
+const _root = path.resolve(_dir, "../../");
+GlobalWorkerOptions.workerSrc = pathToFileURL(
+  path.join(_root, "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs")
+).href;
+const CMAP_URL = path.join(_root, "node_modules/pdfjs-dist/cmaps/") + "/";
 
 // Supported file types
 const SUPPORTED_TYPES = {
@@ -81,13 +90,48 @@ async function parseTextFile(filePath) {
   return fs.readFileSync(filePath, "utf-8");
 }
 
-// PDF files
+// PDF files — uses pdfjs-dist for proper CJK and ligature support
 async function parsePdfFile(filePath) {
-  const buffer = fs.readFileSync(filePath);
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
-  await parser.destroy();
-  return result.text;
+  const data = fs.readFileSync(filePath);
+  const pdf = await getDocument({
+    data: new Uint8Array(data),
+    useSystemFonts: true,
+    cMapUrl: CMAP_URL,
+    cMapPacked: true,
+    verbosity: 0,
+  }).promise;
+
+  const pageTexts = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent({ includeMarkedContent: false });
+
+    // Reconstruct lines by grouping items with the same Y coordinate.
+    // Items are emitted top-to-bottom by pdfjs, so we compare rounded Y values.
+    const lines = [];
+    let lastY = null;
+    let lineItems = [];
+
+    for (const item of content.items) {
+      const str = item.str;
+      if (!str) continue;
+      const y = Math.round(item.transform[5]);
+      if (lastY !== null && Math.abs(y - lastY) > 3) {
+        if (lineItems.length) lines.push(lineItems.join(""));
+        lineItems = [];
+      }
+      lineItems.push(str);
+      lastY = y;
+    }
+    if (lineItems.length) lines.push(lineItems.join(""));
+
+    const pageText = lines.join("\n").trim();
+    if (pageText) pageTexts.push(pageText);
+  }
+
+  await pdf.destroy();
+  return pageTexts.join("\n\n");
 }
 
 // Word documents (docx)

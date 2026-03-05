@@ -10,7 +10,7 @@ import { getDefaultDatasetId } from "./db/registry.js";
 import { runWithDb } from "./db/activeDb.js";
 import { logger, requestLogger } from "./utils/logger.js";
 import { startIngestionQueue } from "./ingest/jobQueue.js";
-import { subscribeToJob, unsubscribeFromJob, unsubscribeAll } from "./utils/progressEmitter.js";
+import { addClient, removeClient, subscribeToJob, unsubscribeFromJob } from "./utils/progressEmitter.js";
 
 // Route modules
 import datasetsRouter from "./routes/datasets.js";
@@ -24,6 +24,7 @@ import statsRouter from "./routes/stats.js";
 import entitiesRouter from "./routes/entities.js";
 import decisionsRouter from "./routes/decisions.js";
 import testsRouter from "./routes/tests.js";
+import schemaRouter from "./routes/schema.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,6 +68,7 @@ app.use(statsRouter);
 app.use(entitiesRouter);
 app.use(decisionsRouter);
 app.use(testsRouter);
+app.use("/schema", schemaRouter);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
@@ -79,6 +81,7 @@ const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws) => {
+  addClient(ws);
   ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(String(raw));
@@ -89,8 +92,8 @@ wss.on("connection", (ws) => {
       }
     } catch { /* ignore malformed messages */ }
   });
-  ws.on("close", () => unsubscribeAll(ws));
-  ws.on("error", () => unsubscribeAll(ws));
+  ws.on("close", () => removeClient(ws));
+  ws.on("error", () => removeClient(ws));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
