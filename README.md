@@ -1,6 +1,6 @@
 # TreeKB — Tree-Based Knowledge Graph
 
-**v2.2.0** · Node.js · SQLite · OpenAI / Gemini
+**v2.3.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -8,12 +8,12 @@ A local knowledge management system that ingests documents into a hierarchical k
 
 ## Features
 
+- **Guided Tree Schema** — pre-define the knowledge tree structure via JSON import; ingested KPs map into your taxonomy instead of inventing arbitrary topic names; soft (extends with child nodes) or hard (clamps to existing schema) strictness; global template library for reuse across datasets
 - **Multi-provider LLM** — switch between OpenAI and Google Gemini at runtime via the Settings tab; defaults to OpenAI (`gpt-5-nano`)
 - **Knowledge Point (KP) extraction** — LLM decomposes documents into atomic, typed statements (fact, rule, definition, procedure, example, context) and places them into a topical hierarchy
 - **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; borderline cases are queued for human review in the Decisions tab
 - **Multi-dataset support** — separate SQLite databases per dataset, switched via `X-Dataset-ID` header or the Datasets tab
-- **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score
-- **Conflict detection** — flags contradictory statements across documents
+- **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall
 - **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events
 - **Entity & fact extraction** — named entities and relational facts extracted and stored for graph queries
 - **Test case management** — save and replay Q&A pairs to track retrieval quality over time
@@ -79,8 +79,13 @@ INGEST_CLEANUP_ON_SUCCESS=true
 | `GET` | `/documents` | List documents |
 | `DELETE` | `/documents/:id` | Delete document and its knowledge |
 | `GET` | `/nodes` | Get knowledge tree |
-| `GET` | `/conflicts` | List detected conflicts |
 | `GET` | `/decisions` | List pending KP decisions |
+| `GET` | `/schema` | Get schema nodes as hierarchical tree |
+| `POST` | `/schema/import` | Import schema from JSON |
+| `GET` | `/schema/export` | Export schema as JSON |
+| `GET/PATCH` | `/schema/settings` | Get or update mapping mode / strictness |
+| `GET/POST` | `/schema/templates` | List or create global schema templates |
+| `POST` | `/schema/templates/:id/apply` | Apply a template to the current dataset |
 | `GET` | `/entities` | List extracted entities |
 | `GET` | `/facts` | List extracted facts |
 | `GET` | `/datasets` | List datasets |
@@ -112,6 +117,16 @@ public/            Single-page web UI
 ---
 
 ## Changelog
+
+### v2.3.0
+- **Guided Tree Schema** — pre-define dataset structure via JSON import; KPs map to schema nodes using heuristic scoring (name/description/keyword overlap) plus batched LLM disambiguation; soft/hard strictness modes; global template library stored in `registry.db`
+- **Schema panel** — new collapsible panel in the Tree tab for import/export, settings, and template management; mode badge shows current mapping mode at a glance
+- **Keyword accumulation** — KP keywords written back to schema nodes on every ingest, boosting BM25 recall for those nodes over time
+- **Node detail** — schema nodes marked with 📌 badge; description and keyword chips shown inline
+- **Query handlers & trace** — structured query handling (`queryHandlers.js`) and step-by-step trace support (`queryTrace.js`)
+- **Reranker** — score-gap cutoff prevents low-relevance chunks diluting LLM context
+- **Ingest refactor** — `kpNormaliser.js` and `nodeHierarchy.js` extracted from `nodeMapper.js`; section heading detection; paragraph fallback chunks
+- **Removed** — `cleanupJob.js`, `conflictDetector.js`, `queryPlanner.js` (superseded)
 
 ### v2.2.0
 - **Node scope isolation** — simple lookup now uses only node-scoped (hierarchical) chunks; global direct chunks used only as fallback when tree localization fails entirely, with a user-visible fallback message
