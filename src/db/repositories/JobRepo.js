@@ -267,14 +267,18 @@ export const JobRepo = {
    * (e.g. the event loop stalled, a network call hung indefinitely).
    */
   requeueStuck(conn, maxAgeMinutes = 20) {
+    const safeMinutes = Math.max(1, Math.floor(Number(maxAgeMinutes)));
     return conn.prepare(`
       UPDATE ingestion_jobs
       SET status = 'queued', started_at = NULL, updated_at = datetime('now'),
-          error_message = 'Job timed out (no progress for ${maxAgeMinutes} minutes) — retrying'
+          error_message = ?
       WHERE status = 'processing'
         AND attempt_count < max_attempts
-        AND datetime(updated_at) <= datetime('now', '-${maxAgeMinutes} minutes')
-    `).run().changes;
+        AND datetime(updated_at) <= datetime('now', ?)
+    `).run(
+      `Job timed out (no progress for ${safeMinutes} minutes) — retrying`,
+      `-${safeMinutes} minutes`
+    ).changes;
   },
 
   /**

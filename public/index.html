@@ -265,6 +265,9 @@
               <button class="view-btn" data-view="graph" title="Graph View">
                 <svg class="view-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg>
               </button>
+              <button class="view-btn" data-view="tree" title="Tree Diagram">
+                <svg class="view-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><line x1="12" y1="6" x2="12" y2="11"/><line x1="12" y1="11" x2="5" y2="17"/><line x1="12" y1="11" x2="19" y2="17"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/></svg>
+              </button>
             </div>
             <button id="empty-tree-btn" class="btn btn-danger" title="Delete all nodes and data">
               <span data-i18n="empty_tree">Empty Tree</span>
@@ -327,6 +330,15 @@
               <button class="btn btn-small" id="graph-reset" title="Reset View">⟲</button>
             </div>
             <svg id="graph-svg"></svg>
+          </div>
+          <div class="tree-diagram-view hidden" id="tree-diagram-view">
+            <div class="graph-controls">
+              <button class="btn btn-small" id="td-zoom-in" title="Zoom In">+</button>
+              <button class="btn btn-small" id="td-zoom-out" title="Zoom Out">-</button>
+              <button class="btn btn-small" id="td-reset" title="Reset View">⟲</button>
+            </div>
+            <div class="td-tooltip"></div>
+            <svg id="tree-diagram-svg"></svg>
           </div>
           <div class="node-detail hidden" id="node-detail">
             <div class="node-detail-header">

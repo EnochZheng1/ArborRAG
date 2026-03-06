@@ -38,11 +38,12 @@ function registerDocument(fileInfo) {
   return runTransaction(() => {
     const existing = DocumentRepo.findByHash(fileHash);
     if (existing) {
-      if (existing.status === 'completed') {
+      if (existing.status === 'processed') {
         // Genuine duplicate — document already fully processed
         return { id: existing.id, duplicate: true };
       }
-      // Previous attempt failed or got stuck — reset and re-process using the same document row
+      // 'failed' or 'pending' — previous attempt was rolled back; reuse the document row
+      // so the Documents view doesn't accumulate orphan rows for the same file.
       DocumentRepo.updateStatus(existing.id, 'processing', null);
       logger.info(`[doc:${existing.id}] Retrying previously ${existing.status} document`);
       return { id: existing.id, duplicate: false };

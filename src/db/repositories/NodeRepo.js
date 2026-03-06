@@ -144,12 +144,22 @@ export const NodeRepo = {
 
   // ── FTS maintenance ───────────────────────────────────────────────────────────
 
-  /** Replace the FTS index entry for a node (call after name/summary update). */
-  updateFts(nodeId, name, summary) {
+  /**
+   * Rebuild the FTS index entry for a node from all searchable fields.
+   * Always reads from DB so the index stays consistent regardless of
+   * which subset of fields was just updated.
+   */
+  rebuildFts(nodeId) {
+    const row = db.prepare(
+      "SELECT name, node_summary, node_description, keywords_json, aliases_json FROM nodes WHERE node_id = ?"
+    ).get(nodeId);
+    if (!row) return;
+    const kws     = JSON.parse(row.keywords_json || '[]').join(' ');
+    const aliases = JSON.parse(row.aliases_json  || '[]').join(' ');
     db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
     db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
       nodeId,
-      `${name} ${summary || ""}`
+      `${row.name} ${row.node_summary || ''} ${row.node_description || ''} ${kws} ${aliases}`
     );
   },
 
@@ -305,16 +315,7 @@ export const NodeRepo = {
   updateDescription(nodeId, description) {
     db.prepare("UPDATE nodes SET node_description = ?, updated_at = datetime('now') WHERE node_id = ?")
       .run(description, nodeId);
-    const row = db.prepare("SELECT name, node_summary, keywords_json, aliases_json FROM nodes WHERE node_id = ?").get(nodeId);
-    if (row) {
-      const kws     = JSON.parse(row.keywords_json || '[]').join(' ');
-      const aliases = JSON.parse(row.aliases_json  || '[]').join(' ');
-      db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
-      db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
-        nodeId,
-        `${row.name} ${row.node_summary || ''} ${description} ${kws} ${aliases}`
-      );
-    }
+    NodeRepo.rebuildFts(nodeId);
   },
 
   /**
@@ -323,22 +324,15 @@ export const NodeRepo = {
    */
   mergeKeywords(nodeId, newKeywords) {
     if (!newKeywords?.length) return;
-    const row = db.prepare("SELECT name, node_summary, node_description, keywords_json, aliases_json FROM nodes WHERE node_id = ?").get(nodeId);
+    const row = db.prepare("SELECT keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
     if (!row) return;
 
     const existing = JSON.parse(row.keywords_json || '[]');
     const merged = [...new Set([...existing, ...newKeywords.map(k => String(k).toLowerCase())])];
-    const mergedJson = JSON.stringify(merged);
 
     db.prepare("UPDATE nodes SET keywords_json = ?, updated_at = datetime('now') WHERE node_id = ?")
-      .run(mergedJson, nodeId);
+      .run(JSON.stringify(merged), nodeId);
 
-    const kwText  = merged.join(' ');
-    const aliases = JSON.parse(row.aliases_json || '[]').join(' ');
-    db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
-    db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
-      nodeId,
-      `${row.name} ${row.node_summary || ''} ${row.node_description || ''} ${kwText} ${aliases}`
-    );
+    NodeRepo.rebuildFts(nodeId);
   }
 };

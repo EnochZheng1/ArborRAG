@@ -82,28 +82,41 @@ router.post("/decisions/:id/accept", async (req, res) => {
     switch (decision.action) {
       case "merge_suggestion": {
         // Merge: update source_documents_json of target chunk
-        if (decision.incoming_chunk_id && decision.target_chunk_id) {
-          const incoming = ChunkRepo.getById(decision.incoming_chunk_id);
-          const target   = ChunkRepo.getById(decision.target_chunk_id);
-          if (incoming && target) {
-            const existingDocs = safeJson(target.source_documents_json, []);
-            const incomingDocs = safeJson(incoming.source_documents_json, []);
-            const merged = mergeSourceDocs(existingDocs, incomingDocs);
-            ChunkRepo.updateSourceDocuments(decision.target_chunk_id, JSON.stringify(merged));
-            // Supersede the incoming chunk
-            ChunkRepo.supersede(decision.incoming_chunk_id, decision.target_chunk_id);
-            actionResult = { merged: true, target_chunk_id: decision.target_chunk_id };
-          }
+        if (!decision.incoming_chunk_id || !decision.target_chunk_id) {
+          return res.status(422).json({ error: "Decision is missing chunk references" });
         }
+        const incoming = ChunkRepo.getById(decision.incoming_chunk_id);
+        const target   = ChunkRepo.getById(decision.target_chunk_id);
+        if (!incoming || !target) {
+          return res.status(409).json({
+            error: "One or both referenced chunks no longer exist — decision cannot be applied",
+            missing: [!incoming && decision.incoming_chunk_id, !target && decision.target_chunk_id].filter(Boolean)
+          });
+        }
+        const existingDocs = safeJson(target.source_documents_json, []);
+        const incomingDocs = safeJson(incoming.source_documents_json, []);
+        const merged = mergeSourceDocs(existingDocs, incomingDocs);
+        ChunkRepo.updateSourceDocuments(decision.target_chunk_id, JSON.stringify(merged));
+        ChunkRepo.supersede(decision.incoming_chunk_id, decision.target_chunk_id);
+        actionResult = { merged: true, target_chunk_id: decision.target_chunk_id };
         break;
       }
 
       case "replace_suggestion": {
         // Replace: supersede target with incoming
-        if (decision.incoming_chunk_id && decision.target_chunk_id) {
-          ChunkRepo.supersede(decision.target_chunk_id, decision.incoming_chunk_id);
-          actionResult = { replaced: true, superseded_chunk_id: decision.target_chunk_id };
+        if (!decision.incoming_chunk_id || !decision.target_chunk_id) {
+          return res.status(422).json({ error: "Decision is missing chunk references" });
         }
+        const incomingChunk = ChunkRepo.getById(decision.incoming_chunk_id);
+        const targetChunk   = ChunkRepo.getById(decision.target_chunk_id);
+        if (!incomingChunk || !targetChunk) {
+          return res.status(409).json({
+            error: "One or both referenced chunks no longer exist — decision cannot be applied",
+            missing: [!incomingChunk && decision.incoming_chunk_id, !targetChunk && decision.target_chunk_id].filter(Boolean)
+          });
+        }
+        ChunkRepo.supersede(decision.target_chunk_id, decision.incoming_chunk_id);
+        actionResult = { replaced: true, superseded_chunk_id: decision.target_chunk_id };
         break;
       }
 
@@ -113,10 +126,11 @@ router.post("/decisions/:id/accept", async (req, res) => {
         const match = String(decision.incoming_preview || "").match(/^node:(\S+)/);
         const sourceNodeId = match?.[1];
         const targetNodeId = decision.node_id;
-        if (sourceNodeId && targetNodeId) {
-          const result = executeMerge(sourceNodeId, targetNodeId);
-          actionResult = { nodesMerged: true, ...result };
+        if (!sourceNodeId || !targetNodeId) {
+          return res.status(422).json({ error: "Decision is missing node references" });
         }
+        const result = executeMerge(sourceNodeId, targetNodeId);
+        actionResult = { nodesMerged: true, ...result };
         break;
       }
 

@@ -4629,6 +4629,90 @@ select:focus {
 .graph-node.level-3 circle { fill: #fee2e2; stroke: #ef4444; }
 
 /* ============================================
+   Tree Diagram View
+   ============================================ */
+
+.tree-diagram-view {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  min-height: 500px;
+  position: relative;
+  overflow: hidden;
+}
+
+#tree-diagram-svg {
+  width: 100%;
+  height: 600px;
+  cursor: grab;
+  display: block;
+}
+
+#tree-diagram-svg:active {
+  cursor: grabbing;
+}
+
+.td-link {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5px;
+}
+
+.td-node {
+  cursor: pointer;
+}
+
+.td-node circle {
+  fill: var(--bg-card);
+  stroke: var(--primary);
+  stroke-width: 2px;
+  transition: fill 0.2s, stroke-width 0.2s;
+}
+
+.td-node:hover circle {
+  stroke-width: 3px;
+}
+
+/* Level colours — same palette as graph nodes */
+.td-node.level-0 circle { fill: #dbeafe; stroke: #3b82f6; }
+.td-node.level-1 circle { fill: #d1fae5; stroke: #10b981; }
+.td-node.level-2 circle { fill: #fef3c7; stroke: #f59e0b; }
+.td-node.level-3 circle { fill: #fee2e2; stroke: #ef4444; }
+
+.td-node.level-0:hover circle { fill: #bfdbfe; }
+.td-node.level-1:hover circle { fill: #a7f3d0; }
+.td-node.level-2:hover circle { fill: #fde68a; }
+.td-node.level-3:hover circle { fill: #fecaca; }
+
+.td-node.selected circle {
+  stroke-width: 3px;
+  filter: brightness(0.85);
+}
+
+.td-label {
+  font-size: 11px;
+  fill: var(--text-primary);
+  user-select: none;
+  pointer-events: none;
+}
+
+.td-tooltip {
+  display: none;
+  position: absolute;
+  background: var(--bg-dark);
+  color: var(--text-white);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+  pointer-events: none;
+  z-index: 100;
+  max-width: 240px;
+  line-height: 1.5;
+  box-shadow: var(--shadow-lg);
+}
+
+/* ============================================
    Dataset Switcher (Sidebar)
    ============================================ */
 

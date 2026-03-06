@@ -87,7 +87,7 @@ export const ChunkRepo = {
 
   /** Fetch multiple chunks by an array of IDs (active only). */
   getByIds(chunkIds) {
-    if (!chunkIds.length) return [];
+    if (!Array.isArray(chunkIds) || !chunkIds.length) return [];
     const ph = chunkIds.map(() => "?").join(",");
     return db.prepare(
       `SELECT * FROM chunks WHERE id IN (${ph}) AND status = 'active'`

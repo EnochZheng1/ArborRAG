@@ -90,13 +90,11 @@ router.put("/nodes/:id", (req, res) => {
     NodeRepo.update(nodeId, { name, summary, scope, aliases });
 
     if (node_description !== undefined) {
+      // updateDescription writes the column AND rebuilds FTS (all fields included)
       NodeRepo.updateDescription(nodeId, node_description);
-    }
-
-    // Update FTS index
-    if (name !== undefined || summary !== undefined) {
-      const node = getNode(nodeId);
-      NodeRepo.updateFts(nodeId, node.name, node.node_summary);
+    } else if (name !== undefined || summary !== undefined || aliases !== undefined) {
+      // No description change but name/summary/aliases changed — rebuild FTS from DB
+      NodeRepo.rebuildFts(nodeId);
     }
 
     res.json(getNode(nodeId));

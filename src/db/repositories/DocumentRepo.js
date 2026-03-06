@@ -12,10 +12,17 @@ export const DocumentRepo = {
     return db.prepare("SELECT * FROM documents WHERE id = ?").get(docId) ?? null;
   },
 
-  /** Find a fully-processed document by file hash (ignores pending/processing rows from failed/paused attempts). */
+  /**
+   * Find an existing document by file hash (non-deleted).
+   * Returns the most recent match, including its status, so the caller can
+   * decide whether this is a true duplicate ('processed') or a retriable
+   * previous attempt ('failed', 'pending').
+   * Excludes 'processing' rows to avoid reusing docs mid-flight or from crashes
+   * (those are handled by requeueRecoverable at startup).
+   */
   findByHash(hash) {
     return db.prepare(
-      "SELECT id FROM documents WHERE file_hash = ? AND status = 'processed'"
+      "SELECT id, status FROM documents WHERE file_hash = ? AND status IN ('processed','failed','pending') ORDER BY id DESC LIMIT 1"
     ).get(hash) ?? null;
   },
 

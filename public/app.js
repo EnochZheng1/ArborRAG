@@ -442,13 +442,14 @@ const i18n = {
 };
 
 let currentLang = 'en';
+let treeData = []; // nested tree from /nodes for D3 hierarchy layout
 let allNodes = [];
 let currentMappingMode = 'free';
 let documentsPollTimer = null; // legacy, superseded by _unifiedPollTimer
 let currentQueryResult = null; // Store current result for feedback
 let suggestionTimeout = null;
 let graphSimulation = null; // D3 force simulation
-let currentGraphView = 'list'; // 'list' or 'graph'
+let currentGraphView = 'list'; // 'list' | 'graph' | 'tree'
 
 // Dataset state
 let currentDatasetId = 'default';
@@ -2082,7 +2083,8 @@ async function loadTree() {
 
   try {
     const data = await api('/nodes');
-    allNodes = flattenTree(data.tree || []);
+    treeData = data.tree || [];
+    allNodes = flattenTree(treeData);
 
     if (!data.tree || data.tree.length === 0) {
       treeView.innerHTML = renderEmptyState(
@@ -2103,10 +2105,9 @@ async function loadTree() {
     // Re-init search events
     initTreeSearch();
 
-    // Update graph if currently in graph view
-    if (currentGraphView === 'graph') {
-      createGraph();
-    }
+    // Update graph/tree-diagram if currently in that view
+    if (currentGraphView === 'graph') createGraph();
+    else if (currentGraphView === 'tree') createTreeDiagram();
   } catch (error) {
     treeView.innerHTML = `<p class="loading-text error">${error.message}</p>`;
   }
@@ -3537,32 +3538,36 @@ function initGraphView() {
       document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
 
-      const treeView = document.getElementById('tree-view');
-      const graphView = document.getElementById('graph-view');
+      const treeView        = document.getElementById('tree-view');
+      const graphView       = document.getElementById('graph-view');
+      const treeDiagramView = document.getElementById('tree-diagram-view');
+
+      // Hide all panels then show the selected one
+      treeView.classList.add('hidden');
+      graphView.classList.add('hidden');
+      treeDiagramView.classList.add('hidden');
 
       if (view === 'graph') {
-        treeView.classList.add('hidden');
         graphView.classList.remove('hidden');
         renderGraph();
+      } else if (view === 'tree') {
+        treeDiagramView.classList.remove('hidden');
+        renderTreeDiagram();
       } else {
-        graphView.classList.add('hidden');
         treeView.classList.remove('hidden');
       }
     });
   });
 
-  // Graph controls
-  document.getElementById('graph-zoom-in')?.addEventListener('click', () => {
-    zoomGraph(1.2);
-  });
+  // Force-graph controls
+  document.getElementById('graph-zoom-in')?.addEventListener('click',  () => zoomGraph(1.2));
+  document.getElementById('graph-zoom-out')?.addEventListener('click', () => zoomGraph(0.8));
+  document.getElementById('graph-reset')?.addEventListener('click',    () => resetGraph());
 
-  document.getElementById('graph-zoom-out')?.addEventListener('click', () => {
-    zoomGraph(0.8);
-  });
-
-  document.getElementById('graph-reset')?.addEventListener('click', () => {
-    resetGraph();
-  });
+  // Tree-diagram controls
+  document.getElementById('td-zoom-in')?.addEventListener('click',  () => zoomTreeDiagram(1.2));
+  document.getElementById('td-zoom-out')?.addEventListener('click', () => zoomTreeDiagram(0.8));
+  document.getElementById('td-reset')?.addEventListener('click',    () => resetTreeDiagram());
 }
 
 let graphZoom = null;
@@ -3779,6 +3784,142 @@ function resetGraph() {
   );
   // Re-render to reset positions
   createGraph();
+}
+
+// ============================================
+// Tree Diagram View (D3 hierarchical layout)
+// ============================================
+
+let treeDiagramZoom = null;
+let treeDiagramSvg  = null;
+let treeDiagramG    = null;
+
+function renderTreeDiagram() {
+  if (treeData.length === 0) {
+    loadTree().then(() => {
+      if (currentGraphView === 'tree') createTreeDiagram();
+    });
+  } else {
+    createTreeDiagram();
+  }
+}
+
+function createTreeDiagram() {
+  const container = document.getElementById('tree-diagram-view');
+  if (!container) return;
+
+  treeDiagramSvg = d3.select('#tree-diagram-svg');
+  treeDiagramSvg.selectAll('*').remove();
+
+  const width  = container.clientWidth  || 960;
+  const height = Math.max(container.clientHeight || 600, 500);
+  treeDiagramSvg.attr('width', width).attr('height', height);
+
+  if (!treeData.length) {
+    treeDiagramSvg.append('text')
+      .attr('x', width / 2).attr('y', height / 2)
+      .attr('text-anchor', 'middle').attr('fill', 'var(--text-secondary)')
+      .text('No nodes to display');
+    return;
+  }
+
+  // Wrap multiple roots in a virtual root for d3.hierarchy
+  const rootData = treeData.length === 1
+    ? treeData[0]
+    : { node_id: '__vroot__', name: '', level: -1, node_summary: '', children: treeData };
+
+  const root = d3.hierarchy(rootData, d => d.children?.length ? d.children : null);
+
+  // Fixed node spacing
+  const NODE_W = 100;
+  const NODE_H = 70;
+  d3.tree().nodeSize([NODE_W, NODE_H])(root);
+
+  // Compute bounding box
+  let minX = Infinity, maxX = -Infinity;
+  root.each(d => { if (d.x < minX) minX = d.x; if (d.x > maxX) maxX = d.x; });
+  const treeW = maxX - minX + NODE_W;
+  const treeH = (root.height + 1) * NODE_H;
+
+  // Fit & centre initial transform
+  const scale = Math.min((width - 60) / treeW, (height - 80) / treeH, 1.4);
+  const tx = width / 2 - ((minX + maxX) / 2) * scale;
+  const ty = 36;
+
+  treeDiagramG = treeDiagramSvg.append('g');
+
+  treeDiagramZoom = d3.zoom()
+    .scaleExtent([0.05, 4])
+    .on('zoom', ev => treeDiagramG.attr('transform', ev.transform));
+
+  treeDiagramSvg.call(treeDiagramZoom);
+  treeDiagramSvg.call(
+    treeDiagramZoom.transform,
+    d3.zoomIdentity.translate(tx, ty).scale(scale)
+  );
+
+  // Links — skip edges connected to the virtual root
+  const realLinks = root.links().filter(l => l.source.data.node_id !== '__vroot__');
+  treeDiagramG.selectAll('.td-link')
+    .data(realLinks)
+    .enter().append('path')
+    .attr('class', 'td-link')
+    .attr('d', d3.linkVertical().x(d => d.x).y(d => d.y));
+
+  // Nodes — skip the virtual root
+  const realNodes = root.descendants().filter(d => d.data.node_id !== '__vroot__');
+  const chunkMap  = new Map(allNodes.map(n => [n.node_id, n.chunk_count || 0]));
+
+  const nodeG = treeDiagramG.selectAll('.td-node')
+    .data(realNodes)
+    .enter().append('g')
+    .attr('class', d => `td-node level-${Math.min(d.data.level ?? 0, 3)}`)
+    .attr('transform', d => `translate(${d.x},${d.y})`)
+    .style('cursor', 'pointer')
+    .on('click', (_, d) => loadNodeDetail(d.data.node_id));
+
+  nodeG.append('circle')
+    .attr('r', d => 10 + Math.min(chunkMap.get(d.data.node_id) * 1.5, 10));
+
+  nodeG.append('text')
+    .attr('class', 'td-label')
+    .attr('dy', d => 17 + Math.min(chunkMap.get(d.data.node_id) * 1.5, 10))
+    .attr('text-anchor', 'middle')
+    .text(d => {
+      const n = d.data.name || '';
+      return n.length > 18 ? n.slice(0, 17) + '…' : n;
+    });
+
+  // Tooltip
+  const tooltip = d3.select('#tree-diagram-view .td-tooltip');
+  nodeG
+    .on('mouseover', (event, d) => {
+      const chunks  = chunkMap.get(d.data.node_id) || 0;
+      const summary = d.data.node_summary || '';
+      tooltip.style('display', 'block').html(
+        `<strong>${d.data.name}</strong><br>` +
+        `ID: ${d.data.node_id}<br>` +
+        `Level: ${d.data.level ?? d.depth} · Chunks: ${chunks}` +
+        (summary ? `<br><em>${summary.slice(0, 100)}${summary.length > 100 ? '…' : ''}</em>` : '')
+      );
+    })
+    .on('mousemove', event => {
+      const rect = container.getBoundingClientRect();
+      tooltip
+        .style('left', (event.clientX - rect.left + 14) + 'px')
+        .style('top',  (event.clientY - rect.top  - 10) + 'px');
+    })
+    .on('mouseout', () => tooltip.style('display', 'none'));
+}
+
+function zoomTreeDiagram(factor) {
+  if (!treeDiagramSvg || !treeDiagramZoom) return;
+  treeDiagramSvg.transition().duration(300).call(treeDiagramZoom.scaleBy, factor);
+}
+
+function resetTreeDiagram() {
+  if (!treeDiagramSvg) return;
+  createTreeDiagram();
 }
 
 // ============================================
