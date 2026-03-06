@@ -10,6 +10,7 @@
 
 import { callLLM, llmConfig } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
+import { safeJson } from "../db/db.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
@@ -256,6 +257,3 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function safeJson(str, fallback) {
-  try { return JSON.parse(str) || fallback; } catch { return fallback; }
-}

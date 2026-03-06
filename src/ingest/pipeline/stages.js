@@ -37,7 +37,16 @@ function registerDocument(fileInfo) {
   const { filename, originalName, fileType, fileSize, fileHash, metadata = {} } = fileInfo;
   return runTransaction(() => {
     const existing = DocumentRepo.findByHash(fileHash);
-    if (existing) return { id: existing.id, duplicate: true };
+    if (existing) {
+      if (existing.status === 'completed') {
+        // Genuine duplicate — document already fully processed
+        return { id: existing.id, duplicate: true };
+      }
+      // Previous attempt failed or got stuck — reset and re-process using the same document row
+      DocumentRepo.updateStatus(existing.id, 'processing', null);
+      logger.info(`[doc:${existing.id}] Retrying previously ${existing.status} document`);
+      return { id: existing.id, duplicate: false };
+    }
 
     const result = DocumentRepo.insert({
       filename,

@@ -83,6 +83,20 @@ export const DecisionRepo = {
     `).run(status, resolved_by, id);
   },
 
+  /**
+   * Delete all decisions that reference any of the given chunk IDs
+   * (either as incoming or target). Called during document deletion.
+   * @param {number[]} chunkIds
+   */
+  deleteByChunkIds(chunkIds) {
+    if (!chunkIds?.length) return 0;
+    const ph = chunkIds.map(() => "?").join(",");
+    return db.prepare(`
+      DELETE FROM pending_decisions
+      WHERE incoming_chunk_id IN (${ph}) OR target_chunk_id IN (${ph})
+    `).run(...chunkIds, ...chunkIds).changes;
+  },
+
   /** Counts per status. Returns { pending, accepted, rejected, auto_resolved, total }. */
   countByStatus() {
     const rows = db.prepare(`

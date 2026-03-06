@@ -305,13 +305,14 @@ export const NodeRepo = {
   updateDescription(nodeId, description) {
     db.prepare("UPDATE nodes SET node_description = ?, updated_at = datetime('now') WHERE node_id = ?")
       .run(description, nodeId);
-    const row = db.prepare("SELECT name, node_summary, keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
+    const row = db.prepare("SELECT name, node_summary, keywords_json, aliases_json FROM nodes WHERE node_id = ?").get(nodeId);
     if (row) {
-      const kws = JSON.parse(row.keywords_json || '[]').join(' ');
+      const kws     = JSON.parse(row.keywords_json || '[]').join(' ');
+      const aliases = JSON.parse(row.aliases_json  || '[]').join(' ');
       db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
       db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
         nodeId,
-        `${row.name} ${row.node_summary || ''} ${description} ${kws}`
+        `${row.name} ${row.node_summary || ''} ${description} ${kws} ${aliases}`
       );
     }
   },
@@ -322,7 +323,7 @@ export const NodeRepo = {
    */
   mergeKeywords(nodeId, newKeywords) {
     if (!newKeywords?.length) return;
-    const row = db.prepare("SELECT name, node_summary, node_description, keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
+    const row = db.prepare("SELECT name, node_summary, node_description, keywords_json, aliases_json FROM nodes WHERE node_id = ?").get(nodeId);
     if (!row) return;
 
     const existing = JSON.parse(row.keywords_json || '[]');
@@ -332,11 +333,12 @@ export const NodeRepo = {
     db.prepare("UPDATE nodes SET keywords_json = ?, updated_at = datetime('now') WHERE node_id = ?")
       .run(mergedJson, nodeId);
 
-    const kwText = merged.join(' ');
+    const kwText  = merged.join(' ');
+    const aliases = JSON.parse(row.aliases_json || '[]').join(' ');
     db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
     db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
       nodeId,
-      `${row.name} ${row.node_summary || ''} ${row.node_description || ''} ${kwText}`
+      `${row.name} ${row.node_summary || ''} ${row.node_description || ''} ${kwText} ${aliases}`
     );
   }
 };

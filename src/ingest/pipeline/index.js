@@ -8,6 +8,8 @@
 import { runTransaction, safeJson } from "../../db/db.js";
 import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
 import { IngestRepo } from "../../db/repositories/IngestRepo.js";
+import { NodeRepo } from "../../db/repositories/NodeRepo.js";
+import { DecisionRepo } from "../../db/repositories/DecisionRepo.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import { RateLimitError } from "../../utils/rateLimitError.js";
 import { emitJobProgress } from "../../utils/progressEmitter.js";
@@ -88,6 +90,7 @@ function rollbackFailedDocument(docId, newNodeIds = []) {
       for (const row of conflictNodes) if (row.node_id) affectedNodeIds.add(row.node_id);
 
       IngestRepo.deleteConflictsForChunks(toDelete);
+      DecisionRepo.deleteByChunkIds(toDelete);
 
       const strIds = toDelete.map(String);
       IngestRepo.deleteEmbeddingsForChunks(strIds);
@@ -103,7 +106,9 @@ function rollbackFailedDocument(docId, newNodeIds = []) {
     // Remove nodes that were created during this ingestion and are now empty.
     // Only delete if the node has no remaining chunks AND no child nodes —
     // another document may have legitimately mapped content to the same node.
+    // Never delete schema nodes — they are user-defined structure, not document artifacts.
     for (const nodeId of newNodeIds) {
+      if (NodeRepo.findById(nodeId)?.is_schema_node) continue;
       const chunkCount = IngestRepo.getChunkCountForNode(nodeId);
       const childCount = IngestRepo.getChildCountForNode(nodeId);
       if (chunkCount === 0 && childCount === 0) {

@@ -12,6 +12,7 @@ import { logAudit, runTransaction, safeJson } from "../db/db.js";
 import { DocumentRepo } from "../db/repositories/DocumentRepo.js";
 import { IngestRepo } from "../db/repositories/IngestRepo.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
+import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 
 const UPLOADS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../uploads");
@@ -73,6 +74,9 @@ export function deleteDocument(docId) {
     // 1. Delete conflicts (no ON DELETE CASCADE on chunk_a_id/chunk_b_id)
     IngestRepo.deleteConflictsForChunks(chunkIds);
 
+    // 1b. Delete pending decisions referencing these chunks (no CASCADE on FK)
+    DecisionRepo.deleteByChunkIds(chunkIds);
+
     // 2. Delete chunk embeddings
     for (const chunkId of chunkIds) {
       IngestRepo.deleteEmbeddingForChunk(chunkId);
@@ -103,6 +107,9 @@ export function deleteDocument(docId) {
     const deletedNodeSet = new Set();
 
     function deleteNodeById(nodeId) {
+      // Never delete schema nodes — they represent the user-defined tree structure
+      // and must survive document deletions.
+      if (NodeRepo.findById(nodeId)?.is_schema_node) return;
       IngestRepo.deleteNodeEmbedding(nodeId);
       NodeRepo.deleteFtsForNode(nodeId);
       IngestRepo.deleteNode(nodeId);

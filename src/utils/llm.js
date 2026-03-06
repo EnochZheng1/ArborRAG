@@ -73,17 +73,52 @@ const _noTemperatureModels = new Set();
 
 // ── Primary call function ─────────────────────────────────────────────────────
 
+const RETRY_DELAYS_MS = [1000, 5000, 15000]; // delays before attempts 2, 3, 4
+
+function isTransientError(err) {
+  const status = err.status ?? err.statusCode;
+  if (status === 429 || status === 503 || status === 502 || status === 504) return true;
+  if (err.name === 'AbortError') return true;
+  if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'ECONNABORTED') return true;
+  // OpenAI SDK wraps some network errors in a generic Error
+  if (/timeout|ETIMEDOUT|ECONNRESET|503|502|529/i.test(err.message)) return true;
+  return false;
+}
+
 /**
  * Call the configured LLM and return the response text.
+ * Automatically retries up to 3 times on transient errors (429, 503, timeouts)
+ * with exponential back-off (1 s → 5 s → 15 s).
  *
- * @param {{ prompt: string, temperature?: number, maxOutputTokens?: number, taskName?: string }} opts
+ * @param {{ prompt: string, temperature?: number, maxOutputTokens?: number, seed?: number, taskName?: string }} opts
  * @returns {Promise<string>}
  */
-export async function callLLM({
+export async function callLLM(opts = {}) {
+  const taskName = opts.taskName || 'llm_call';
+  let lastErr;
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
+    if (attempt > 0) {
+      const delay = RETRY_DELAYS_MS[attempt - 1];
+      logger.warn(`[${taskName}] Transient error — retrying in ${delay / 1000}s (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}): ${lastErr?.message}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    try {
+      return await _callLLMOnce(opts);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err) || attempt === RETRY_DELAYS_MS.length) throw err;
+    }
+  }
+
+  throw lastErr; // unreachable — satisfies linter
+}
+
+async function _callLLMOnce({
   prompt,
   temperature     = 0.2,
-  maxOutputTokens = null,   // null = no limit (model default)
-  seed            = null,   // integer seed for reproducible outputs (OpenAI only)
+  maxOutputTokens = null,
+  seed            = null,
   taskName        = 'llm_call',
 } = {}) {
   if (llmConfig.provider === 'openai') {

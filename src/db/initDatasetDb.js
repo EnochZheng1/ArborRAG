@@ -129,6 +129,7 @@ function ensureIndexes(conn) {
     { name: "idx_conflicts_resolution", sql: "CREATE INDEX IF NOT EXISTS idx_conflicts_resolution ON conflicts(resolution)" },
     { name: "idx_chunks_kp_type", sql: "CREATE INDEX IF NOT EXISTS idx_chunks_kp_type ON chunks(kp_type, node_id)" },
     { name: "idx_nodes_schema", sql: "CREATE INDEX IF NOT EXISTS idx_nodes_schema ON nodes(is_schema_node) WHERE is_schema_node = 1" },
+    { name: "idx_nodes_parent_name", sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_parent_name ON nodes(parent_id, name) WHERE parent_id IS NOT NULL" },
   ];
 
   for (const idx of indexes) {

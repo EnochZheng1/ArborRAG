@@ -67,24 +67,37 @@ function importSchemaNodes(rawNodes, mode) {
       }
     } else {
       // Create new node
-      runTransaction(() => {
-        NodeRepo.insert({
-          node_id:          nodeId,
-          name,
-          parent_id:        parentId,
-          level,
-          node_summary:     description,
-          node_description: description,
-          is_schema_node:   1,
-          scope_json:       '{}',
-          aliases_json:     aliases.length > 0 ? JSON.stringify(aliases) : '[]'
+      let actualNodeId = nodeId;
+      try {
+        runTransaction(() => {
+          NodeRepo.insert({
+            node_id:          nodeId,
+            name,
+            parent_id:        parentId,
+            level,
+            node_summary:     description,
+            node_description: description,
+            is_schema_node:   1,
+            scope_json:       '{}',
+            aliases_json:     aliases.length > 0 ? JSON.stringify(aliases) : '[]'
+          });
+          NodeRepo.insertFtsText(nodeId, `${name} ${description}`);
         });
-        NodeRepo.insertFtsText(nodeId, `${name} ${description}`);
-      });
-      created.push(nodeId);
+        created.push(nodeId);
+      } catch (insertErr) {
+        // Race condition: another concurrent import created the same node — reuse it.
+        if (insertErr.code === 'SQLITE_CONSTRAINT_UNIQUE' || insertErr.message?.includes('UNIQUE constraint failed: nodes')) {
+          const winner = NodeRepo.findByParent(parentId).find(n => n.name === name);
+          if (winner) {
+            actualNodeId = winner.node_id;
+            NodeRepo.setSchemaNode(winner.node_id, true);
+            updated.push(winner.node_id);
+          } else throw insertErr;
+        } else throw insertErr;
+      }
 
       for (const child of (nodeData.children || [])) {
-        walk(child, nodeId, level + 1);
+        walk(child, actualNodeId, level + 1);
       }
     }
   }
@@ -314,6 +327,16 @@ router.post('/nodes', (req, res) => {
 
     res.status(201).json({ ok: true, node_id: nodeId, created: true });
   } catch (err) {
+    // Race condition: concurrent request created the same node — treat as updated.
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.message?.includes('UNIQUE constraint failed: nodes')) {
+      try {
+        const { name: reqName, parent_id: reqParentId } = req.body;
+        const rootNode = ensureRootNode();
+        const resolvedParentId = reqParentId ?? rootNode.node_id;
+        const winner = NodeRepo.findByParent(resolvedParentId).find(n => n.name === reqName?.trim());
+        if (winner) return res.json({ ok: true, node_id: winner.node_id, created: false });
+      } catch (_) { /* fall through */ }
+    }
     res.status(500).json({ error: err.message });
   }
 });

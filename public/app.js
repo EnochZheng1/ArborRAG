@@ -3391,7 +3391,18 @@ async function loadStats() {
             <div class="value">${data.embeddings?.chunks?.coverage || 'N/A'}</div>
             <div class="label">Chunk Coverage</div>
           </div>
+          <div class="stats-item">
+            <div class="value">${(data.embeddings?.nodes?.total || 0) - (data.embeddings?.nodes?.embedded || 0)}</div>
+            <div class="label">Nodes Unembedded</div>
+          </div>
+          <div class="stats-item">
+            <div class="value ${((data.embeddings?.chunks?.total || 0) - (data.embeddings?.chunks?.embedded || 0)) > 0 ? 'value-warning' : ''}">${(data.embeddings?.chunks?.total || 0) - (data.embeddings?.chunks?.embedded || 0)}</div>
+            <div class="label">Chunks Unembedded</div>
+          </div>
         </div>
+        ${((data.embeddings?.chunks?.total || 0) - (data.embeddings?.chunks?.embedded || 0)) > 0 ? `
+        <div class="stats-hint">Run <strong>Sync Embeddings</strong> to index unembedded chunks for semantic search.</div>
+        ` : ''}
       </div>
 
       <div class="stats-card">

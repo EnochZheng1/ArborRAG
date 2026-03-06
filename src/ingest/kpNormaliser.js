@@ -153,15 +153,29 @@ export async function findOrCreateTopicNode(topicName, parentId, options = {}) {
 
   // Create new topical node
   const parentLevel = parentId ? (NodeRepo.getLevel(parentId) ?? 0) : 0;
-  const node = _createTopicNode({
-    node_id:   generateNodeId(topicName),
-    name:      topicName,
-    parent_id: parentId,
-    level:     Number(parentLevel) + 1,
-    summary:   ""
-  });
-  logger.info(`Created topical node: ${node.node_id} (${node.name}) under ${parentId || "root"}`);
-  return { ...node, _created: true };
+  try {
+    const node = _createTopicNode({
+      node_id:   generateNodeId(topicName),
+      name:      topicName,
+      parent_id: parentId,
+      level:     Number(parentLevel) + 1,
+      summary:   ""
+    });
+    logger.info(`Created topical node: ${node.node_id} (${node.name}) under ${parentId || "root"}`);
+    return { ...node, _created: true };
+  } catch (err) {
+    // Race condition: a parallel job created the same sibling between our scan and insert.
+    // Fetch the existing node and reuse it rather than failing the ingestion.
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err.message?.includes('UNIQUE constraint failed: nodes'))) {
+      const siblings = NodeRepo.findByParent(parentId);
+      const existing = siblings.find(n => n.name === topicName);
+      if (existing) {
+        logger.debug(`Topic node race resolved: reusing "${existing.name}" under ${parentId || "root"}`);
+        return { ...existing, _created: false };
+      }
+    }
+    throw err;
+  }
 }
 
 /**

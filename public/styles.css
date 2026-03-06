@@ -3120,6 +3120,20 @@ select:focus {
   margin-top: 4px;
 }
 
+.stats-item .value-warning {
+  color: var(--warning, #f59e0b);
+}
+
+.stats-hint {
+  margin-top: 12px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.1);
+  border-radius: var(--radius-sm, 4px);
+  border-left: 3px solid var(--warning, #f59e0b);
+}
+
 /* Modal */
 .modal {
   position: fixed;
