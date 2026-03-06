@@ -443,6 +443,7 @@ const i18n = {
 
 let currentLang = 'en';
 let allNodes = [];
+let currentMappingMode = 'free';
 let documentsPollTimer = null; // legacy, superseded by _unifiedPollTimer
 let currentQueryResult = null; // Store current result for feedback
 let suggestionTimeout = null;
@@ -646,6 +647,7 @@ function initTabs() {
 
       // Load data for specific tabs
       if (tabId === 'tree') { loadTree(); initSchemaPanel(); }
+      if (tabId === 'upload') loadSchemaSettings();
       if (tabId === 'documents') loadDocuments();
       if (tabId === 'decisions') loadDecisions();
       if (tabId === 'tests') loadTests();
@@ -2233,7 +2235,38 @@ async function loadNodeDetail(nodeId) {
           <dd>${n.parent_id || '(root)'}</dd>
         </dl>
       </div>
-      ${isSchema && n.node_description ? `<div class="node-description"><h4>Description</h4><p>${escapeHtml(n.node_description)}</p></div>` : ''}
+
+      <div class="node-description-section">
+        <div class="node-desc-header">
+          <h4>Description</h4>
+          <button class="btn btn-ghost btn-xs node-desc-edit-btn" data-node-id="${n.node_id}">Edit</button>
+        </div>
+        <p class="node-desc-view">${n.node_description ? escapeHtml(n.node_description) : '<em class="muted">None</em>'}</p>
+        <div class="node-desc-edit-form" style="display:none">
+          <textarea class="node-desc-textarea" rows="3">${escapeHtml(n.node_description || '')}</textarea>
+          <div class="node-desc-form-actions">
+            <button class="btn btn-primary btn-xs node-desc-save" data-node-id="${n.node_id}">Save</button>
+            <button class="btn btn-ghost btn-xs node-desc-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="node-schema-actions">
+        ${isSchema
+          ? `<button class="btn btn-ghost btn-sm node-schema-unflag" data-node-id="${n.node_id}" title="Remove schema node flag">Unmark Schema</button>
+             <button class="btn btn-secondary btn-sm node-add-schema-child" data-node-id="${n.node_id}" title="Add a child schema node">+ Child Node</button>`
+          : `<button class="btn btn-ghost btn-sm node-schema-flag" data-node-id="${n.node_id}" title="Mark this node as a schema node">📌 Mark as Schema</button>`
+        }
+      </div>
+      <div class="node-add-child-form" data-node-id="${n.node_id}" style="display:none">
+        <input class="node-add-child-name" type="text" placeholder="Child node name" />
+        <input class="node-add-child-desc" type="text" placeholder="Description (optional)" />
+        <div class="node-desc-form-actions">
+          <button class="btn btn-primary btn-xs node-add-child-save" data-node-id="${n.node_id}">Add</button>
+          <button class="btn btn-ghost btn-xs node-add-child-cancel">Cancel</button>
+        </div>
+      </div>
+
       ${nodeKws.length > 0 ? `<div class="node-keywords-section"><h4>Keywords</h4><div class="keyword-chips">${nodeKws.map(k => `<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div></div>` : ''}
 
       <div class="node-summary">
@@ -2400,6 +2433,119 @@ async function loadNodeDetail(nodeId) {
       btn.addEventListener('click', () => handleDeleteChunk(btn.dataset.chunkId, btn.dataset.nodeId));
     });
 
+    // ── Schema node actions ────────────────────────────────────────────────────
+
+    // Description inline edit
+    const descEditBtn    = contentEl.querySelector('.node-desc-edit-btn');
+    const descView       = contentEl.querySelector('.node-desc-view');
+    const descEditForm   = contentEl.querySelector('.node-desc-edit-form');
+    const descTextarea   = contentEl.querySelector('.node-desc-textarea');
+    const descSaveBtn    = contentEl.querySelector('.node-desc-save');
+    const descCancelBtn  = contentEl.querySelector('.node-desc-cancel');
+
+    if (descEditBtn) {
+      descEditBtn.addEventListener('click', () => {
+        descView.style.display = 'none';
+        descEditForm.style.display = 'block';
+        descTextarea.focus();
+      });
+    }
+    if (descCancelBtn) {
+      descCancelBtn.addEventListener('click', () => {
+        descEditForm.style.display = 'none';
+        descView.style.display = '';
+      });
+    }
+    if (descSaveBtn) {
+      descSaveBtn.addEventListener('click', async () => {
+        const nodeIdToUpdate = descSaveBtn.dataset.nodeId;
+        const newDesc = descTextarea.value.trim();
+        try {
+          await api(`/schema/${encodeURIComponent(nodeIdToUpdate)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ node_description: newDesc })
+          });
+          descView.innerHTML = newDesc ? escapeHtml(newDesc) : '<em class="muted">None</em>';
+          descEditForm.style.display = 'none';
+          descView.style.display = '';
+          showToast('Description saved', 'success');
+        } catch (err) {
+          showToast(err.message || 'Error saving description', 'error');
+        }
+      });
+    }
+
+    // Mark / unmark schema
+    const flagBtn   = contentEl.querySelector('.node-schema-flag');
+    const unflagBtn = contentEl.querySelector('.node-schema-unflag');
+
+    if (flagBtn) {
+      flagBtn.addEventListener('click', async () => {
+        try {
+          await api(`/schema/${encodeURIComponent(flagBtn.dataset.nodeId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ is_schema_node: true })
+          });
+          showToast('Marked as schema node', 'success');
+          loadNodeDetail(nodeId);
+          loadSchemaNodes();
+        } catch (err) {
+          showToast(err.message || 'Error updating node', 'error');
+        }
+      });
+    }
+    if (unflagBtn) {
+      unflagBtn.addEventListener('click', async () => {
+        if (!confirm('Remove schema flag from this node?')) return;
+        try {
+          await api(`/schema/${encodeURIComponent(unflagBtn.dataset.nodeId)}`, { method: 'DELETE' });
+          showToast('Schema flag removed', 'success');
+          loadNodeDetail(nodeId);
+          loadSchemaNodes();
+        } catch (err) {
+          showToast(err.message || 'Error updating node', 'error');
+        }
+      });
+    }
+
+    // Add child schema node
+    const addChildBtn    = contentEl.querySelector('.node-add-schema-child');
+    const addChildForm   = contentEl.querySelector('.node-add-child-form');
+    const addChildCancel = contentEl.querySelector('.node-add-child-cancel');
+    const addChildSave   = contentEl.querySelector('.node-add-child-save');
+
+    if (addChildBtn && addChildForm) {
+      addChildBtn.addEventListener('click', () => {
+        addChildForm.style.display = 'block';
+        addChildForm.querySelector('.node-add-child-name').focus();
+      });
+    }
+    if (addChildCancel) {
+      addChildCancel.addEventListener('click', () => {
+        addChildForm.style.display = 'none';
+      });
+    }
+    if (addChildSave) {
+      addChildSave.addEventListener('click', async () => {
+        const parentNodeId = addChildSave.dataset.nodeId;
+        const childName = addChildForm.querySelector('.node-add-child-name').value.trim();
+        const childDesc = addChildForm.querySelector('.node-add-child-desc').value.trim();
+        if (!childName) { showToast('Name is required', 'error'); return; }
+        try {
+          await api('/schema/nodes', {
+            method: 'POST',
+            body: JSON.stringify({ name: childName, description: childDesc, parent_id: parentNodeId })
+          });
+          showToast(`Child node "${childName}" created`, 'success');
+          loadNodeDetail(nodeId);
+          loadSchemaNodes();
+          loadTree();
+        } catch (err) {
+          showToast(err.message || 'Error creating child node', 'error');
+        }
+      });
+    }
+
     // Wire up child node items to navigate on click
     contentEl.querySelectorAll('.node-child-item').forEach(item => {
       item.addEventListener('click', () => {
@@ -2478,22 +2624,47 @@ function populateNodeSelects() {
     document.getElementById('target-node')
   ];
 
+  const schemaOnlyChecked = document.getElementById('schema-nodes-only')?.checked ?? false;
+
   selects.forEach(select => {
     if (!select) return;
 
     const currentValue = select.value;
     select.innerHTML = '<option value="">-- ' + (select.id === 'target-node' ? 'Auto-detect' : 'No Parent (Root)') + ' --</option>';
 
-    allNodes.forEach(node => {
+    const nodesToShow = (schemaOnlyChecked && select.id === 'target-node')
+      ? allNodes.filter(n => n.is_schema_node === 1 || n.is_schema_node === true)
+      : allNodes;
+
+    nodesToShow.forEach(node => {
+      const option = document.createElement('option');
+      option.value = node.node_id;
+      const level = Number.isFinite(node.level) && node.level > 0 ? node.level : 1;
+      const schemaPrefix = (node.is_schema_node === 1 || node.is_schema_node === true) ? '📌 ' : '';
+      option.textContent = `${'  '.repeat(level - 1)}${schemaPrefix}${node.name}`;
+      select.appendChild(option);
+    });
+
+    select.value = currentValue;
+  });
+}
+
+async function populateSchemaBranchSelect() {
+  const select = document.getElementById('schema-branch');
+  if (!select) return;
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">-- All schema nodes --</option>';
+  try {
+    const data = await api('/schema');
+    (data.nodes || []).forEach(node => {
       const option = document.createElement('option');
       option.value = node.node_id;
       const level = Number.isFinite(node.level) && node.level > 0 ? node.level : 1;
       option.textContent = `${'  '.repeat(level - 1)}${node.name}`;
       select.appendChild(option);
     });
-
     select.value = currentValue;
-  });
+  } catch (_) {}
 }
 
 async function handleAddNode(e) {
@@ -2546,6 +2717,12 @@ function initUpload() {
   });
 
   uploadBtn.addEventListener('click', handleUpload);
+
+  // Schema nodes only filter — re-populate select when toggled
+  const schemaOnlyChk = document.getElementById('schema-nodes-only');
+  if (schemaOnlyChk) {
+    schemaOnlyChk.addEventListener('change', populateNodeSelects);
+  }
 }
 
 let selectedFiles = [];
@@ -2586,7 +2763,8 @@ async function handleUpload() {
   spinner.classList.remove('hidden');
   resultDiv.classList.add('hidden');
 
-  const targetNodeId = document.getElementById('target-node').value;
+  const targetNodeId       = document.getElementById('target-node').value;
+  const targetSchemaNodeId = document.getElementById('schema-branch')?.value || '';
   const useLLM = document.getElementById('upload-use-llm').checked;
 
   try {
@@ -2594,7 +2772,8 @@ async function handleUpload() {
 
     if (selectedFiles.length === 1) {
       formData.append('file', selectedFiles[0]);
-      if (targetNodeId) formData.append('targetNodeId', targetNodeId);
+      if (targetNodeId)       formData.append('targetNodeId', targetNodeId);
+      if (targetSchemaNodeId) formData.append('targetSchemaNodeId', targetSchemaNodeId);
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
@@ -2610,7 +2789,8 @@ async function handleUpload() {
       }
     } else {
       selectedFiles.forEach(f => formData.append('files', f));
-      if (targetNodeId) formData.append('targetNodeId', targetNodeId);
+      if (targetNodeId)       formData.append('targetNodeId', targetNodeId);
+      if (targetSchemaNodeId) formData.append('targetSchemaNodeId', targetSchemaNodeId);
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload/batch', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
@@ -6118,6 +6298,8 @@ function initSchemaPanel() {
 async function loadSchemaSettings() {
   try {
     const s = await api('/schema/settings');
+    currentMappingMode = s.mapping_mode || 'free';
+
     const badge = document.getElementById('schema-mode-badge');
     if (badge) {
       if (s.mapping_mode === 'guided') {
@@ -6132,6 +6314,16 @@ async function loadSchemaSettings() {
         badge.classList.add('badge-free');
       }
     }
+
+    // Show/hide guided-mode controls on upload form
+    const schemaOnlyRow   = document.getElementById('schema-nodes-only-row');
+    const schemaBranchRow = document.getElementById('schema-branch-row');
+    if (schemaOnlyRow)   schemaOnlyRow.style.display   = s.mapping_mode === 'guided' ? '' : 'none';
+    if (schemaBranchRow) schemaBranchRow.style.display  = s.mapping_mode === 'guided' ? '' : 'none';
+
+    // Populate schema branch select when in guided mode
+    if (s.mapping_mode === 'guided') populateSchemaBranchSelect();
+
     return s;
   } catch (_) {
     return { mapping_mode: 'free', mapping_strictness: 'soft' };

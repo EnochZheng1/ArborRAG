@@ -202,13 +202,13 @@ export const NodeRepo = {
 
   /** INSERT a new node row. scope_json should be pre-serialized JSON string. */
   insert({ node_id, name, parent_id, level, node_summary, scope_json,
-           node_description = '', is_schema_node = 0, keywords_json = '[]' }) {
+           node_description = '', is_schema_node = 0, keywords_json = '[]', aliases_json = '[]' }) {
     return db.prepare(`
       INSERT INTO nodes (node_id, name, parent_id, level, node_summary, scope_json,
-                         node_description, is_schema_node, keywords_json, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                         node_description, is_schema_node, keywords_json, aliases_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(node_id, name, parent_id ?? null, level, node_summary ?? null, scope_json ?? null,
-           node_description, is_schema_node ? 1 : 0, keywords_json);
+           node_description, is_schema_node ? 1 : 0, keywords_json, aliases_json);
   },
 
   /** Touch updated_at for a node (called after a chunk is assigned). */

@@ -6,6 +6,7 @@
       {
         "name": "Subtopic A1",
         "description": "More specific area under Topic A.",
+        "aliases": ["A1 alias", "alternate name for A1"],
         "children": [
           {
             "name": "Leaf Node A1a",

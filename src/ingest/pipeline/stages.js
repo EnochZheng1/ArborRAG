@@ -132,7 +132,7 @@ export async function stageExtractKPs(ctx) {
 
 export async function stageMapChunks(ctx) {
   const { enrichedChunks, documentId, options } = ctx;
-  const { targetNodeId, useLLM, createNewNodes } = options;
+  const { targetNodeId, targetSchemaNodeId, useLLM, createNewNodes } = options;
 
   ctx.setStep(documentId, "mapping_chunks", "Mapping chunks to tree nodes.", 68);
 
@@ -153,7 +153,7 @@ export async function stageMapChunks(ctx) {
     // Auto-map chunks to the best-fitting nodes
     const mappingMode       = DatasetConfigRepo.get('mapping_mode')       ?? 'free';
     const mappingStrictness = DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
-    const mappingResult = await autoMapChunks(enrichedChunks, documentId, { useLLM, createNewNodes, mappingMode, mappingStrictness });
+    const mappingResult = await autoMapChunks(enrichedChunks, documentId, { useLLM, createNewNodes, mappingMode, mappingStrictness, targetSchemaNodeId });
     ctx.results.mappings = mappingResult;
     ctx.results.chunks = mappingResult.mapped;
     // Track newly-created node IDs so rollback can clean them up if a later stage fails

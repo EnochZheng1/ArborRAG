@@ -19,18 +19,28 @@ import { ensureRootNode } from "./nodeHierarchy.js";
 const GUIDED_MATCH_THRESHOLD = 0.30;
 
 /**
- * Score a topic string against a schema node using name, description, and keywords.
+ * Score a topic string against a schema node using name, aliases, description, and keywords.
  */
 function scoreTopicAgainstNode(topic, node) {
-  const nameSim  = wordDiceSimilarity(topic.toLowerCase(), (node.name || "").toLowerCase());
-  const descSim  = wordDiceSimilarity(topic.toLowerCase(), (node.node_description || "").toLowerCase());
+  const topicLower = topic.toLowerCase();
+
+  const nameSim  = wordDiceSimilarity(topicLower, (node.name || "").toLowerCase());
+
+  // Aliases boost: treat the best alias match the same as the name
+  const aliases = safeJson(node.aliases_json, []);
+  const aliasSim = aliases.length > 0
+    ? Math.max(...aliases.map(a => wordDiceSimilarity(topicLower, String(a).toLowerCase())))
+    : 0;
+  const namePlusSim = Math.max(nameSim, aliasSim);
+
+  const descSim  = wordDiceSimilarity(topicLower, (node.node_description || "").toLowerCase());
 
   const keywords = safeJson(node.keywords_json, []);
-  const topicWords = new Set(topic.toLowerCase().match(/[a-z\u4e00-\u9fa5]{2,}/g) || []);
+  const topicWords = new Set(topicLower.match(/[a-z\u4e00-\u9fa5]{2,}/g) || []);
   const kwOverlap = keywords.length === 0 ? 0
     : keywords.filter(k => topicWords.has(String(k).toLowerCase())).length / keywords.length;
 
-  return 0.5 * nameSim + 0.3 * descSim + 0.2 * kwOverlap;
+  return 0.5 * namePlusSim + 0.3 * descSim + 0.2 * kwOverlap;
 }
 
 /**
@@ -46,7 +56,11 @@ async function llmDisambiguate(topics, schemaNodes) {
   if (!topics.length || !llmConfig[llmConfig.provider]?.apiKey) return result;
 
   const schemaLines = schemaNodes
-    .map(n => `- "${n.name}"${n.node_description ? ': ' + n.node_description : ''}`)
+    .map(n => {
+      const aliases = safeJson(n.aliases_json, []);
+      const aliasStr = aliases.length > 0 ? ` (also: ${aliases.join(', ')})` : '';
+      return `- "${n.name}"${aliasStr}${n.node_description ? ': ' + n.node_description : ''}`;
+    })
     .join('\n');
 
   const topicLines = topics.map((t, i) => `${i + 1}. ${t}`).join('\n');
@@ -101,10 +115,39 @@ ${topics.map((_, i) => `${i + 1}.`).join('\n')}`;
  * @param {string}   options.mappingStrictness  "soft" | "hard"
  * @returns {Promise<{ nodeMap: Map, newNodes: [] }>}
  */
+/**
+ * Filter schema nodes to the subtree rooted at rootNodeId (inclusive).
+ */
+function filterToSubtree(schemaNodes, rootNodeId) {
+  const subtree = new Set([rootNodeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of schemaNodes) {
+      if (!subtree.has(node.node_id) && node.parent_id && subtree.has(node.parent_id)) {
+        subtree.add(node.node_id);
+        changed = true;
+      }
+    }
+  }
+  return schemaNodes.filter(n => subtree.has(n.node_id));
+}
+
 export async function buildGuidedTopicalHierarchy(kps, docTitle, documentId, schemaNodes, options = {}) {
-  const { useLLM = true, mappingStrictness = 'soft' } = options;
+  const { useLLM = true, mappingStrictness = 'soft', targetSchemaNodeId = null } = options;
 
   ensureRootNode();
+
+  // Narrow schema nodes to a subtree if the user selected a schema branch at upload time
+  if (targetSchemaNodeId) {
+    const filtered = filterToSubtree(schemaNodes, targetSchemaNodeId);
+    if (filtered.length > 0) {
+      schemaNodes = filtered;
+      logger.info(`Guided mapping: scoped to subtree of "${targetSchemaNodeId}" (${filtered.length} nodes)`);
+    } else {
+      logger.warn(`Guided mapping: targetSchemaNodeId "${targetSchemaNodeId}" not found in schema nodes, using full schema`);
+    }
+  }
 
   logger.info(`Guided mapping: ${kps.length} KPs, ${schemaNodes.length} schema nodes, strictness=${mappingStrictness}`);
 

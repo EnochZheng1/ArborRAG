@@ -6,6 +6,7 @@
       {
         "name": "公司A",
         "description": "特定保险公司的相关信息库",
+        "aliases": ["平安保险", "中国平安", "平安"],
         "children": [
           {
             "name": "公司信息",

@@ -483,6 +483,19 @@
               <select id="target-node">
                 <option value="">-- Auto-detect --</option>
               </select>
+              <div id="schema-nodes-only-row" style="display:none; margin-top:4px;">
+                <label class="checkbox-label" style="font-size:12px;">
+                  <input type="checkbox" id="schema-nodes-only">
+                  <span>Schema nodes only</span>
+                </label>
+              </div>
+            </div>
+            <div class="form-group" id="schema-branch-row" style="display:none;">
+              <label for="schema-branch">Schema Branch (optional)</label>
+              <select id="schema-branch">
+                <option value="">-- All schema nodes --</option>
+              </select>
+              <p class="option-hint">Limit guided mapping to this subtree</p>
             </div>
             <label class="checkbox-label">
               <input type="checkbox" id="upload-use-llm" checked>

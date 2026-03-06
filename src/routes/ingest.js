@@ -62,9 +62,10 @@ router.post("/upload", upload.single("file"), (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const { targetNodeId, useLLM = true, sync = false } = req.body || {};
+      const { targetNodeId, targetSchemaNodeId, useLLM = true, sync = false } = req.body || {};
       const processOptions = {
         targetNodeId,
+        targetSchemaNodeId: targetSchemaNodeId || null,
         useLLM: useLLM === "true" || useLLM === true,
         originalName: req.file.originalname
       };
@@ -109,9 +110,10 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
         return res.status(400).json({ error: "No files uploaded" });
       }
 
-      const { targetNodeId, useLLM = true, sync = false } = req.body || {};
+      const { targetNodeId, targetSchemaNodeId, useLLM = true, sync = false } = req.body || {};
       const processOptions = {
         targetNodeId,
+        targetSchemaNodeId: targetSchemaNodeId || null,
         useLLM: useLLM === "true" || useLLM === true
       };
 

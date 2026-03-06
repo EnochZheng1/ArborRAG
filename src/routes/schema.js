@@ -47,6 +47,7 @@ function importSchemaNodes(rawNodes, mode) {
   function walk(nodeData, parentId, level) {
     const name        = (nodeData.name || '').trim();
     const description = nodeData.description || '';
+    const aliases     = Array.isArray(nodeData.aliases) ? nodeData.aliases.filter(a => typeof a === 'string') : [];
     if (!name) return;
 
     const nodeId = nodeData.id || generateNodeId(name);
@@ -58,6 +59,7 @@ function importSchemaNodes(rawNodes, mode) {
     if (existing) {
       NodeRepo.setSchemaNode(existing.node_id, true);
       if (description) NodeRepo.updateDescription(existing.node_id, description);
+      if (aliases.length > 0) NodeRepo.update(existing.node_id, { aliases });
       updated.push(existing.node_id);
 
       for (const child of (nodeData.children || [])) {
@@ -74,7 +76,8 @@ function importSchemaNodes(rawNodes, mode) {
           node_summary:     description,
           node_description: description,
           is_schema_node:   1,
-          scope_json:       '{}'
+          scope_json:       '{}',
+          aliases_json:     aliases.length > 0 ? JSON.stringify(aliases) : '[]'
         });
         NodeRepo.insertFtsText(nodeId, `${name} ${description}`);
       });
@@ -266,6 +269,87 @@ router.post('/templates/:id/apply', (req, res) => {
       created: result.created.length,
       updated: result.updated.length
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /schema/nodes ────────────────────────────────────────────────────────
+// Create a new schema node (child of parent_id or dataset root).
+
+router.post('/nodes', (req, res) => {
+  try {
+    const { name, description = '', parent_id } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: '`name` is required' });
+
+    const rootNode = ensureRootNode();
+    const parentId = parent_id ?? rootNode.node_id;
+    if (!NodeRepo.existsById(parentId)) return res.status(404).json({ error: 'Parent node not found' });
+
+    // Reuse existing node if name matches
+    const existing = NodeRepo.searchByName(name.trim(), 1).find(
+      n => n.name.toLowerCase() === name.trim().toLowerCase()
+    );
+    if (existing) {
+      NodeRepo.setSchemaNode(existing.node_id, true);
+      if (description) NodeRepo.updateDescription(existing.node_id, description);
+      return res.json({ ok: true, node_id: existing.node_id, created: false });
+    }
+
+    const nodeId = generateNodeId(name.trim());
+    const level  = (NodeRepo.getLevel(parentId) ?? 0) + 1;
+    runTransaction(() => {
+      NodeRepo.insert({
+        node_id:          nodeId,
+        name:             name.trim(),
+        parent_id:        parentId,
+        level,
+        node_summary:     description,
+        node_description: description,
+        is_schema_node:   1,
+        scope_json:       '{}'
+      });
+      NodeRepo.insertFtsText(nodeId, `${name.trim()} ${description}`);
+    });
+
+    res.status(201).json({ ok: true, node_id: nodeId, created: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /schema/:nodeId ─────────────────────────────────────────────────────
+// Update node_description and/or toggle is_schema_node flag.
+
+router.patch('/:nodeId', (req, res) => {
+  try {
+    const { nodeId } = req.params;
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: 'Node not found' });
+
+    const { node_description, is_schema_node } = req.body;
+
+    if (node_description !== undefined) {
+      NodeRepo.updateDescription(nodeId, node_description);
+    }
+    if (is_schema_node !== undefined) {
+      NodeRepo.setSchemaNode(nodeId, !!is_schema_node);
+    }
+
+    res.json({ ok: true, node_id: nodeId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DELETE /schema/:nodeId ────────────────────────────────────────────────────
+// Remove the schema flag from a node (does NOT delete the node itself).
+
+router.delete('/:nodeId', (req, res) => {
+  try {
+    const { nodeId } = req.params;
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: 'Node not found' });
+    NodeRepo.setSchemaNode(nodeId, false);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

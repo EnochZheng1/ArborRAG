@@ -308,14 +308,15 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
     const docTitle = chunks[0]?.doc_title || "Untitled";
     logger.info(`KP mapping mode: ${chunks.length} KPs from "${docTitle}"`);
 
-    const mappingMode       = options.mappingMode       ?? DatasetConfigRepo.get('mapping_mode')       ?? 'free';
-    const mappingStrictness = options.mappingStrictness ?? DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
+    const mappingMode         = options.mappingMode         ?? DatasetConfigRepo.get('mapping_mode')       ?? 'free';
+    const mappingStrictness   = options.mappingStrictness   ?? DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
+    const targetSchemaNodeId  = options.targetSchemaNodeId  ?? null;
 
     let nodeMapResult;
     if (mappingMode === 'guided') {
       const schemaNodes = NodeRepo.findSchemaNodes();
       if (schemaNodes.length > 0) {
-        nodeMapResult = await buildGuidedTopicalHierarchy(chunks, docTitle, documentId, schemaNodes, { useLLM, mappingStrictness });
+        nodeMapResult = await buildGuidedTopicalHierarchy(chunks, docTitle, documentId, schemaNodes, { useLLM, mappingStrictness, targetSchemaNodeId });
       } else {
         logger.warn('Guided mode: no schema nodes found, falling back to free mapping');
         nodeMapResult = await buildTopicalHierarchy(chunks, docTitle, documentId, { useLLM });

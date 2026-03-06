@@ -80,13 +80,18 @@ router.post("/nodes", (req, res) => {
 router.put("/nodes/:id", (req, res) => {
   try {
     const nodeId = req.params.id;
-    const { name, summary, scope, aliases } = req.body;
+    const { name, summary, scope, aliases, node_description } = req.body;
 
     const hasUpdates = name !== undefined || summary !== undefined ||
-                       scope !== undefined || aliases !== undefined;
+                       scope !== undefined || aliases !== undefined ||
+                       node_description !== undefined;
     if (!hasUpdates) return res.status(400).json({ error: "No updates provided" });
 
     NodeRepo.update(nodeId, { name, summary, scope, aliases });
+
+    if (node_description !== undefined) {
+      NodeRepo.updateDescription(nodeId, node_description);
+    }
 
     // Update FTS index
     if (name !== undefined || summary !== undefined) {

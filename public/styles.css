@@ -5470,6 +5470,85 @@ select:focus {
   line-height: 1.5;
 }
 
+/* Inline description editing */
+.node-description-section {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.node-desc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.node-desc-header h4 {
+  margin: 0;
+  flex: 1;
+}
+
+.node-desc-view {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.node-desc-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  resize: vertical;
+}
+
+.node-desc-form-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* Schema action buttons row */
+.node-schema-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+/* Add child node inline form */
+.node-add-child-form {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-add-child-name,
+.node-add-child-desc {
+  padding: 5px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 .node-keywords-section {
   margin-bottom: 8px;
 }

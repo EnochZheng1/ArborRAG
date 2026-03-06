@@ -25,8 +25,25 @@ function escapeHtml(str) {
  * @param {object} options - Options
  * @returns {Promise<object>} Answer with citations
  */
+/** Detect false "not in sources" answers that should trigger a retry. */
+function looksLikeNotFound(text) {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  return (
+    /not (in|found in|available in|present in|mentioned in|provided in) (the |my |these )?sources?/i.test(t) ||
+    /information (is |)(not|isn't) (available|provided|present|found)/i.test(t) ||
+    /cannot (find|locate|answer|provide)/i.test(t) ||
+    /no (relevant |specific )?(information|data|detail)/i.test(t) ||
+    /不在(来源|资料)中/.test(text) ||
+    /缺少信息/.test(text) ||
+    /找不到(相关)?信息/.test(text) ||
+    /没有(提供|包含|找到)/.test(text) ||
+    /信息不(足|够|在)/.test(text)
+  );
+}
+
 export async function generateAnswerWithCitations(query, context, sources, options = {}) {
-  const { lang = 'auto', maxSources = 10, temperature = 0.3 } = options;
+  const { lang = 'auto', maxSources = 10, temperature = 0.1 } = options;
 
   if (!llmConfig[llmConfig.provider]?.apiKey) {
     return {
@@ -85,7 +102,17 @@ Rules:
 
 Answer:`;
 
-    const answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
+    let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
+
+    // Retry once if the first answer looks like a false "not in sources" response
+    if (looksLikeNotFound(answerText)) {
+      logger.debug(`citation_generation: "not found" detected, retrying with directive prompt`);
+      const retryPrompt = isChineseLang(detectedLang)
+        ? `请仔细重新阅读以下所有来源，然后回答问题。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n重要：请不要说信息不存在，而是从来源中提取任何相关的事实、数字或描述。直接回答：`
+        : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`;
+      const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry' });
+      if (retryText) answerText = retryText;
+    }
 
     // Extract citations used
     const citationsUsed = extractCitationsFromAnswer(answerText);
