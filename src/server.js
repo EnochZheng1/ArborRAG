@@ -8,7 +8,7 @@ import { initDb } from "./db/db.js";
 import { getConnection, getAllConnections } from "./db/datasetManager.js";
 import { getDefaultDatasetId } from "./db/registry.js";
 import { runWithDb } from "./db/activeDb.js";
-import { logger, requestLogger } from "./utils/logger.js";
+import { logger, apiLogger, requestLogger } from "./utils/logger.js";
 import { startIngestionQueue } from "./ingest/jobQueue.js";
 import { addClient, removeClient, subscribeToJob, unsubscribeFromJob } from "./utils/progressEmitter.js";
 
@@ -53,7 +53,8 @@ app.use((req, res, next) => {
     const conn = getConnection(datasetId);
     req.datasetConn = conn; // survives multer's async boundary
     runWithDb(conn, next);
-  } catch {
+  } catch (err) {
+    apiLogger.warn(`Dataset '${datasetId}' not found: ${err.message}`);
     res.status(404).json({ error: `Dataset '${datasetId}' not found` });
   }
 });
@@ -80,8 +81,11 @@ app.use((err, req, res, next) => {
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
   addClient(ws);
+  const clientIp = req.socket?.remoteAddress ?? 'unknown';
+  logger.debug(`WS client connected (${clientIp}), total: ${wss.clients.size}`);
+
   ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(String(raw));
@@ -92,8 +96,16 @@ wss.on("connection", (ws) => {
       }
     } catch { /* ignore malformed messages */ }
   });
-  ws.on("close", () => removeClient(ws));
-  ws.on("error", () => removeClient(ws));
+
+  ws.on("close", () => {
+    removeClient(ws);
+    logger.debug(`WS client disconnected (${clientIp}), remaining: ${wss.clients.size}`);
+  });
+
+  ws.on("error", (err) => {
+    logger.warn(`WS client error (${clientIp}): ${err.message}`);
+    removeClient(ws);
+  });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

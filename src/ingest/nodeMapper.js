@@ -328,8 +328,10 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
     const { nodeMap, newNodes } = nodeMapResult;
     results.newNodes.push(...newNodes);
 
-    // Phase 1 — parallel LLM decisions (batches of 8)
-    const KP_BATCH = 8;
+    // Phase 1 — LLM decisions.
+    // KP_BATCH=1 (default) processes sequentially to respect low rate limits.
+    // Set env INGEST_KP_BATCH=8 to restore parallel processing.
+    const KP_BATCH = Math.max(1, Number.parseInt(process.env.INGEST_KP_BATCH || "1", 10) || 1);
     const allDecisions = [];
 
     for (let b = 0; b < chunks.length; b += KP_BATCH) {
@@ -342,6 +344,8 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
         })
       );
       allDecisions.push(...settled);
+      // Small inter-batch pause to stay within rate limits
+      if (b + KP_BATCH < chunks.length) await new Promise(r => setTimeout(r, 100));
     }
 
     // Phase 2 — single-transaction batch DB writes

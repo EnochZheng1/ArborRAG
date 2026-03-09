@@ -10,6 +10,7 @@ import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { SchemaTemplateRepo } from "../db/repositories/SchemaTemplateRepo.js";
 import { generateNodeId, ensureRootNode } from "../ingest/nodeHierarchy.js";
 import { runTransaction, safeJson } from "../db/db.js";
+import { apiLogger as logger } from "../utils/logger.js";
 
 const router = express.Router();
 
@@ -125,6 +126,7 @@ router.get('/', (req, res) => {
     const tree  = buildTree(nodes);
     res.json({ nodes, tree });
   } catch (err) {
+    logger.error("GET /schema error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -142,8 +144,10 @@ router.post('/import', (req, res) => {
     }
 
     const result = importSchemaNodes(rawNodes, mode);
+    logger.info(`Schema import (${mode}): ${result.created.length} created, ${result.updated.length} updated`);
     res.json({ ok: true, created: result.created.length, updated: result.updated.length, ...result });
   } catch (err) {
+    logger.error("POST /schema/import error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -162,8 +166,10 @@ router.get('/export', (req, res) => {
 
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/json');
+    logger.info(`Schema exported: ${nodes.length} nodes (all=${all})`);
     res.json({ exported_at: new Date().toISOString(), nodes: tree });
   } catch (err) {
+    logger.error("GET /schema/export error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -178,6 +184,7 @@ router.get('/settings', (req, res) => {
       schema_template_id:  DatasetConfigRepo.get('schema_template_id')  ?? null
     });
   } catch (err) {
+    logger.error("GET /schema/settings error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -202,12 +209,12 @@ router.patch('/settings', (req, res) => {
       DatasetConfigRepo.set('mapping_strictness', mapping_strictness);
     }
 
-    res.json({
-      ok: true,
-      mapping_mode:       DatasetConfigRepo.get('mapping_mode')       ?? 'free',
-      mapping_strictness: DatasetConfigRepo.get('mapping_strictness') ?? 'soft'
-    });
+    const newMode        = DatasetConfigRepo.get('mapping_mode')       ?? 'free';
+    const newStrictness  = DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
+    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness}`);
+    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness });
   } catch (err) {
+    logger.error("PATCH /schema/settings error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -222,6 +229,7 @@ router.get('/templates', (req, res) => {
     }));
     res.json(templates);
   } catch (err) {
+    logger.error("GET /schema/templates error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -238,11 +246,13 @@ router.post('/templates', (req, res) => {
     const tree    = buildTree(nodes);
 
     const template = SchemaTemplateRepo.create({ name: name.trim(), description, schemaJson: tree });
+    logger.info(`Schema template created: "${name.trim()}" (${nodes.length} nodes)`);
     res.status(201).json({ ...template, schema_json: safeJson(template.schema_json, []) });
   } catch (err) {
     if (err.message?.includes('UNIQUE')) {
       return res.status(409).json({ error: `Template name "${req.body.name}" already exists` });
     }
+    logger.error("POST /schema/templates error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -253,8 +263,10 @@ router.delete('/templates/:id', (req, res) => {
   try {
     const changes = SchemaTemplateRepo.delete(req.params.id);
     if (!changes) return res.status(404).json({ error: 'Template not found' });
+    logger.info(`Schema template deleted: ${req.params.id}`);
     res.json({ ok: true });
   } catch (err) {
+    logger.error("DELETE /schema/templates/:id error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -275,6 +287,7 @@ router.post('/templates/:id/apply', (req, res) => {
     DatasetConfigRepo.set('mapping_mode', 'guided');
     DatasetConfigRepo.set('schema_template_id', template.id);
 
+    logger.info(`Schema template applied: "${template.name}" (${result.created.length} created, ${result.updated.length} updated) — mode=guided`);
     res.json({
       ok: true,
       template_name: template.name,
@@ -283,6 +296,7 @@ router.post('/templates/:id/apply', (req, res) => {
       updated: result.updated.length
     });
   } catch (err) {
+    logger.error("POST /schema/templates/:id/apply error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -325,6 +339,7 @@ router.post('/nodes', (req, res) => {
       NodeRepo.insertFtsText(nodeId, `${name.trim()} ${description}`);
     });
 
+    logger.info(`Schema node created: ${nodeId} ("${name.trim()}") under ${parentId}`);
     res.status(201).json({ ok: true, node_id: nodeId, created: true });
   } catch (err) {
     // Race condition: concurrent request created the same node — treat as updated.
@@ -337,6 +352,7 @@ router.post('/nodes', (req, res) => {
         if (winner) return res.json({ ok: true, node_id: winner.node_id, created: false });
       } catch (_) { /* fall through */ }
     }
+    logger.error("POST /schema/nodes error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -358,8 +374,10 @@ router.patch('/:nodeId', (req, res) => {
       NodeRepo.setSchemaNode(nodeId, !!is_schema_node);
     }
 
+    logger.info(`Schema node patched: ${nodeId}`);
     res.json({ ok: true, node_id: nodeId });
   } catch (err) {
+    logger.error(`PATCH /schema/${req.params.nodeId} error:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -372,8 +390,10 @@ router.delete('/:nodeId', (req, res) => {
     const { nodeId } = req.params;
     if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: 'Node not found' });
     NodeRepo.setSchemaNode(nodeId, false);
+    logger.info(`Schema flag removed from node: ${nodeId}`);
     res.json({ ok: true });
   } catch (err) {
+    logger.error(`DELETE /schema/${req.params.nodeId} error:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });

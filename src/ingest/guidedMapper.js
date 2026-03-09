@@ -77,7 +77,8 @@ Reply with ONLY a numbered list using the exact schema node name from above or N
 ${topics.map((_, i) => `${i + 1}.`).join('\n')}`;
 
   try {
-    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'guided_schema_mapping' });
+    // maxOutputTokens: one line per topic (≈10 tokens each), cap at 512 to prevent runaway
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 512, taskName: 'guided_schema_mapping' });
     if (!text) return result;
 
     // Build name → node_id lookup (case-insensitive)

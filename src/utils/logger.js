@@ -22,12 +22,12 @@ function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
-/** Append a plain-text line to today's error log file. Never throws. */
-function writeToFile(level, context, message, data) {
+/**
+ * Append a plain-text line to a log file. Never throws.
+ * @param {string} filePath  - absolute path to the log file
+ */
+function appendToFile(filePath, level, context, message, data) {
   try {
-    const date   = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const filePath = path.join(LOGS_DIR, `error-${date}.log`);
-
     const ctx  = context ? `[${context}] ` : '';
     let line   = `${timestamp()} ${level.padEnd(5)} ${ctx}${message}`;
 
@@ -43,6 +43,19 @@ function writeToFile(level, context, message, data) {
 
     fs.appendFileSync(filePath, line + '\n', 'utf8');
   } catch (_) { /* never let file I/O break the application */ }
+}
+
+/**
+ * Route log entries to the correct files:
+ *  - INFO/WARN/ERROR → activity-YYYY-MM-DD.log  (full audit trail)
+ *  - WARN/ERROR      → error-YYYY-MM-DD.log      (errors-only view)
+ */
+function writeToFile(level, context, message, data) {
+  const date = new Date().toISOString().slice(0, 10);
+  appendToFile(path.join(LOGS_DIR, `activity-${date}.log`), level, context, message, data);
+  if (level === 'WARN' || level === 'ERROR') {
+    appendToFile(path.join(LOGS_DIR, `error-${date}.log`), level, context, message, data);
+  }
 }
 
 // ── Log levels ────────────────────────────────────────────────────────────────
@@ -116,6 +129,7 @@ class Logger {
     if (currentLevel <= LOG_LEVELS.INFO) {
       console.log(formatMessage('INFO', this.context, message, data));
     }
+    writeToFile('INFO', this.context, message, data);
   }
 
   warn(message, data) {

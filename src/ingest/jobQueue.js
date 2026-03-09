@@ -7,7 +7,9 @@ import { RateLimitError } from "../utils/rateLimitError.js";
 import { JobRepo } from "../db/repositories/JobRepo.js";
 import { emitQueueUpdate } from "../utils/progressEmitter.js";
 
-const DEFAULT_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_CONCURRENCY || "2", 10) || 2);
+// Job queue concurrency: default 1 (sequential) to respect low OpenAI rate limits.
+// Set env INGEST_QUEUE_CONCURRENCY=2 to process multiple jobs in parallel.
+const DEFAULT_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_CONCURRENCY || "1", 10) || 1);
 const DEFAULT_MAX_ATTEMPTS = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_MAX_ATTEMPTS || "3", 10) || 3);
 const DEFAULT_RETRY_DELAY_MS = Math.max(0, Number.parseInt(process.env.INGEST_QUEUE_RETRY_DELAY_MS || "5000", 10) || 5000);
 const CLEANUP_ON_SUCCESS = process.env.INGEST_CLEANUP_ON_SUCCESS !== "false";

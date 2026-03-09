@@ -20,7 +20,9 @@ import { JobRepo } from "../db/repositories/JobRepo.js";
 const VALID_KP_TYPES = new Set(["fact", "rule", "definition", "procedure", "example", "context"]);
 const SEGMENT_SIZE   = 8000;  // chars per LLM call — was 5000; ~35% fewer segments
 const SEGMENT_OVERLAP = 300;  // overlap between segments — was 500
-const SEGMENT_BATCH  = 4;     // parallel LLM calls per batch
+// Parallel segment batch size. Default 1 (sequential) to respect low rate limits.
+// Set env INGEST_SEGMENT_BATCH=4 to restore parallel processing.
+const SEGMENT_BATCH  = Math.max(1, Number.parseInt(process.env.INGEST_SEGMENT_BATCH || "1", 10) || 1);
 
 // ── Word-level Dice similarity (used for cross-segment dedup) ─────────────────
 
@@ -109,6 +111,14 @@ function detectSectionHeadings(text) {
       else if (/^\d+(\.\d+)*[:.]\s*[A-Z]/.test(trimmed) && trimmed.length <= 80) {
         headings.push({ heading: trimmed.replace(/^\d+[\d.]*[:.]\s*/, ''), startIndex: charOffset });
       }
+      // CJK chapter/section markers (e.g. "第一章 总则", "第二节 定义", "第3章 工作流程")
+      else if (/^第[一二三四五六七八九十百千万\d]+[章节篇部条]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed, startIndex: charOffset });
+      }
+      // CJK enumeration headings (e.g. "一、总则", "（二）定义与范围")
+      else if (/^[（(]?[一二三四五六七八九十]+[）)、。]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed.replace(/^[（(]?[一二三四五六七八九十]+[）)、。]\s*/, ''), startIndex: charOffset });
+      }
     }
     charOffset += line.length + 1; // +1 for the \n
   }
@@ -183,7 +193,8 @@ async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = n
 
   // Temperature 0 + seed for determinism: same document must produce the same KPs
   // across runs. This stabilises tree topology and makes retrieval deterministic.
-  const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'kp_extraction' });
+  // maxOutputTokens: cap at 3000 tokens (~20 KPs × 150 tokens each) to avoid runaway completions.
+  const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 3000, taskName: 'kp_extraction' });
 
   if (!text) throw new Error("LLM returned empty response");
 

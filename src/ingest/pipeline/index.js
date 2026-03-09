@@ -214,7 +214,9 @@ export async function processDocument(filePath, options = {}) {
   return results;
 }
 
-const BATCH_CONCURRENCY = 3; // parallel documents per batch — keeps LLM rate-limit headroom
+// Parallel documents per batch. Default 1 (sequential) to respect low rate limits.
+// Set env INGEST_BATCH_CONCURRENCY=3 to restore parallel processing.
+const BATCH_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_BATCH_CONCURRENCY || "1", 10) || 1);
 
 export async function processDocumentBatch(filePaths, options = {}) {
   const results = { total: filePaths.length, successful: 0, failed: 0, documents: [] };

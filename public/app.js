@@ -3910,6 +3910,8 @@ function createTreeDiagram() {
         .style('top',  (event.clientY - rect.top  - 10) + 'px');
     })
     .on('mouseout', () => tooltip.style('display', 'none'));
+
+  addGraphLegend(container);
 }
 
 function zoomTreeDiagram(factor) {
@@ -6488,7 +6490,7 @@ async function loadSchemaNodes() {
   try {
     const data = await api('/schema');
     if (!data.nodes?.length) {
-      container.innerHTML = '<p class="empty-state">No schema nodes defined. Import a JSON schema or add nodes via the tree.</p>';
+      container.innerHTML = '<p class="schema-empty">No schema nodes defined.<br>Import a JSON schema or flag existing nodes.</p>';
       return;
     }
     container.innerHTML = renderSchemaNodeTree(data.tree || []);
@@ -6499,14 +6501,18 @@ async function loadSchemaNodes() {
 
 function renderSchemaNodeTree(nodes, depth = 0) {
   return nodes.map(node => {
-    const indent = depth * 16;
     const kws = (() => { try { return JSON.parse(node.keywords_json || '[]'); } catch(_){return[];} })();
+    const children = node.children?.length
+      ? `<div class="schema-node-children">${renderSchemaNodeTree(node.children, depth + 1)}</div>`
+      : '';
     return `
-      <div class="schema-node-item" style="padding-left:${indent}px">
-        <span class="schema-node-name">${escapeHtml(node.name)}</span>
-        ${node.node_description ? `<span class="schema-node-desc">${escapeHtml(node.node_description)}</span>` : ''}
-        ${kws.length ? `<div class="keyword-chips">${kws.slice(0,6).map(k=>`<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
-        ${(node.children||[]).length ? renderSchemaNodeTree(node.children, depth+1) : ''}
+      <div class="schema-node-item depth-${Math.min(depth, 3)}">
+        <div class="schema-node-content">
+          <span class="schema-node-name">${escapeHtml(node.name)}</span>
+          ${node.node_description ? `<span class="schema-node-desc">${escapeHtml(node.node_description)}</span>` : ''}
+          ${kws.length ? `<div class="keyword-chips">${kws.slice(0, 5).map(k => `<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
+        </div>
+        ${children}
       </div>
     `;
   }).join('');
@@ -6518,7 +6524,7 @@ async function loadSchemaTemplates() {
   try {
     const templates = await api('/schema/templates');
     if (!templates.length) {
-      container.innerHTML = '<p class="empty-state">No global templates yet.</p>';
+      container.innerHTML = '<p class="schema-empty">No templates yet.</p>';
       return;
     }
     container.innerHTML = templates.map(t => `

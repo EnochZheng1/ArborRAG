@@ -286,21 +286,35 @@
           <div class="schema-panel-header" id="schema-panel-toggle">
             <span class="schema-panel-title">Schema</span>
             <div class="schema-panel-actions">
-              <button class="btn btn-small btn-secondary" id="schema-import-btn" title="Import schema from JSON">Import JSON</button>
-              <button class="btn btn-small btn-secondary" id="schema-export-btn" title="Export schema as JSON">Export JSON</button>
-              <button class="btn btn-small btn-secondary" id="schema-save-template-btn" title="Save current schema as a global template">Save as Template</button>
-              <button class="btn btn-small btn-secondary" id="schema-settings-btn" title="Schema mapping settings">Settings</button>
+              <button class="schema-tool-btn" id="schema-import-btn" title="Import schema from JSON">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Import
+              </button>
+              <button class="schema-tool-btn" id="schema-export-btn" title="Export schema as JSON">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+              <button class="schema-tool-btn" id="schema-save-template-btn" title="Save current schema as a global template">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+                Template
+              </button>
+              <span class="schema-tool-sep"></span>
+              <button class="schema-tool-btn schema-tool-btn--icon" id="schema-settings-btn" title="Mapping settings">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              </button>
               <span class="schema-panel-chevron" id="schema-panel-chevron">&#9654;</span>
             </div>
           </div>
           <div class="schema-panel-body hidden" id="schema-panel-body">
-            <div class="schema-templates-section" id="schema-templates-section">
-              <h4 class="schema-section-title">Global Templates</h4>
-              <div id="schema-templates-list" class="schema-templates-list"></div>
-            </div>
-            <div class="schema-nodes-section">
-              <h4 class="schema-section-title">Schema Nodes</h4>
-              <div id="schema-nodes-tree" class="schema-nodes-tree"></div>
+            <div class="schema-body-cols">
+              <div class="schema-col schema-col--templates" id="schema-templates-section">
+                <h4 class="schema-section-title">Templates</h4>
+                <div id="schema-templates-list" class="schema-templates-list"></div>
+              </div>
+              <div class="schema-col schema-col--nodes">
+                <h4 class="schema-section-title">Schema Nodes</h4>
+                <div id="schema-nodes-tree" class="schema-nodes-tree"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -491,7 +505,10 @@
 
           <div class="upload-options">
             <div class="form-group">
-              <label for="target-node" data-i18n="target_node">Target Node (optional)</label>
+              <label for="target-node" data-i18n="target_node">
+                Target Node (optional)
+                <span class="field-help" data-tooltip="Pin all content from this document to a specific node in the knowledge tree. Leave empty to let the AI automatically detect and assign topics based on document content.">?</span>
+              </label>
               <select id="target-node">
                 <option value="">-- Auto-detect --</option>
               </select>
@@ -499,19 +516,23 @@
                 <label class="checkbox-label" style="font-size:12px;">
                   <input type="checkbox" id="schema-nodes-only">
                   <span>Schema nodes only</span>
+                  <span class="field-help" data-tooltip="Restrict mapping to existing schema nodes only. Content that does not match any schema node will be assigned to the closest matching schema ancestor instead of creating a new node.">?</span>
                 </label>
               </div>
             </div>
             <div class="form-group" id="schema-branch-row" style="display:none;">
-              <label for="schema-branch">Schema Branch (optional)</label>
+              <label for="schema-branch">
+                Schema Branch (optional)
+                <span class="field-help" data-tooltip="Limit guided mapping to a specific branch of the schema tree. Useful when you know the document belongs to a particular topic area and want to avoid mapping to unrelated branches.">?</span>
+              </label>
               <select id="schema-branch">
                 <option value="">-- All schema nodes --</option>
               </select>
-              <p class="option-hint">Limit guided mapping to this subtree</p>
             </div>
             <label class="checkbox-label">
               <input type="checkbox" id="upload-use-llm" checked>
               <span data-i18n="use_llm_extraction">Use LLM for metadata extraction</span>
+              <span class="field-help" data-tooltip="Use AI to extract atomic knowledge points, detect topics, and classify content. Produces richer and more accurate results. Uncheck to use basic paragraph splitting — faster but less structured.">?</span>
             </label>
           </div>
 
