@@ -82,6 +82,8 @@ router.put("/nodes/:id", (req, res) => {
     const nodeId = req.params.id;
     const { name, summary, scope, aliases, node_description } = req.body;
 
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: "Node not found" });
+
     const hasUpdates = name !== undefined || summary !== undefined ||
                        scope !== undefined || aliases !== undefined ||
                        node_description !== undefined;

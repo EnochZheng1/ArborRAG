@@ -100,6 +100,36 @@ export function getLangInstruction(lang) {
 }
 
 /**
+ * Variable-mapping helpers: convert positional args to named vars for template rendering.
+ * Used when a custom prompt override is set (overrides use {{var}} syntax).
+ */
+const PROMPT_VAR_MAP = {
+  metadataExtraction: (lang, args) => ({ docTitle: args[0] || (isChineseLang(lang) ? '(未知)' : '(Unknown)'), content: args[1] }),
+  nodeSuggestion: (lang, args) => ({
+    chunkPreview: args[0], keywords: args[1], nodeList: args[2],
+    noExistingText: args[3]
+      ? (isChineseLang(lang) ? '没有匹配良好的现有节点。请建议一个新节点。' : 'No existing nodes match well. Suggest a new node.')
+      : ''
+  }),
+  documentStructure: (_lang, args) => ({ docTitle: args[0], chunkSummaries: args[1] }),
+  conflictDetection: (lang, args) => {
+    const [a, b] = args;
+    return {
+      chunkAId: a.id, chunkASource: a.doc_title || (isChineseLang(lang) ? '未知' : 'unknown'),
+      chunkAContent: (a.content || '').slice(0, 1000),
+      chunkBId: b.id, chunkBSource: b.doc_title || (isChineseLang(lang) ? '未知' : 'unknown'),
+      chunkBContent: (b.content || '').slice(0, 1000)
+    };
+  },
+  queryClassification: (_lang, args) => ({ query: args[0] }),
+  reranking: (_lang, args) => ({ query: args[0], passages: args[1] }),
+  entityFactExtraction: (_lang, args) => ({ content: args[0], existingHint: args[1] }),
+  nodeReranking: (_lang, args) => ({ query: args[0], nodeTexts: args[1] }),
+  kpExtraction: (_lang, args) => ({ docTitle: args[0], textSegment: args[1] }),
+  aliasGeneration: (_lang, args) => ({ context: args[0], maxAliases: args[1] })
+};
+
+/**
  * Get bilingual prompt based on detected language.
  * Prompts are in the same language as the content for better LLM understanding.
  * A language-adherence instruction is automatically prepended to every prompt.
@@ -573,6 +603,21 @@ export function getPrompt(promptKey, lang, ...args) {
     throw new Error(`Unknown prompt key: ${promptKey}`);
   }
 
+  // Check for per-dataset custom override (registered by promptManager at startup)
+  if (_customPromptFn) {
+    const langSuffix = isChineseLang(lang) ? 'zh' : 'en';
+    const overrideKey = `${promptKey}_${langSuffix}`;
+    const varMapper = PROMPT_VAR_MAP[promptKey];
+    if (varMapper) {
+      try {
+        const rendered = _customPromptFn(overrideKey, varMapper(lang, args));
+        if (rendered !== null) {
+          return getLangInstruction(lang) + rendered;
+        }
+      } catch { /* no override or no DB context — use default */ }
+    }
+  }
+
   // Map zh-TW and zh-CN both to the 'zh' template (Simplified Chinese instructions
   // work fine for Traditional Chinese — the LLM understands both; the prepended
   // instruction ensures the *output* stays in the correct script).
@@ -583,6 +628,15 @@ export function getPrompt(promptKey, lang, ...args) {
 
   // Prepend language-adherence instruction so output strictly follows input script.
   return getLangInstruction(lang) + body;
+}
+
+/**
+ * Custom prompt function registered by promptManager at startup.
+ * Kept as a callback to avoid circular import between langDetect ↔ promptManager.
+ */
+let _customPromptFn = null;
+export function registerCustomPromptFn(fn) {
+  _customPromptFn = fn;
 }
 
 /**

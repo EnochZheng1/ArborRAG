@@ -56,6 +56,11 @@ export const EmbeddingRepo = {
     ).run(refType, String(refId));
   },
 
+  /** Delete all embeddings of a given type. Returns { changes }. */
+  deleteAllByType(refType) {
+    return db.prepare("DELETE FROM embeddings WHERE ref_type = ?").run(refType);
+  },
+
   /** Per-type counts. Returns array of { ref_type, count }. */
   getStatsByType() {
     return db.prepare(
@@ -83,12 +88,21 @@ export const EmbeddingRepo = {
    */
   getPendingNodes(limit = 100) {
     return db.prepare(`
-      SELECT n.node_id as ref_id, n.name || ' ' || COALESCE(n.node_summary, '') as text
+      SELECT n.node_id as ref_id,
+             n.name || ' ' || COALESCE(n.node_summary, '') || ' ' || COALESCE(n.node_description, '') as text,
+             n.keywords_json
       FROM nodes n
       LEFT JOIN embeddings e ON e.ref_type = 'node' AND e.ref_id = n.node_id
       WHERE e.id IS NULL
       LIMIT ?
-    `).all(limit).map(r => ({ refId: r.ref_id, text: r.text }));
+    `).all(limit).map(r => {
+      let text = r.text || '';
+      try {
+        const kws = JSON.parse(r.keywords_json || '[]');
+        if (Array.isArray(kws) && kws.length > 0) text += ' ' + kws.join(', ');
+      } catch (_) {}
+      return { refId: r.ref_id, text: text.trim() };
+    });
   },
 
   /**

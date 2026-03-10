@@ -4,9 +4,10 @@
  * Adds source citations to LLM-generated answers
  */
 
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { detectLanguage, isChineseLang } from "../utils/langDetect.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 function escapeHtml(str) {
   return String(str ?? '')
@@ -45,7 +46,7 @@ function looksLikeNotFound(text) {
 export async function generateAnswerWithCitations(query, context, sources, options = {}) {
   const { lang = 'auto', maxSources = 10, temperature = 0.1 } = options;
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return {
       answer: context.slice(0, 500),
       citations: [],
@@ -71,8 +72,10 @@ export async function generateAnswerWithCitations(query, context, sources, optio
     const contextText = numberedSources.map(s => s.content).join(' ');
     const detectedLang = lang === 'auto' ? detectLanguage(contextText || query) : lang;
 
-    // Use bilingual prompts based on detected language
-    const prompt = isChineseLang(detectedLang)
+    // Use bilingual prompts based on detected language — check for custom override first
+    const answerKey = isChineseLang(detectedLang) ? 'answerGeneration_zh' : 'answerGeneration_en';
+    const prompt = getCustomPrompt(answerKey, { query, sourceList })
+      ?? (isChineseLang(detectedLang)
       ? `根据以下来源回答问题。在每个事实性陈述后添加[n]引用。
 
 问题: ${query}
@@ -100,16 +103,18 @@ Rules:
 - Add [1], [2] etc. after each claim to indicate the source.
 - Answer directly and concisely.
 
-Answer:`;
+Answer:`);
 
     let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
 
     // Retry once if the first answer looks like a false "not in sources" response
     if (looksLikeNotFound(answerText)) {
       logger.debug(`citation_generation: "not found" detected, retrying with directive prompt`);
-      const retryPrompt = isChineseLang(detectedLang)
+      const retryKey = isChineseLang(detectedLang) ? 'answerRetry_zh' : 'answerRetry_en';
+      const retryPrompt = getCustomPrompt(retryKey, { query, sourceList })
+        ?? (isChineseLang(detectedLang)
         ? `请仔细重新阅读以下所有来源，然后回答问题。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n重要：请不要说信息不存在，而是从来源中提取任何相关的事实、数字或描述。直接回答：`
-        : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`;
+        : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`);
       const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry' });
       if (retryText) answerText = retryText;
     }
@@ -195,7 +200,7 @@ function formatAnswerWithCitationLinks(text, citations) {
  * @returns {Promise<object>} Answer with citations added
  */
 export async function addCitationsToAnswer(answer, sources, options = {}) {
-  if (!llmConfig[llmConfig.provider]?.apiKey || !answer || !sources || sources.length === 0) {
+  if (!isLlmConfigured() || !answer || !sources || sources.length === 0) {
     return { answer, citations: [], sources };
   }
 
@@ -211,7 +216,7 @@ export async function addCitationsToAnswer(answer, sources, options = {}) {
       `[${s.number}] ${s.content}`
     ).join('\n\n');
 
-    const prompt = `Add citation numbers to this answer based on which sources support each statement.
+    const prompt = getCustomPrompt('addCitations', { answer, sourceList }) ?? `Add citation numbers to this answer based on which sources support each statement.
 
 Answer to annotate:
 ${answer}

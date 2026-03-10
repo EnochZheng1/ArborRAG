@@ -1,8 +1,9 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { SuggestionRepo } from "../db/repositories/SuggestionRepo.js";
 import { isChineseLang } from "../utils/langDetect.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Related Questions Module
@@ -177,17 +178,18 @@ function extractQuestionsFromContent(chunks, originalQuery) {
  * Generate questions using LLM
  */
 async function generateLLMQuestions(query, answer, chunks, queryType) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) return [];
+  if (!isLlmConfigured()) return [];
 
   try {
     const contentPreview = chunks.slice(0, 3)
       .map(c => (c.content || c.content_clean || '').slice(0, 200))
       .join('\n');
 
-    const prompt = `Based on this Q&A, suggest 3 natural follow-up questions a user might ask.
+    const answerText = answer ? `Answer Summary: "${answer.slice(0, 300)}"` : '';
+    const prompt = getCustomPrompt('relatedQuestions', { query, answer: answerText, contentPreview }) ?? `Based on this Q&A, suggest 3 natural follow-up questions a user might ask.
 
 Original Question: "${query}"
-${answer ? `Answer Summary: "${answer.slice(0, 300)}"` : ''}
+${answerText}
 Related Content: "${contentPreview}"
 
 Generate questions that:

@@ -4,6 +4,7 @@ import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
 import { generateEmbedding, generateEmbeddingBatch } from "./embedder.js";
 import { storeEmbedding, storeEmbeddingBatch, getPendingEmbeddings, hasEmbedding } from "./vectorStore.js";
 import { embedLogger as logger } from "../utils/logger.js";
+import { safeJson } from "../db/db.js";
 
 /**
  * Chunk and node embedding management
@@ -21,7 +22,10 @@ export async function embedNode(nodeId) {
     throw new Error(`Node not found: ${nodeId}`);
   }
 
-  const text = `${node.name} ${node.node_summary || ""}`.trim();
+  const keywords = safeJson(node.keywords_json, []);
+  const parts = [node.name, node.node_summary || '', node.node_description || ''];
+  if (keywords.length > 0) parts.push(keywords.join(', '));
+  const text = parts.filter(Boolean).join(' ').trim();
 
   if (!text) {
     logger.warn(`Node ${nodeId} has no text to embed`);

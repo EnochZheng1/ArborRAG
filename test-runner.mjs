@@ -298,8 +298,78 @@ async function run() {
     }
   }
 
+  // ── Complex single-doc tests (Quantum Labs) ────────────────────────────────
+  console.log('\n── Complex — Multi-Hop & Numeric ──────────────────────────────────');
+
+  // Multi-hop: probation period + remote work policy → new employees can't WFH
+  if (!focusIds || focusIds.has('complex_multihop_remote_probation')) {
+    const d = await c('POST', '/ask', { query: 'Can a newly hired employee at Quantum Labs work remotely?' });
+    if (d.action === 'no_results') {
+      log('complex_multihop_remote_probation', false, 'no_results');
+    } else {
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').replace(/\[\d+\]/g, '').toLowerCase();
+      // Should mention probation/90 days restriction OR that remote work is "not available"
+      const mentionsProbation = answer.includes('probat') || answer.includes('90');
+      const mentionsNoRemote = answer.includes('not available') || answer.includes('not permitted')
+        || answer.includes('cannot') || answer.includes('not allowed') || answer.includes('no');
+      const ok = mentionsProbation && mentionsNoRemote;
+      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+      log('complex_multihop_remote_probation', ok, `probation:${mentionsProbation} no-remote:${mentionsNoRemote} | ${snippet}`);
+    }
+  }
+
+  // Numeric precision: QuantumVault integrations
+  await accTest('complex_numeric_vault_integrations', 'How many third-party integrations does QuantumVault support?', '200');
+
+  // Numeric precision: QuantumScan pricing
+  await accTest('complex_numeric_scan_pricing', 'What is the monthly pricing for QuantumScan?', '500');
+
+  // Numeric precision: QuantumFlow monthly executions
+  await accTest('complex_numeric_flow_executions', 'How many workflow executions does QuantumFlow process per month?', '50 million');
+
+  // Negation: info NOT in document — should say not found / not mentioned
+  if (!focusIds || focusIds.has('complex_negation_paternity_leave')) {
+    const d = await c('POST', '/ask', { query: 'What is the paternity leave policy at Quantum Labs?' });
+    const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+    const isNoResults = d.action === 'no_results';
+    const admitsAbsence = answer.includes('not mentioned') || answer.includes('not found')
+      || answer.includes('no information') || answer.includes('does not') || answer.includes('not specified')
+      || answer.includes('not available') || answer.includes('no specific') || answer.includes('not include')
+      || answer.includes('not address') || answer.includes('doesn\'t');
+    const ok = isNoResults || admitsAbsence;
+    const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+    log('complex_negation_paternity_leave', ok, `absent:${ok} | ${snippet}`);
+  }
+
+  // Compound fact: performance reviews schedule
+  if (!focusIds || focusIds.has('complex_compound_perf_reviews')) {
+    const d = await c('POST', '/ask', { query: 'How are performance reviews conducted at Quantum Labs and when do they happen?' });
+    if (d.action === 'no_results') {
+      log('complex_compound_perf_reviews', false, 'no_results');
+    } else {
+      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').replace(/\[\d+\]/g, '').toLowerCase();
+      const mentionsJune = answer.includes('june');
+      const mentionsDecember = answer.includes('december');
+      const mentionsSelf = answer.includes('self');
+      const mentionsPeer = answer.includes('peer');
+      const count = [mentionsJune, mentionsDecember, mentionsSelf, mentionsPeer].filter(Boolean).length;
+      log('complex_compound_perf_reviews', count >= 3, `june:${mentionsJune} dec:${mentionsDecember} self:${mentionsSelf} peer:${mentionsPeer} (${count}/4)`);
+    }
+  }
+
   // ── Multidoc ingest ─────────────────────────────────────────────────────────
-  if (!focusIds || focusIds.has('multidoc_isolation_quantum_ceo')) {
+  const MULTIDOC_TEST_IDS = [
+    'multidoc_isolation_quantum_ceo',
+    'complex_crossdoc_sla_comparison',
+    'complex_crossdoc_techserve_ceo',
+    'complex_crossdoc_founding_years',
+    'complex_techserve_helpdesk_resolution',
+    'complex_techserve_databridge_throughput',
+    'complex_crossdoc_isolation_reverse',
+  ];
+  const needsMultidoc = !focusIds || MULTIDOC_TEST_IDS.some(id => focusIds.has(id));
+
+  if (needsMultidoc) {
     console.log('\n── Ingesting TechServe document ───────────────────────────────────');
     const up2 = await uploadFile(SECOND_TEST_DOCUMENT, 'techserve-catalog.txt', datasetId);
     const jobId2 = up2.job?.id ?? up2.jobs?.[0]?.id;
@@ -308,18 +378,87 @@ async function run() {
     console.log(` → ${job2.status} (${job2.result?.stats?.chunkCount ?? 0} chunks)`);
     multidocState.ingested = true;
     multidocState.chunkCount = job2.result?.stats?.chunkCount ?? 0;
+    await c('POST', '/embeddings/sync');
 
-    // multidoc_isolation_quantum_ceo
-    console.log('\n── Multi-Document Isolation ───────────────────────────────────────');
-    const d = await c('POST', '/ask', { query: 'Who is the CEO of Quantum Labs?' });
-    if (d.action === 'no_results') {
-      log('multidoc_isolation_quantum_ceo', false, 'no_results');
-    } else {
-      const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
-      const hasSarah = answer.includes('sarah');
-      const hasJennifer = answer.includes('jennifer');
-      const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
-      log('multidoc_isolation_quantum_ceo', hasSarah, `Sarah:${hasSarah} Jennifer(bleed):${hasJennifer} | conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}`);
+    // ── Multi-Document Isolation ──────────────────────────────────────────────
+    console.log('\n── Multi-Document — Isolation & Cross-Doc ─────────────────────────');
+
+    // Existing: Quantum CEO should be Sarah, not Jennifer
+    if (!focusIds || focusIds.has('multidoc_isolation_quantum_ceo')) {
+      const d = await c('POST', '/ask', { query: 'Who is the CEO of Quantum Labs?' });
+      if (d.action === 'no_results') {
+        log('multidoc_isolation_quantum_ceo', false, 'no_results');
+      } else {
+        const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+        const hasSarah = answer.includes('sarah');
+        const hasJennifer = answer.includes('jennifer');
+        const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+        log('multidoc_isolation_quantum_ceo', hasSarah, `Sarah:${hasSarah} Jennifer(bleed):${hasJennifer} | conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}`);
+      }
+    }
+
+    // Reverse isolation: TechServe CEO should be Jennifer, not Sarah
+    if (!focusIds || focusIds.has('complex_crossdoc_isolation_reverse')) {
+      const d = await c('POST', '/ask', { query: 'Who is the CEO of TechServe IT Solutions?' });
+      if (d.action === 'no_results') {
+        log('complex_crossdoc_isolation_reverse', false, 'no_results');
+      } else {
+        const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').toLowerCase();
+        const hasJennifer = answer.includes('jennifer');
+        const hasSarah = answer.includes('sarah');
+        const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+        log('complex_crossdoc_isolation_reverse', hasJennifer, `Jennifer:${hasJennifer} Sarah(bleed):${hasSarah} | conf:${(d.confidence ?? 0).toFixed(2)} | ${snippet}`);
+      }
+    }
+
+    // Cross-doc SLA comparison: should mention both companies' critical response times
+    if (!focusIds || focusIds.has('complex_crossdoc_sla_comparison')) {
+      const d = await c('POST', '/ask', { query: 'Compare the critical issue response times between Quantum Labs and TechServe' });
+      if (d.action === 'no_results') {
+        log('complex_crossdoc_sla_comparison', false, 'no_results');
+      } else {
+        const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').replace(/\[\d+\]/g, '').replace(/-/g, ' ').toLowerCase();
+        const hasQuantum4h = answer.includes('4 hour') || answer.includes('4h');
+        const hasTech1h = answer.includes('1 hour') || answer.includes('1h');
+        const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+        log('complex_crossdoc_sla_comparison', hasQuantum4h && hasTech1h, `QL-4h:${hasQuantum4h} TS-1h:${hasTech1h} | ${snippet}`);
+      }
+    }
+
+    // Cross-doc founding years: should identify Quantum Labs (2019) as more recent than TechServe (2015)
+    if (!focusIds || focusIds.has('complex_crossdoc_founding_years')) {
+      const d = await c('POST', '/ask', { query: 'Which company was founded more recently, Quantum Labs or TechServe?' });
+      if (d.action === 'no_results') {
+        log('complex_crossdoc_founding_years', false, 'no_results');
+      } else {
+        const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').replace(/\[\d+\]/g, '').toLowerCase();
+        const mentionsQuantum = answer.includes('quantum');
+        const mentions2019 = answer.includes('2019');
+        const mentions2015 = answer.includes('2015');
+        const ok = mentionsQuantum && (mentions2019 || mentions2015);
+        const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+        log('complex_crossdoc_founding_years', ok, `quantum:${mentionsQuantum} 2019:${mentions2019} 2015:${mentions2015} | ${snippet}`);
+      }
+    }
+
+    // TechServe-specific: HelpDesk Pro auto-resolution rate
+    if (!focusIds || focusIds.has('complex_techserve_helpdesk_resolution')) {
+      const d = await c('POST', '/ask', { query: 'What percentage of tickets does HelpDesk Pro resolve automatically?' });
+      const { passed: ok, detail } = checkAnswer(d, '40');
+      log('complex_techserve_helpdesk_resolution', ok, detail);
+    }
+
+    // TechServe-specific: DataBridge throughput
+    if (!focusIds || focusIds.has('complex_techserve_databridge_throughput')) {
+      const d = await c('POST', '/ask', { query: 'What is the peak throughput of DataBridge?' });
+      if (d.action === 'no_results') {
+        log('complex_techserve_databridge_throughput', false, 'no_results');
+      } else {
+        const answer = (d.llm_response?.final_answer ?? d.data?.final_answer ?? '').replace(/\[\d+\]/g, '').toLowerCase();
+        const hasMillion = answer.includes('1 million') || answer.includes('1,000,000') || answer.includes('million records');
+        const snippet = answer.substring(0, 150).replace(/\n/g, ' ');
+        log('complex_techserve_databridge_throughput', hasMillion, `1M-records:${hasMillion} | ${snippet}`);
+      }
     }
   }
 

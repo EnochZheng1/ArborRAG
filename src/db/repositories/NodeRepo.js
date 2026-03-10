@@ -2,7 +2,7 @@
  * Node repository — nodes table reads, writes, and FTS maintenance.
  */
 
-import { db } from "../db.js";
+import { db, safeJson } from "../db.js";
 
 export const NodeRepo = {
   // ── Graph traversal reads ─────────────────────────────────────────────────────
@@ -15,6 +15,15 @@ export const NodeRepo = {
   /** All direct children of a node, ordered by name. */
   findByParent(parentId) {
     return db.prepare("SELECT * FROM nodes WHERE parent_id = ? ORDER BY name").all(parentId);
+  },
+
+  /** Children of multiple parents in one query. Returns all rows; caller groups by parent_id. */
+  findByParents(parentIds) {
+    if (!parentIds || parentIds.length === 0) return [];
+    const placeholders = parentIds.map(() => '?').join(',');
+    return db.prepare(
+      `SELECT * FROM nodes WHERE parent_id IN (${placeholders}) ORDER BY parent_id, name`
+    ).all(...parentIds);
   },
 
   /** All root nodes (no parent), ordered by name. */
@@ -154,8 +163,8 @@ export const NodeRepo = {
       "SELECT name, node_summary, node_description, keywords_json, aliases_json FROM nodes WHERE node_id = ?"
     ).get(nodeId);
     if (!row) return;
-    const kws     = JSON.parse(row.keywords_json || '[]').join(' ');
-    const aliases = JSON.parse(row.aliases_json  || '[]').join(' ');
+    const kws     = safeJson(row.keywords_json, []).join(' ');
+    const aliases = safeJson(row.aliases_json, []).join(' ');
     db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
     db.prepare("INSERT INTO nodes_fts (node_id, text) VALUES (?, ?)").run(
       nodeId,
@@ -327,7 +336,7 @@ export const NodeRepo = {
     const row = db.prepare("SELECT keywords_json FROM nodes WHERE node_id = ?").get(nodeId);
     if (!row) return;
 
-    const existing = JSON.parse(row.keywords_json || '[]');
+    const existing = safeJson(row.keywords_json, []);
     const merged = [...new Set([...existing, ...newKeywords.map(k => String(k).toLowerCase())])];
 
     db.prepare("UPDATE nodes SET keywords_json = ?, updated_at = datetime('now') WHERE node_id = ?")

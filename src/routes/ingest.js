@@ -57,9 +57,9 @@ const upload = multer({
 // ==================== UPLOAD ====================
 
 // Upload and process a single file
-router.post("/upload", upload.single("file"), (req, res) => {
+router.post("/upload", upload.single("file"), async (req, res) => {
   // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
-  runWithDb(req.datasetConn, async () => {
+  await runWithDb(req.datasetConn, async () => {
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
@@ -103,9 +103,9 @@ router.post("/upload", upload.single("file"), (req, res) => {
 });
 
 // Upload and process multiple files
-router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX_BATCH_FILES) || 100), (req, res) => {
+router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX_BATCH_FILES) || 100), async (req, res) => {
   // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
-  runWithDb(req.datasetConn, async () => {
+  await runWithDb(req.datasetConn, async () => {
     try {
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ error: "No files uploaded" });
@@ -119,8 +119,17 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
       };
 
       if (sync === "true" || sync === true) {
-        const filePaths = req.files.map(f => f.path);
-        const result = await processDocumentBatch(filePaths, processOptions);
+        let result;
+        try {
+          const filePaths = req.files.map(f => f.path);
+          result = await processDocumentBatch(filePaths, processOptions);
+        } catch (procErr) {
+          // Clean up uploaded files on processing error
+          for (const f of req.files) { try { fs.unlinkSync(f.path); } catch (_) {} }
+          throw procErr;
+        }
+        // Clean up uploaded files after successful sync processing
+        for (const f of req.files) { try { fs.unlinkSync(f.path); } catch (_) {} }
         return res.json(result);
       }
 
@@ -132,6 +141,10 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
         count: jobs.length
       });
     } catch (err) {
+      // Clean up uploaded files on error
+      if (Array.isArray(req.files)) {
+        for (const f of req.files) { try { fs.unlinkSync(f.path); } catch (_) {} }
+      }
       apiLogger.error("Batch upload error:", err.message);
       res.status(500).json({ error: err.message });
     }

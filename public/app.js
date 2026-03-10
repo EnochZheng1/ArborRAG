@@ -616,6 +616,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initTests();
   initStats();
   initSettings();
+  initPrompts();
+  initManageMode();
   initQueryHistory();
   initGraphView();
   initMobileSidebar();
@@ -685,7 +687,7 @@ function initTabs() {
         if (tabId === 'tests')     loadTests();
         if (tabId === 'stats')     loadStats();
         if (tabId === 'datasets')  loadDatasets();
-        if (tabId === 'settings')  loadSettings();
+        if (tabId === 'settings')  { loadSettings(); loadPrompts(); }
       }
     });
   });
@@ -847,7 +849,7 @@ function initAsk() {
   document.getElementById('suggestions-list')?.addEventListener('click', (e) => {
     const li = e.target.closest('li');
     if (li) {
-      document.getElementById('query-input').value = li.textContent;
+      document.getElementById('query-input').value = li.dataset.text || li.textContent.trim();
       hideSuggestions();
       handleAsk();
     }
@@ -925,12 +927,7 @@ function showSuggestions(suggestions) {
   const container = document.getElementById('suggestions-container');
   const list = document.getElementById('suggestions-list');
 
-  list.innerHTML = suggestions.map(s => `
-    <li class="suggestion-item suggestion-${s.type}">
-      ${s.text}
-      ${s.type !== 'node' ? `<span class="suggestion-type">${s.type}</span>` : ''}
-    </li>
-  `).join('');
+  list.innerHTML = suggestions.map(s => `<li class="suggestion-item suggestion-${s.type}" data-text="${s.text.replace(/"/g, '&quot;')}">${s.text}${s.type !== 'node' ? `<span class="suggestion-type">${s.type}</span>` : ''}</li>`).join('');
 
   container.classList.remove('hidden');
 }
@@ -972,6 +969,11 @@ async function handleFeedback(rating) {
 }
 
 async function handleAsk() {
+  // Route to manage mode handler if active
+  if (window._chatMode === 'manage') {
+    return handleManageMessage();
+  }
+
   const query = document.getElementById('query-input').value.trim();
   if (!query) return;
 
@@ -1314,6 +1316,40 @@ function displayAskResult(result, showTrace = false) {
         }
       });
     });
+    // Trigger traversal animation if explored_nodes data is pending
+    if (renderQueryVizPanel._pendingExplored) {
+      const target = traceDiv.querySelector('#tv-traversal-target');
+      if (target) {
+        renderTraversalAnimation(target, renderQueryVizPanel._pendingExplored);
+      }
+      // Wire up animation controls
+      const explored = renderQueryVizPanel._pendingExplored;
+      const replayBtn = traceDiv.querySelector('#tv-replay-btn');
+      const animToggle = traceDiv.querySelector('#tv-anim-toggle');
+      if (replayBtn && target) {
+        replayBtn.addEventListener('click', () => {
+          renderTraversalAnimation(target, explored, { animate: true });
+        });
+      }
+      if (animToggle) {
+        animToggle.addEventListener('click', () => {
+          const wasOn = localStorage.getItem('tv_animate') !== 'false';
+          const nowOn = !wasOn;
+          localStorage.setItem('tv_animate', nowOn ? 'true' : 'false');
+          animToggle.classList.toggle('active', nowOn);
+          const offLine = animToggle.querySelector('.tv-control-off-line');
+          if (nowOn && offLine) offLine.remove();
+          if (!nowOn && !animToggle.querySelector('.tv-control-off-line')) {
+            const line = document.createElement('span');
+            line.className = 'tv-control-off-line';
+            animToggle.appendChild(line);
+          }
+          // Re-render with new preference
+          if (target) renderTraversalAnimation(target, explored, { animate: nowOn });
+        });
+      }
+      renderQueryVizPanel._pendingExplored = null;
+    }
   } else {
     traceDiv.classList.add('hidden');
     traceDiv.innerHTML = '';
@@ -1818,23 +1854,142 @@ function buildTreeFromPaths(allNodes) {
   return root;
 }
 
+/**
+ * Build traversal steps from explored_nodes for the step-by-step drill-down animation.
+ * Returns an array of "frames", each showing a parent node and its children at one depth.
+ * explored_nodes: [{ name, node_id, score, depth, selected, parent_id }, ...]
+ */
+function buildTraversalSteps(exploredNodes) {
+  if (!Array.isArray(exploredNodes) || exploredNodes.length === 0) return [];
+
+  // Group by depth
+  const byDepth = new Map();
+  for (const e of exploredNodes) {
+    if (!byDepth.has(e.depth)) byDepth.set(e.depth, []);
+    byDepth.get(e.depth).push(e);
+  }
+
+  const depths = [...byDepth.keys()].sort((a, b) => a - b);
+  const steps = [];
+
+  for (const depth of depths) {
+    const nodesAtDepth = byDepth.get(depth);
+    // Group children by parent
+    const byParent = new Map();
+    for (const n of nodesAtDepth) {
+      const pid = n.parent_id || '__root__';
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid).push(n);
+    }
+
+    for (const [parentId, children] of byParent) {
+      // Find parent name from a previous depth
+      let parentName = 'Knowledge Tree';
+      if (parentId !== '__root__') {
+        for (const d of depths) {
+          if (d >= depth) break;
+          const found = byDepth.get(d)?.find(n => n.node_id === parentId);
+          if (found) { parentName = found.name; break; }
+        }
+      }
+      // Sort: selected first, then by score desc
+      children.sort((a, b) => (b.selected ? 1 : 0) - (a.selected ? 1 : 0) || b.score - a.score);
+      // Cap display to top 12 children to keep it manageable
+      const display = children.slice(0, 12);
+      const overflow = children.length - display.length;
+      steps.push({ depth, parentId, parentName, children: display, overflow });
+    }
+  }
+  return steps;
+}
+
+/**
+ * Render the traversal drill-down into a container element.
+ * Supports animated (step-by-step reveal) and instant (all visible) modes.
+ * The animate preference is stored in localStorage.
+ */
+function renderTraversalAnimation(container, exploredNodes, { animate = null } = {}) {
+  const steps = buildTraversalSteps(exploredNodes);
+  if (steps.length === 0) {
+    container.innerHTML = '<p class="trace-empty">No traversal data</p>';
+    return;
+  }
+
+  const shouldAnimate = animate !== null ? animate : (localStorage.getItem('tv_animate') !== 'false');
+
+  container.innerHTML = '';
+  const STEP_DELAY = 1200;   // ms before showing next depth step
+  const CHILD_STAGGER = 80;  // ms between each child appearing
+
+  // Build all step frames upfront, then reveal them
+  const stepEls = [];
+  for (let si = 0; si < steps.length; si++) {
+    const step = steps[si];
+    const frame = document.createElement('div');
+    frame.className = shouldAnimate ? 'tv-step' : 'tv-step tv-step--visible tv-step--no-anim';
+
+    // Breadcrumb / depth indicator
+    const header = document.createElement('div');
+    header.className = 'tv-step-header';
+    header.innerHTML = `<span class="tv-step-depth">Depth ${step.depth}</span>`
+      + `<span class="tv-step-parent">${escapeHtml(step.parentName)}</span>`
+      + `<span class="tv-step-arrow">\u2192</span>`
+      + `<span class="tv-step-count">${step.children.length}${step.overflow > 0 ? '+' + step.overflow : ''} nodes</span>`;
+    frame.appendChild(header);
+
+    // Children as pill/card list
+    const list = document.createElement('div');
+    list.className = 'tv-step-children';
+    for (let ci = 0; ci < step.children.length; ci++) {
+      const c = step.children[ci];
+      const pill = document.createElement('div');
+      const scoreCls = c.score >= 0.5 ? 'tv-pill--high' : c.score >= 0.25 ? 'tv-pill--med' : 'tv-pill--low';
+      const selectedCls = c.selected ? 'tv-pill--selected' : 'tv-pill--pruned';
+      pill.className = `tv-pill ${scoreCls} ${selectedCls}`;
+      if (shouldAnimate) {
+        pill.style.animationDelay = `${ci * CHILD_STAGGER}ms`;
+      } else {
+        pill.classList.add('tv-pill--no-anim');
+      }
+      pill.innerHTML = `<span class="tv-pill-name">${escapeHtml(c.name.length > 24 ? c.name.slice(0, 22) + '\u2026' : c.name)}</span>`
+        + `<span class="tv-pill-score">${c.score.toFixed(2)}</span>`;
+      list.appendChild(pill);
+    }
+    if (step.overflow > 0) {
+      const more = document.createElement('div');
+      more.className = 'tv-pill tv-pill--overflow';
+      if (!shouldAnimate) more.classList.add('tv-pill--no-anim');
+      more.textContent = `+${step.overflow} more`;
+      list.appendChild(more);
+    }
+    frame.appendChild(list);
+    container.appendChild(frame);
+    stepEls.push(frame);
+  }
+
+  // Animate: reveal steps one at a time
+  if (shouldAnimate) {
+    stepEls.forEach((el, i) => {
+      setTimeout(() => el.classList.add('tv-step--visible'), i * STEP_DELAY);
+    });
+  }
+}
+
+/**
+ * Render a static tree SVG (used as fallback when explored_nodes not available).
+ */
 function renderTreeSvg(root) {
   const NODE_W = 140, NODE_H = 32, COL_W = 170, MARGIN = 12, ROW_GAP = 8;
 
-  // Count leaves for height calculation
   function countLeaves(node) {
     if (node.children.length === 0) return 1;
     return node.children.reduce((s, c) => s + countLeaves(c), 0);
   }
 
-  // Assign layout positions: y is the vertical center of the node's allocated band
   function assignPositions(node, depth, yStart, yEnd) {
     const x = depth * COL_W + MARGIN;
     const y = (yStart + yEnd) / 2;
-    node._x = x;
-    node._y = y;
-    node._depth = depth;
-
+    node._x = x; node._y = y; node._depth = depth;
     if (node.children.length > 0) {
       const totalLeaves = countLeaves(node);
       let yOff = yStart;
@@ -1847,24 +2002,14 @@ function renderTreeSvg(root) {
     }
   }
 
-  // Decide whether to show virtual root
   const showRoot = root.children.length > 1;
-  const topNodes = showRoot ? [root] : root.children;
-
-  // Calculate canvas dimensions
   const leafCount = countLeaves(root);
   const svgHeight = Math.max(60, leafCount * (NODE_H + ROW_GAP));
-  const maxDepth = (function getMaxDepth(n, d) {
-    if (n.children.length === 0) return d;
-    return Math.max(...n.children.map(c => getMaxDepth(c, d + 1)));
-  })(root, 0);
+  const maxDepth = (function gmd(n, d) { return n.children.length === 0 ? d : Math.max(...n.children.map(c => gmd(c, d + 1))); })(root, 0);
   const svgWidth = (showRoot ? maxDepth + 1 : maxDepth) * COL_W + NODE_W + MARGIN * 2;
 
-  // Assign positions
-  if (showRoot) {
-    assignPositions(root, 0, 0, svgHeight);
-  } else {
-    // Place children as if root is hidden — distribute vertically
+  if (showRoot) { assignPositions(root, 0, 0, svgHeight); }
+  else {
     let yOff = 0;
     const totalLeaves = countLeaves(root);
     for (const child of root.children) {
@@ -1875,49 +2020,31 @@ function renderTreeSvg(root) {
     }
   }
 
-  // Collect all nodes and edges
-  const nodes = [];
-  const edges = [];
-  function collect(node) {
-    if (node === root && !showRoot) {
-      node.children.forEach(collect);
-      return;
-    }
+  const nodes = [], edges = [];
+  (function collect(node) {
+    if (node === root && !showRoot) { node.children.forEach(collect); return; }
     nodes.push(node);
-    for (const child of node.children) {
-      edges.push({ parent: node, child });
-      collect(child);
-    }
-  }
-  collect(root);
+    for (const child of node.children) { edges.push({ parent: node, child }); collect(child); }
+  })(root);
 
-  // Render edges
-  let svgContent = '';
+  let svg = '';
   for (const { parent, child } of edges) {
-    const x1 = parent._x + NODE_W;
-    const y1 = parent._y;
-    const x2 = child._x;
-    const y2 = child._y;
-    const cx1 = x1 + (x2 - x1) * 0.5;
-    const cx2 = x2 - (x2 - x1) * 0.5;
-    svgContent += `<path class="tv-edge" d="M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}"/>`;
+    const x1 = parent._x + NODE_W, y1 = parent._y, x2 = child._x, y2 = child._y;
+    svg += `<path class="tv-edge" d="M${x1},${y1} C${x1 + (x2 - x1) * 0.5},${y1} ${x2 - (x2 - x1) * 0.5},${y2} ${x2},${y2}"/>`;
   }
-
-  // Render nodes
   for (const node of nodes) {
     const s = node.score || 0;
     const cls = s >= 0.5 ? 'tv-node--high' : s >= 0.25 ? 'tv-node--med' : 'tv-node--low';
-    const label = node.name.length > 17 ? node.name.slice(0, 15) + '…' : node.name;
+    const label = node.name.length > 17 ? node.name.slice(0, 15) + '\u2026' : node.name;
     const scoreText = node.depth >= 0 && s > 0 ? s.toFixed(2) : '';
-    const nodeY = node._y - NODE_H / 2;
-    svgContent += `<g class="tv-node ${cls}" transform="translate(${node._x},${nodeY})">
+    const ny = node._y - NODE_H / 2;
+    svg += `<g class="tv-node ${cls}" transform="translate(${node._x},${ny})">
       <rect width="${NODE_W}" height="${NODE_H}" rx="5"/>
       <text class="tv-label" x="${NODE_W / 2}" y="13" text-anchor="middle" dominant-baseline="auto">${escapeHtml(label)}</text>
       ${scoreText ? `<text class="tv-score" x="${NODE_W - 4}" y="${NODE_H - 4}" text-anchor="end">${scoreText}</text>` : ''}
     </g>`;
   }
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" style="display:block">${svgContent}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" style="display:block">${svg}</svg>`;
 }
 
 function renderQueryVizPanel(trace) {
@@ -1948,25 +2075,57 @@ function renderQueryVizPanel(trace) {
     if (total != null) sourceHtml += `<span class="query-viz-pill query-viz-pill--total">total&nbsp;${total}</span>`;
   }
 
-  // Tree SVG
+  // Determine which tree data we have
+  let hasExplored = false;
   let treeHtml = '';
-  if (treeStep && treeStep.result && Array.isArray(treeStep.result.all_nodes) && treeStep.result.all_nodes.length > 0) {
-    const treeData = buildTreeFromPaths(treeStep.result.all_nodes);
-    if (treeData) {
-      treeHtml = `<div class="query-viz-tree">${renderTreeSvg(treeData)}</div>`;
+  if (treeStep && treeStep.result) {
+    const explored = treeStep.result.explored_nodes;
+    const allNodes = treeStep.result.all_nodes;
+
+    if (Array.isArray(explored) && explored.length > 0) {
+      hasExplored = true;
+      // Animated version is rendered into DOM after panel is inserted — use placeholder
+      treeHtml = `<div class="tv-traversal-container" id="tv-traversal-target"></div>`;
+    } else if (Array.isArray(allNodes) && allNodes.length > 0) {
+      const treeData = buildTreeFromPaths(allNodes);
+      if (treeData) {
+        treeHtml = `<div class="query-viz-tree">${renderTreeSvg(treeData)}</div>`;
+      }
     }
   }
+
+  // Legend + animation controls
+  const animOn = localStorage.getItem('tv_animate') !== 'false';
+  const controlsHtml = hasExplored ? `<div class="tv-footer">
+    <div class="tv-legend">
+      <span class="tv-legend-item"><span class="tv-legend-dot tv-legend-dot--selected"></span> Selected</span>
+      <span class="tv-legend-item"><span class="tv-legend-dot tv-legend-dot--pruned"></span> Pruned</span>
+    </div>
+    <div class="tv-controls">
+      <button class="tv-control-btn" id="tv-replay-btn" title="Replay animation"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+      <button class="tv-control-btn${animOn ? ' active' : ''}" id="tv-anim-toggle" title="Toggle animation"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/><line x1="19" y1="5" x2="19" y2="19"/></svg>${animOn ? '' : '<span class="tv-control-off-line"></span>'}</button>
+    </div>
+  </div>` : (treeHtml ? `<div class="tv-legend">
+    <span class="tv-legend-item"><span class="tv-legend-dot tv-legend-dot--selected"></span> Selected</span>
+    <span class="tv-legend-item"><span class="tv-legend-dot tv-legend-dot--pruned"></span> Pruned</span>
+  </div>` : '');
 
   // Only render panel if we have something to show
   if (!typePill && !sourceHtml && !treeHtml) return '';
 
+  // Store explored data for post-render animation
+  if (hasExplored) {
+    renderQueryVizPanel._pendingExplored = treeStep.result.explored_nodes;
+  }
+
   return `<div class="query-viz-panel">
     <div class="query-viz-header">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;flex-shrink:0"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 2 12h2a8 8 0 0 1 13.66-5.66l-2.12 2.12A5 5 0 0 0 7 12H5a7 7 0 0 1 11.95-5"/></svg>
-      <span class="query-viz-title">Query Trace</span>
+      <span class="query-viz-title">Tree Traversal</span>
       ${typePill}${sourceHtml}
     </div>
     ${treeHtml}
+    ${controlsHtml}
   </div>`;
 }
 
@@ -2808,6 +2967,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.error || `Upload failed (${response.status})`); }
       const result = await response.json();
       if (result.queued) {
         displayUploadResult([{
@@ -2825,6 +2985,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload/batch', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': currentDatasetId } });
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.error || `Batch upload failed (${response.status})`); }
       const result = await response.json();
       if (result.queued && Array.isArray(result.jobs)) {
         displayUploadResult(result.jobs.map(j => ({
@@ -6519,6 +6680,109 @@ async function saveSettings() {
   }
 }
 
+// ── Prompt Settings ───────────────────────────────────────────────────────────
+
+let _promptsData = [];
+
+function initPrompts() {
+  document.getElementById('prompts-reset-all-btn')?.addEventListener('click', resetAllPrompts);
+  document.getElementById('prompt-category-filter')?.addEventListener('change', renderPromptsList);
+  document.getElementById('prompt-custom-only')?.addEventListener('change', renderPromptsList);
+}
+
+async function loadPrompts() {
+  try {
+    const data = await api('/prompts');
+    _promptsData = data.prompts || [];
+    renderPromptsList();
+  } catch (err) {
+    console.warn('Failed to load prompts:', err.message);
+  }
+}
+
+function renderPromptsList() {
+  const container = document.getElementById('prompts-list');
+  if (!container) return;
+
+  const categoryFilter = document.getElementById('prompt-category-filter')?.value || 'all';
+  const customOnly = document.getElementById('prompt-custom-only')?.checked || false;
+
+  let filtered = _promptsData;
+  if (categoryFilter !== 'all') {
+    filtered = filtered.filter(p => p.category === categoryFilter);
+  }
+  if (customOnly) {
+    filtered = filtered.filter(p => p.is_custom);
+  }
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;padding:8px;">No prompts match the filter.</p>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(p => {
+    const varsHtml = p.variables.map(v => `<code>{{${v}}}</code>`).join(', ');
+    return `<div class="prompt-card${p.is_custom ? ' is-custom' : ''}" data-prompt-key="${p.key}">
+      <div class="prompt-card-header" onclick="togglePromptCard(this)">
+        <span class="prompt-card-arrow">&#9654;</span>
+        <span class="prompt-card-name">${escapeHtml(p.label)}</span>
+        ${p.is_custom ? '<span class="prompt-card-badge custom">Custom</span>' : ''}
+        <span class="prompt-card-badge category">${p.category}</span>
+      </div>
+      <div class="prompt-card-body">
+        <div class="prompt-description">${escapeHtml(p.description)}</div>
+        <div class="prompt-variables">Variables: ${varsHtml}</div>
+        <textarea class="prompt-editor" rows="10">${escapeHtml(p.current_text)}</textarea>
+        <div class="prompt-card-actions">
+          <button class="btn btn-sm" onclick="resetSinglePrompt('${p.key}')">Reset to Default</button>
+          <button class="btn btn-sm btn-primary" onclick="saveSinglePrompt('${p.key}')">Save</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function togglePromptCard(headerEl) {
+  const card = headerEl.closest('.prompt-card');
+  if (card) card.classList.toggle('expanded');
+}
+
+async function saveSinglePrompt(key) {
+  const card = document.querySelector(`.prompt-card[data-prompt-key="${key}"]`);
+  if (!card) return;
+  const text = card.querySelector('.prompt-editor')?.value;
+  if (!text?.trim()) return showToast('Prompt text cannot be empty', 'error');
+
+  try {
+    await api(`/prompts/${key}`, { method: 'PUT', body: JSON.stringify({ text }) });
+    showToast('Prompt saved', 'success');
+    await loadPrompts();
+  } catch (err) {
+    showToast('Save failed: ' + err.message, 'error');
+  }
+}
+
+async function resetSinglePrompt(key) {
+  try {
+    await api(`/prompts/${key}`, { method: 'DELETE' });
+    showToast('Prompt reset to default', 'success');
+    await loadPrompts();
+  } catch (err) {
+    showToast('Reset failed: ' + err.message, 'error');
+  }
+}
+
+async function resetAllPrompts() {
+  if (!confirm('Reset ALL prompts to defaults? Custom prompts for this dataset will be lost.')) return;
+  try {
+    await api('/prompts/reset', { method: 'POST' });
+    showToast('All prompts reset to defaults', 'success');
+    await loadPrompts();
+  } catch (err) {
+    showToast('Reset failed: ' + err.message, 'error');
+  }
+}
+
 // ── Schema Panel ──────────────────────────────────────────────────────────────
 
 let _schemaPanelInitialized = false;
@@ -6793,6 +7057,17 @@ async function openSchemaSettings() {
   });
   const strictness = document.getElementById('strictness-group');
   if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
+
+  // Check embedding coverage for vector routing hint
+  const hint = document.getElementById('vector-coverage-hint');
+  if (hint) {
+    try {
+      const cov = await api('/embeddings/coverage');
+      const pct = cov?.nodes?.total > 0 ? (cov.nodes.embedded / cov.nodes.total) : 0;
+      hint.style.display = pct < 0.5 ? '' : 'none';
+    } catch (_) { hint.style.display = 'none'; }
+  }
+
   document.getElementById('schema-settings-modal').classList.remove('hidden');
 }
 
@@ -6810,5 +7085,241 @@ async function saveSchemaSettings() {
     loadSchemaSettings();
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
+  }
+}
+
+// ── Manage Mode (Knowledge Management Chatbot) ─────────────────────────────
+
+window._chatMode = 'ask';
+window._manageSessionId = null;
+
+function initManageMode() {
+  const toggle = document.getElementById('chat-mode-toggle');
+  if (!toggle) return;
+
+  toggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('.mode-btn');
+    if (!btn) return;
+
+    // Special: History button
+    if (btn.id === 'manage-history-btn') {
+      toggleManageHistory();
+      return;
+    }
+
+    if (!btn.dataset.mode) return;
+    const mode = btn.dataset.mode;
+    window._chatMode = mode;
+
+    toggle.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const historyBtn = document.getElementById('manage-history-btn');
+    const input = document.getElementById('query-input');
+    const settingsBtn = document.getElementById('toggle-advanced-options');
+
+    if (mode === 'manage') {
+      if (historyBtn) historyBtn.classList.remove('hidden');
+      if (input) input.placeholder = 'Add, edit, or delete knowledge... (e.g., "Product X minimum payout rate is 5.63%")';
+      if (settingsBtn) settingsBtn.style.display = 'none';
+    } else {
+      if (historyBtn) historyBtn.classList.add('hidden');
+      if (input) input.placeholder = "Ask anything... (e.g., 'Compare Product A and B', '\u9500\u552E\u6D41\u7A0B\u662F\u4EC0\u4E48\uFF1F')";
+      if (settingsBtn) settingsBtn.style.display = '';
+      const panel = document.getElementById('manage-history-panel');
+      if (panel) panel.classList.add('hidden');
+    }
+  });
+
+  const closeBtn = document.getElementById('manage-history-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      document.getElementById('manage-history-panel')?.classList.add('hidden');
+    });
+  }
+}
+
+async function handleManageMessage() {
+  const input = document.getElementById('query-input');
+  const message = input.value.trim();
+  if (!message) return;
+
+  const askBtn = document.getElementById('ask-btn');
+  const resultDiv = document.getElementById('ask-result');
+  const spinner = askBtn.querySelector('.loading-spinner');
+
+  askBtn.disabled = true;
+  spinner.classList.remove('hidden');
+  input.value = '';
+
+  const chatWelcome = document.getElementById('chat-welcome');
+  if (chatWelcome) chatWelcome.style.display = 'none';
+
+  // Append user bubble (keep existing messages for multi-turn)
+  resultDiv.classList.remove('hidden');
+  const existing = resultDiv.innerHTML;
+  resultDiv.innerHTML = existing + `
+    <div class="user-query-bubble">
+      <div class="bubble">${escapeHtml(message)}</div>
+    </div>
+    <div class="typing-indicator" id="manage-typing">
+      <div class="typing-dots"><span></span><span></span><span></span></div>
+      <span>Processing...</span>
+    </div>
+  `;
+
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  try {
+    const result = await api('/manage/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message, sessionId: window._manageSessionId })
+    });
+
+    window._manageSessionId = result.sessionId || window._manageSessionId;
+
+    const typing = document.getElementById('manage-typing');
+    if (typing) typing.remove();
+
+    displayManageResult(result, resultDiv);
+  } catch (error) {
+    const typing = document.getElementById('manage-typing');
+    if (typing) typing.remove();
+    resultDiv.innerHTML += `
+      <div class="manage-assistant-bubble">
+        <div class="bubble bubble-error">Error: ${escapeHtml(error.message)}</div>
+      </div>
+    `;
+  } finally {
+    askBtn.disabled = false;
+    spinner.classList.add('hidden');
+    input.focus();
+    if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+}
+
+function displayManageResult(result, container) {
+  const response = result.response || 'No response';
+
+  const intentColors = {
+    ADD: 'var(--success)', EDIT: 'var(--warning)', DELETE: 'var(--danger)',
+    UNDO: 'var(--secondary)', HISTORY: 'var(--secondary)', QUERY: 'var(--primary)',
+    CANCEL: 'var(--text-light)', CLARIFY: 'var(--text-light)', ERROR: 'var(--danger)'
+  };
+  const badgeColor = intentColors[result.intent] || 'var(--text-secondary)';
+
+  let html = '<div class="manage-assistant-bubble">';
+  if (result.intent) {
+    html += `<span class="manage-intent-badge" style="background:${badgeColor}">${result.intent}</span>`;
+  }
+
+  const formatted = response.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+  html += `<div class="bubble">${formatted}</div>`;
+
+  if (result.pendingAction) {
+    html += `<div class="confirmation-card">
+      <div class="confirm-actions">
+        <button class="btn btn-sm btn-success" onclick="sendManageConfirm()">Confirm</button>
+        <button class="btn btn-sm" onclick="sendManageCancel()">Cancel</button>
+      </div>
+    </div>`;
+  }
+
+  if (result.changes && result.changes.length && result.intent !== 'HISTORY') {
+    for (const ch of result.changes) {
+      const badge = ch.type === 'add' ? 'Added' : ch.type === 'edit' ? 'Edited' : ch.type === 'delete' ? 'Deleted' : ch.type;
+      const pathStr = (ch.nodePath || []).join(' > ');
+      html += `<div class="manage-change-summary">`;
+      html += `<span class="action-badge action-badge-${ch.type}">${badge}</span>`;
+      if (pathStr) html += ` <span class="node-breadcrumb">${escapeHtml(pathStr)}</span>`;
+      html += `</div>`;
+    }
+  }
+
+  if (result.intent === 'HISTORY' && result.changes) {
+    html += renderManageHistoryInline(result.changes);
+  }
+
+  html += '</div>';
+  container.innerHTML += html;
+}
+
+function renderManageHistoryInline(changes) {
+  if (!changes.length) return '<div class="manage-no-history">No changes recorded.</div>';
+  let html = '<div class="manage-history-inline">';
+  for (const ch of changes) {
+    const actionLabel = ch.action.replace('chatbot_', '').toUpperCase();
+    const badgeClass = ch.action.includes('add') ? 'add' : ch.action.includes('edit') ? 'edit' : ch.action.includes('delete') ? 'delete' : 'undo';
+    const time = ch.created_at ? new Date(ch.created_at + 'Z').toLocaleString() : '';
+    html += `<div class="manage-history-item">
+      <span class="action-badge action-badge-${badgeClass}">${actionLabel}</span>
+      <span class="manage-history-desc">${escapeHtml(ch.description || '')}</span>
+      <span class="manage-history-time">${time}</span>
+      ${ch.revertable ? `<button class="btn btn-xs btn-danger" onclick="sendManageRevert(${ch.id})">Revert</button>` : ''}
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function sendManageConfirm() {
+  document.getElementById('query-input').value = '__confirm__';
+  handleManageMessage();
+}
+
+function sendManageCancel() {
+  document.getElementById('query-input').value = '__cancel__';
+  handleManageMessage();
+}
+
+async function sendManageRevert(auditId) {
+  try {
+    const result = await api('/manage/revert/' + auditId, { method: 'POST' });
+    showToast(result.description || (result.success ? 'Reverted' : 'Failed'), result.success ? 'success' : 'error');
+    const panel = document.getElementById('manage-history-panel');
+    if (panel && !panel.classList.contains('hidden')) loadManageHistory();
+  } catch (err) {
+    showToast('Revert failed: ' + err.message, 'error');
+  }
+}
+
+async function toggleManageHistory() {
+  const panel = document.getElementById('manage-history-panel');
+  if (!panel) return;
+  if (panel.classList.contains('hidden')) {
+    panel.classList.remove('hidden');
+    await loadManageHistory();
+  } else {
+    panel.classList.add('hidden');
+  }
+}
+
+async function loadManageHistory() {
+  const list = document.getElementById('manage-history-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading-text">Loading...</div>';
+  try {
+    const data = await api('/manage/history?limit=30');
+    const changes = data.changes || [];
+    if (!changes.length) {
+      list.innerHTML = '<div class="manage-no-history">No chatbot changes yet.</div>';
+      return;
+    }
+    list.innerHTML = changes.map(ch => {
+      const actionLabel = ch.action.replace('chatbot_', '').toUpperCase();
+      const badgeClass = ch.action.includes('add') ? 'add' : ch.action.includes('edit') ? 'edit' : ch.action.includes('delete') ? 'delete' : 'undo';
+      const time = ch.created_at ? new Date(ch.created_at + 'Z').toLocaleString() : '';
+      return `<div class="manage-history-item">
+        <div class="manage-history-item-top">
+          <span class="action-badge action-badge-${badgeClass}">${actionLabel}</span>
+          <span class="manage-history-time">${time}</span>
+        </div>
+        <div class="manage-history-desc">${escapeHtml(ch.description || '')}</div>
+        ${ch.revertable ? `<button class="btn btn-xs btn-danger" onclick="sendManageRevert(${ch.id})">Revert</button>` : ''}
+      </div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="manage-no-history">Failed to load: ${escapeHtml(err.message)}</div>`;
   }
 }

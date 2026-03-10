@@ -127,6 +127,7 @@ async function generateEmbeddingVector(text, taskType) {
       'embedding',
       { provider: 'openai', model: llmConfig.openai.embeddingModel }
     );
+    if (!resp.data?.[0]?.embedding) throw new Error("Empty embedding response from OpenAI");
     return resp.data[0].embedding;
   } else {
     const ai = getGeminiClient();
@@ -160,11 +161,14 @@ export async function generateEmbedding(text, options = {}) {
 
   const normalizedText = truncateText(text.trim());
 
-  // Check cache
+  // Check cache (re-insert on hit to maintain LRU order)
   if (useCache) {
     const cacheKey = getCacheKey(normalizedText);
     if (embeddingCache.has(cacheKey)) {
-      return embeddingCache.get(cacheKey);
+      const cached = embeddingCache.get(cacheKey);
+      embeddingCache.delete(cacheKey);
+      embeddingCache.set(cacheKey, cached);
+      return cached;
     }
   }
 
@@ -229,7 +233,10 @@ export async function generateEmbeddingBatch(texts, options = {}) {
       const cacheKey = getCacheKey(text);
 
       if (embeddingCache.has(cacheKey)) {
-        results[i] = embeddingCache.get(cacheKey);
+        const cached = embeddingCache.get(cacheKey);
+        embeddingCache.delete(cacheKey);
+        embeddingCache.set(cacheKey, cached);
+        results[i] = cached;
       } else {
         toGenerate.push({ index: i, text });
       }

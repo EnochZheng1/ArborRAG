@@ -266,3 +266,17 @@ export const getCurrentLlmModel      = () =>
   llmConfig.provider === 'openai' ? llmConfig.openai.model      : llmConfig.gemini.model;
 export const getCurrentEmbedModel    = () =>
   llmConfig.provider === 'openai' ? llmConfig.openai.embeddingModel : llmConfig.gemini.embeddingModel;
+
+/**
+ * Check whether the current LLM provider is properly configured.
+ * Handles both API-key auth (OpenAI / Gemini AI Studio) and
+ * service-account auth (Vertex AI).
+ */
+export function isLlmConfigured() {
+  const cfg = llmConfig[llmConfig.provider];
+  if (!cfg) return false;
+  if (cfg.apiKey) return true;
+  // Vertex AI authenticates via service account, not API key
+  if (cfg.vertexai && cfg.project) return true;
+  return false;
+}

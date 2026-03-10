@@ -97,6 +97,19 @@ export const DecisionRepo = {
     `).run(...chunkIds, ...chunkIds).changes;
   },
 
+  /** Back-fill incoming_chunk_id on the most recent pending decision for a node. */
+  updateIncomingChunkId(nodeId, chunkId) {
+    return db.prepare(`
+      UPDATE pending_decisions
+      SET incoming_chunk_id = ?
+      WHERE id = (
+        SELECT id FROM pending_decisions
+        WHERE node_id = ? AND incoming_chunk_id IS NULL AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+      )
+    `).run(chunkId, nodeId);
+  },
+
   /** Counts per status. Returns { pending, accepted, rejected, auto_resolved, total }. */
   countByStatus() {
     const rows = db.prepare(`

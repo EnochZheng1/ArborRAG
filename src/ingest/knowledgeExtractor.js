@@ -8,7 +8,7 @@
  * Falls back to paragraph splitting when no LLM key is available.
  */
 
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
@@ -291,7 +291,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
     onProgress    = null   // onProgress(doneSegments, totalSegments)
   } = options;
 
-  if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) {
+  if (!useLLM || !isLlmConfigured()) {
     return extractKPsFromParagraphs(text, docTitle, { authorityLevel, documentId });
   }
 

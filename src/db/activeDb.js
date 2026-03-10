@@ -23,9 +23,16 @@ export function getActiveDb() {
 }
 
 /**
+ * Returns the dataset ID for the current async context, or null.
+ */
+export function getActiveDatasetId() {
+  return storage.getStore()?.datasetId ?? null;
+}
+
+/**
  * Runs fn() inside an AsyncLocalStorage context bound to the given connection.
  * All synchronous and async code inside fn() will see this connection via getActiveDb().
  */
-export function runWithDb(db, fn) {
-  return storage.run({ db }, fn);
+export function runWithDb(db, fn, datasetId = null) {
+  return storage.run({ db, datasetId }, fn);
 }

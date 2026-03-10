@@ -1,7 +1,8 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { retrieveForRecommendation, retrieveAndAggregate } from "./multiNodeRetriever.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Recommendation Query Handler
@@ -70,7 +71,7 @@ export async function generateRecommendation(query, options = {}) {
  * Use LLM to generate recommendation
  */
 async function llmGenerateRecommendation(query, candidateData, criteria, userContext) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return generateBasicRecommendation(candidateData, criteria);
   }
 
@@ -92,13 +93,15 @@ async function llmGenerateRecommendation(query, candidateData, criteria, userCon
 
   const context = contextParts.join("\n");
 
-  const prompt = `You are a recommendation assistant. Based on the user's query and available options, provide recommendations.
+  const criteriaText = criteria.length > 0 ? `Criteria to consider: ${criteria.join(", ")}` : "";
+  const userContextText = Object.keys(userContext).length > 0 ? `User Context: ${JSON.stringify(userContext)}` : "";
+  const prompt = getCustomPrompt('recommendation', { query, criteria: criteriaText, userContext: userContextText, context }) ?? `You are a recommendation assistant. Based on the user's query and available options, provide recommendations.
 
 User Query: "${query}"
 
-${criteria.length > 0 ? `Criteria to consider: ${criteria.join(", ")}` : ""}
+${criteriaText}
 
-${Object.keys(userContext).length > 0 ? `User Context: ${JSON.stringify(userContext)}` : ""}
+${userContextText}
 
 Available Options:
 ${context}

@@ -1,4 +1,4 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { safeJson } from "../db/db.js";
 import { EntityFactRepo } from "../db/repositories/EntityFactRepo.js";
@@ -34,7 +34,7 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     return extractWithRules(content, chunk);
   }
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return extractWithRules(content, chunk);
   }
 

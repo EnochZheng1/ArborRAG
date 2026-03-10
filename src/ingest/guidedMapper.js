@@ -10,10 +10,11 @@
 
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { normalizeTopicHint, findOrCreateTopicNode } from "./kpNormaliser.js";
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { safeJson } from "../db/db.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { ensureRootNode } from "./nodeHierarchy.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 // Minimum heuristic score to accept a match without LLM confirmation
 const GUIDED_MATCH_THRESHOLD = 0.30;
@@ -53,7 +54,7 @@ function scoreTopicAgainstNode(topic, node) {
  */
 async function llmDisambiguate(topics, schemaNodes) {
   const result = new Map();
-  if (!topics.length || !llmConfig[llmConfig.provider]?.apiKey) return result;
+  if (!topics.length || !isLlmConfigured()) return result;
 
   const schemaLines = schemaNodes
     .map(n => {
@@ -65,7 +66,10 @@ async function llmDisambiguate(topics, schemaNodes) {
 
   const topicLines = topics.map((t, i) => `${i + 1}. ${t}`).join('\n');
 
-  const prompt = `You are organizing a knowledge graph with a fixed schema. Map each topic to the most appropriate schema node, or NONE if no node fits.
+  const topicIndices = topics.map((_, i) => `${i + 1}.`).join('\n');
+  const prompt = getCustomPrompt('guidedMapping', {
+    schemaLines, topicLines, topicIndices
+  }) ?? `You are organizing a knowledge graph with a fixed schema. Map each topic to the most appropriate schema node, or NONE if no node fits.
 
 SCHEMA NODES:
 ${schemaLines}
@@ -74,7 +78,7 @@ TOPICS TO MAP:
 ${topicLines}
 
 Reply with ONLY a numbered list using the exact schema node name from above or NONE:
-${topics.map((_, i) => `${i + 1}.`).join('\n')}`;
+${topicIndices}`;
 
   try {
     // maxOutputTokens: one line per topic (≈10 tokens each), cap at 512 to prevent runaway

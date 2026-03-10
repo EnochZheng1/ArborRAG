@@ -85,13 +85,15 @@ export function initDatasetManager() {
   // better-sqlite3 creates the file automatically if it doesn't exist,
   // so new datasets (no legacy kg.db) get their file created here.
   for (const dataset of listDatasets()) {
+    let conn;
     try {
-      const conn = openConnection(dataset.db_path);
+      conn = openConnection(dataset.db_path);
       initDatasetDb(conn);
       pool.set(dataset.id, conn);
       logger.info(`Opened dataset connection: ${dataset.name} (${dataset.id})`);
     } catch (err) {
       logger.error(`Failed to open dataset '${dataset.id}' at ${dataset.db_path}: ${err.message}`);
+      if (conn) { try { conn.close(); } catch (_) {} }
     }
   }
 

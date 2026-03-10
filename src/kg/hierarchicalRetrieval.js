@@ -15,10 +15,12 @@ import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { queryLogger as logger } from "../utils/logger.js";
 import {
-  getNode, getChildren, getAncestors, getSiblings, getDescendants,
+  getNode, getChildren, getChildrenBatch, getAncestors, getSiblings, getDescendants,
   getPathToNode, getRelatedNodes, findCommonAncestor
 } from "./graphTraversal.js";
 import { llmScoreNodes } from "./llmTreeRouter.js";
+import { vectorScoreNodes } from "./vectorTreeRouter.js";
+import { generateQueryEmbedding } from "../embedding/embedder.js";
 
 /**
  * Calculate text similarity score (simple term overlap)
@@ -197,6 +199,27 @@ function scoreNodeRelevance(node, query, queryTerms) {
     }
   }
 
+  // Check node description (capped at 0.6)
+  const descLower = (node.node_description || '').toLowerCase();
+  let descScore = 0;
+  for (const term of queryTerms) {
+    if (descLower.includes(term)) descScore += 0.2;
+  }
+  score += Math.min(descScore, 0.6);
+
+  // Check keywords (capped at 0.6)
+  const keywords = node.keywords || [];
+  let kwScore = 0;
+  for (const kw of keywords) {
+    if (!kw) continue;
+    const kwLower = kw.toLowerCase();
+    if (queryLower.includes(kwLower)) kwScore += 0.25;
+    for (const term of queryTerms) {
+      if (kwLower.includes(term)) kwScore += 0.05;
+    }
+  }
+  score += Math.min(kwScore, 0.6);
+
   // Text similarity with summary
   score += calculateSimilarity(query, node.node_summary) * 0.4;
 
@@ -323,11 +346,15 @@ export async function navigateTreeTopDown(query, options = {}) {
     maxDepth = 5,       // Maximum tree depth to explore
     minNodeScore = 0.1,  // Minimum relevance score to continue exploring
     depthDecay = 0.96,
-    useLlmRouting = false
+    useLlmRouting = false,
+    useVectorRouting = false,
+    queryEmbedding = null   // Pre-computed by caller to avoid duplicate API calls
   } = options;
 
   const queryTerms = extractQueryTerms(query);
   const relevantNodes = [];
+  const exploredNodes = [];   // all nodes explored at each depth (including pruned)
+  const idToName = new Map();  // node_id -> name for path resolution
   const visitedNodes = new Set();
 
   // Start with root nodes
@@ -338,15 +365,19 @@ export async function navigateTreeTopDown(query, options = {}) {
     path: [node.node_id]
   }));
 
+  // Vector hybrid scoring at root level
+  if (useVectorRouting && queryEmbedding && roots.length > 0) {
+    currentLevel = _blendVectorScores(queryEmbedding, roots, currentLevel);
+  }
   // LLM hybrid scoring at root level
-  if (useLlmRouting && roots.length > 0) {
+  else if (useLlmRouting && roots.length > 0) {
     const llmScores = await _blendLlmScores(query, roots, currentLevel);
     currentLevel = llmScores;
   }
 
-  // When LLM routing is on, ensure all root nodes score at least minNodeScore
-  // so their children are always explored (depth-1 is where the LLM adds value).
-  if (useLlmRouting) {
+  // When LLM/vector routing is on, ensure all root nodes score at least minNodeScore
+  // so their children are always explored (depth-1 is where semantic routing adds value).
+  if (useLlmRouting || (useVectorRouting && queryEmbedding)) {
     for (const item of currentLevel) {
       if (item.score < minNodeScore) item.score = minNodeScore;
     }
@@ -357,7 +388,18 @@ export async function navigateTreeTopDown(query, options = {}) {
 
   // Add initial nodes if they score well
   for (const item of currentLevel) {
-    if (item.score >= minNodeScore && !visitedNodes.has(item.node.node_id)) {
+    const selected = item.score >= minNodeScore && !visitedNodes.has(item.node.node_id);
+    idToName.set(item.node.node_id, item.node.name);
+    exploredNodes.push({
+      name: item.node.name,
+      node_id: item.node.node_id,
+      score: item.score,
+      depth: 0,
+      path: [item.node.name],
+      selected,
+      parent_id: null
+    });
+    if (selected) {
       visitedNodes.add(item.node.node_id);
       relevantNodes.push({
         ...item.node,
@@ -372,25 +414,26 @@ export async function navigateTreeTopDown(query, options = {}) {
   for (let depth = 1; depth <= maxDepth; depth++) {
     const nextLevel = [];
 
-    for (const current of currentLevel) {
-      if (current.score < minNodeScore) continue;
+    // Batch-fetch children for all active parents in one DB call
+    const activeParents = currentLevel.filter(c => c.score >= minNodeScore);
+    const parentIds = activeParents.map(c => c.node.node_id);
+    const childrenByParent = parentIds.length > 0
+      ? getChildrenBatch(parentIds)
+      : new Map();
 
-      const children = getChildren(current.node.node_id);
+    for (const current of activeParents) {
+      const children = childrenByParent.get(current.node.node_id) || [];
 
       for (const child of children) {
         if (visitedNodes.has(child.node_id)) continue;
 
         const childScore = scoreNodeRelevance(child, query, queryTerms);
-        // Inherit from parent and apply depth decay to avoid drifting too deep.
-        const combinedScore = (childScore * 0.72 + current.score * 0.28) * Math.pow(depthDecay, depth);
+        const combinedScore = (childScore * 0.72 + current.score * 0.28) * depthDecay;
 
-        if (useLlmRouting) {
-          // When LLM routing is on, add ALL children so the LLM can evaluate
-          // nodes that have zero keyword overlap (the whole point of LLM routing).
-          // Use keyword score as initial estimate; LLM will override.
+        if (useLlmRouting || (useVectorRouting && queryEmbedding)) {
           nextLevel.push({
             node: child,
-            score: Math.max(combinedScore, minNodeScore), // keep alive for LLM
+            score: Math.max(combinedScore, minNodeScore),
             path: [...current.path, child.node_id]
           });
         } else if (combinedScore >= minNodeScore) {
@@ -405,8 +448,17 @@ export async function navigateTreeTopDown(query, options = {}) {
 
     if (nextLevel.length === 0) break;
 
+    // Vector scoring at this depth level
+    if (useVectorRouting && queryEmbedding && nextLevel.length > 0) {
+      const nodesAtLevel = nextLevel.map(item => item.node);
+      const blended = _blendVectorScores(queryEmbedding, nodesAtLevel, nextLevel);
+      nextLevel.length = 0;
+      for (const item of blended) {
+        if (item.score >= minNodeScore) nextLevel.push(item);
+      }
+    }
     // LLM scoring at this depth level — scores replace keyword scores
-    if (useLlmRouting && nextLevel.length > 0) {
+    else if (useLlmRouting && nextLevel.length > 0) {
       const nodesAtLevel = nextLevel.map(item => item.node);
       const blended = await _blendLlmScores(query, nodesAtLevel, nextLevel);
       nextLevel.length = 0;
@@ -421,6 +473,21 @@ export async function navigateTreeTopDown(query, options = {}) {
     // Sort and keep top beamWidth
     nextLevel.sort((a, b) => b.score - a.score);
     currentLevel = nextLevel.slice(0, beamWidth * 2); // Allow more exploration at deeper levels
+    const keptIds = new Set(currentLevel.map(i => i.node.node_id));
+
+    // Record all explored nodes at this depth (selected + pruned)
+    for (const item of nextLevel) {
+      idToName.set(item.node.node_id, item.node.name);
+      exploredNodes.push({
+        name: item.node.name,
+        node_id: item.node.node_id,
+        score: item.score,
+        depth,
+        path: item.path.map(id => idToName.get(id) || id),
+        selected: keptIds.has(item.node.node_id),
+        parent_id: item.path.length >= 2 ? item.path[item.path.length - 2] : null
+      });
+    }
 
     // Add relevant nodes
     for (const item of currentLevel) {
@@ -439,7 +506,8 @@ export async function navigateTreeTopDown(query, options = {}) {
   // Sort by relevance
   relevantNodes.sort((a, b) => b.relevance_score - a.relevance_score);
 
-  logger.debug(`Top-down navigation found ${relevantNodes.length} relevant nodes (llm=${useLlmRouting})`);
+  logger.debug(`Top-down navigation found ${relevantNodes.length} relevant nodes, ${exploredNodes.length} explored (llm=${useLlmRouting}, vector=${useVectorRouting})`);
+  relevantNodes._explored = exploredNodes;
   return relevantNodes;
 }
 
@@ -465,6 +533,26 @@ async function _blendLlmScores(query, nodes, levelItems) {
       // Use the higher of LLM vs keyword score.
       // This lets LLM rescue zero-keyword nodes without suppressing keyword hits.
       return { ...item, score: Math.max(llmResult.score, item.score) };
+    }
+    return item;
+  });
+}
+
+/**
+ * Blend vector similarity scores with keyword scores for a set of candidates.
+ * Uses max(vector, keyword) — same strategy as LLM blend.
+ */
+function _blendVectorScores(queryEmbedding, nodes, levelItems) {
+  const vecScores = vectorScoreNodes(queryEmbedding, nodes);
+
+  if (vecScores.size === 0) {
+    return levelItems;
+  }
+
+  return levelItems.map(item => {
+    const vecResult = vecScores.get(item.node.node_id);
+    if (vecResult) {
+      return { ...item, score: Math.max(vecResult.score, item.score) };
     }
     return item;
   });
@@ -531,7 +619,9 @@ export async function expandWithSiblings(seedNodes, query, options = {}) {
     chunksPerSibling = 3,
     minSiblingScore = 0.15,
     siblingDecay = 0.78,
-    useLlmRouting = false
+    useLlmRouting = false,
+    useVectorRouting = false,
+    queryEmbedding = null
   } = options;
 
   const queryTerms = extractQueryTerms(query);
@@ -556,8 +646,18 @@ export async function expandWithSiblings(seedNodes, query, options = {}) {
       score: scoreNodeRelevance(s, query, queryTerms)
     }));
 
+    // Vector scoring for siblings when enabled
+    if (useVectorRouting && queryEmbedding && unprocessed.length > 0) {
+      const vecScores = vectorScoreNodes(queryEmbedding, unprocessed);
+      if (vecScores.size > 0) {
+        scoredSiblings = scoredSiblings.map(s => {
+          const vec = vecScores.get(s.node_id);
+          return vec ? { ...s, score: Math.max(vec.score, s.score) } : s;
+        });
+      }
+    }
     // LLM scoring for siblings when enabled
-    if (useLlmRouting && unprocessed.length > 0) {
+    else if (useLlmRouting && unprocessed.length > 0) {
       const llmScores = await llmScoreNodes(query, unprocessed);
       if (llmScores.size > 0) {
         scoredSiblings = scoredSiblings.map(s => {
@@ -802,13 +902,26 @@ export async function hierarchicalRetrieve(query, options = {}) {
 
   // Step 1: Top-down navigation to find relevant branches
   let useLlmRouting = false;
+  let useVectorRouting = false;
   try {
     const routingMode = DatasetConfigRepo.get('tree_routing_mode');
     useLlmRouting = routingMode === 'llm';
+    useVectorRouting = routingMode === 'vector';
     if (useLlmRouting) logger.debug(`Tree routing: LLM mode enabled`);
+    if (useVectorRouting) logger.debug(`Tree routing: Vector mode enabled`);
   } catch (_) { /* default to keyword */ }
 
-  const relevantNodes = await navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96, useLlmRouting });
+  // Pre-compute query embedding ONCE for all vector routing (tree nav + sibling expansion)
+  let queryEmbedding = null;
+  if (useVectorRouting) {
+    try {
+      queryEmbedding = await generateQueryEmbedding(retrievalQuery);
+    } catch (err) {
+      logger.warn(`[vector_routing] Failed to generate query embedding, falling back to keyword: ${err.message}`);
+    }
+  }
+
+  const relevantNodes = await navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96, useLlmRouting, useVectorRouting, queryEmbedding });
   results.nodes = relevantNodes;
   results.sources.add('tree_navigation');
 
@@ -825,6 +938,17 @@ export async function hierarchicalRetrieve(query, options = {}) {
   }));
   const topPaths = relevantNodes.slice(0, 3).map(n => formatPath(n.path));
   const maxDepthReached = relevantNodes.reduce((max, n) => Math.max(max, n.depth || 0), 0);
+  // Build explored_nodes for traversal animation (includes pruned nodes)
+  const exploredForTrace = (relevantNodes._explored || []).map(e => ({
+    name: e.name,
+    node_id: e.node_id,
+    score: Number((e.score || 0).toFixed(3)),
+    depth: e.depth,
+    path: e.path,
+    selected: e.selected,
+    parent_id: e.parent_id
+  }));
+
   emitStep(
     "Hierarchy: Top-Down Navigation",
     `Found ${relevantNodes.length} relevant nodes`,
@@ -837,7 +961,8 @@ export async function hierarchicalRetrieve(query, options = {}) {
         score: Number((n.relevance_score || 0).toFixed(3)),
         depth: n.depth,
         path: formatPath(n.path)
-      }))
+      })),
+      explored_nodes: exploredForTrace
     }
   );
 
@@ -918,7 +1043,9 @@ export async function hierarchicalRetrieve(query, options = {}) {
       chunksPerSibling: 3,
       minSiblingScore: 0.15,
       siblingDecay: 0.78,
-      useLlmRouting
+      useLlmRouting,
+      useVectorRouting,
+      queryEmbedding
     });
 
     for (const chunk of siblingChunks) {

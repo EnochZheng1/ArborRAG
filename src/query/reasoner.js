@@ -1,9 +1,10 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getNode, getRelatedNodes, getPathToNode, getChildren, getAncestors } from "../kg/graphTraversal.js";
 import { hybridRecallNodes, hybridRecallChunks } from "../kg/recallNodes.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Multi-Hop Reasoning System
@@ -181,14 +182,14 @@ function formatReasoningContext(context) {
  * @returns {Promise<object>} Reasoning result
  */
 export async function performReasoning(query, context) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return {
       success: false,
       error: "LLM required for reasoning queries"
     };
   }
 
-  const prompt = `You are a knowledge base reasoning assistant. Answer the user's question by reasoning through the provided context.
+  const prompt = getCustomPrompt('reasoning', { query, context: context.combined_context }) ?? `You are a knowledge base reasoning assistant. Answer the user's question by reasoning through the provided context.
 
 User Question: "${query}"
 
@@ -277,7 +278,7 @@ export async function reason(query, options = {}) {
  * @returns {Promise<object>} Combined reasoning result
  */
 export async function chainOfThoughtReason(query, subQueries = []) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return { success: false, error: "LLM required" };
   }
 
@@ -298,15 +299,16 @@ export async function chainOfThoughtReason(query, subQueries = []) {
   }
 
   // Synthesize final answer
-  const synthesisPrompt = `You are a reasoning assistant. Synthesize an answer to the main question using the results from sub-queries.
+  const subResultsText = subResults.map((r, i) => `
+## Sub-query ${i + 1}: ${r.query}
+Context: ${r.context.slice(0, 1000)}
+`).join("\n");
+  const synthesisPrompt = getCustomPrompt('reasoningSynthesis', { query, subResults: subResultsText }) ?? `You are a reasoning assistant. Synthesize an answer to the main question using the results from sub-queries.
 
 Main Question: "${query}"
 
 Sub-query Results:
-${subResults.map((r, i) => `
-## Sub-query ${i + 1}: ${r.query}
-Context: ${r.context.slice(0, 1000)}
-`).join("\n")}
+${subResultsText}
 
 Synthesize a comprehensive answer that combines insights from all sub-queries.
 
@@ -338,9 +340,9 @@ Return JSON:
  * Decompose a complex query into sub-queries
  */
 async function decomposeQuery(query) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) return [query];
+  if (!isLlmConfigured()) return [query];
 
-  const prompt = `Decompose this complex question into 2-4 simpler sub-questions that can be answered independently.
+  const prompt = getCustomPrompt('reasoningDecomposition', { query }) ?? `Decompose this complex question into 2-4 simpler sub-questions that can be answered independently.
 
 Question: "${query}"
 

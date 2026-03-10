@@ -97,6 +97,38 @@ export function getChildren(nodeId) {
 }
 
 /**
+ * Get children of multiple parent nodes in a single DB query.
+ * @param {string[]} parentIds - Array of parent node IDs
+ * @returns {Map<string, Array<object>>} Map from parentId to children array
+ */
+export function getChildrenBatch(parentIds) {
+  if (!parentIds || parentIds.length === 0) return new Map();
+
+  const rows = NodeRepo.findByParents(parentIds);
+  const result = new Map();
+  // Initialize all requested parents (some may have no children)
+  for (const pid of parentIds) result.set(pid, []);
+
+  for (const r of rows) {
+    const child = {
+      node_id: r.node_id,
+      name: r.name,
+      parent_id: r.parent_id,
+      level: r.level,
+      node_summary: r.node_summary,
+      node_description: r.node_description || '',
+      aliases: safeJson(r.aliases_json, []),
+      keywords: safeJson(r.keywords_json, []),
+      scope: safeJson(r.scope_json, {}),
+      authority_level_mode: r.authority_level_mode,
+      conflict_score: r.conflict_score
+    };
+    result.get(r.parent_id)?.push(child);
+  }
+  return result;
+}
+
+/**
  * Get all descendants of a node recursively
  * @param {string} nodeId - Node ID
  * @param {number} maxDepth - Maximum depth to traverse (default: unlimited)
@@ -104,18 +136,21 @@ export function getChildren(nodeId) {
  */
 export function getDescendants(nodeId, maxDepth = Infinity) {
   const descendants = [];
-  const queue = [{ id: nodeId, depth: 0 }];
+  let currentIds = [nodeId];
+  let depth = 0;
 
-  while (queue.length > 0) {
-    const { id, depth } = queue.shift();
-
-    if (depth >= maxDepth) continue;
-
-    const children = getChildren(id);
-    for (const child of children) {
-      descendants.push({ ...child, depth: depth + 1 });
-      queue.push({ id: child.node_id, depth: depth + 1 });
+  while (currentIds.length > 0 && depth < maxDepth) {
+    const childrenMap = getChildrenBatch(currentIds);
+    const nextIds = [];
+    for (const pid of currentIds) {
+      const children = childrenMap.get(pid) || [];
+      for (const child of children) {
+        descendants.push({ ...child, depth: depth + 1 });
+        nextIds.push(child.node_id);
+      }
     }
+    currentIds = nextIds;
+    depth++;
   }
 
   return descendants;
@@ -144,6 +179,9 @@ export function getSiblings(nodeId, includeSelf = false) {
     parent_id: r.parent_id,
     level: r.level,
     node_summary: r.node_summary,
+    node_description: r.node_description || '',
+    aliases: safeJson(r.aliases_json, []),
+    keywords: safeJson(r.keywords_json, []),
     scope: safeJson(r.scope_json, {})
   }));
 }

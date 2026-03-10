@@ -25,6 +25,8 @@ import entitiesRouter from "./routes/entities.js";
 import decisionsRouter from "./routes/decisions.js";
 import testsRouter from "./routes/tests.js";
 import schemaRouter from "./routes/schema.js";
+import promptsRouter from "./routes/prompts.js";
+import manageRouter from "./routes/manage.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,7 +82,7 @@ app.use((req, res, next) => {
   try {
     const conn = getConnection(datasetId);
     req.datasetConn = conn; // survives multer's async boundary
-    runWithDb(conn, next);
+    runWithDb(conn, next, datasetId);
   } catch (err) {
     apiLogger.warn(`Dataset '${datasetId}' not found: ${err.message}`);
     res.status(404).json({ error: `Dataset '${datasetId}' not found` });
@@ -98,6 +100,8 @@ app.use(entitiesRouter);
 app.use(decisionsRouter);
 app.use(testsRouter);
 app.use("/schema", schemaRouter);
+app.use("/prompts", promptsRouter);
+app.use("/manage", manageRouter);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

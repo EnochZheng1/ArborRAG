@@ -1,4 +1,4 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { getPrompt } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
@@ -216,7 +216,7 @@ export async function extractMetadataWithLLM(text, docTitle = "") {
   // Detect language first
   const lang = getEffectiveLang(text);
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     logger.debug("LLM API key not set, using basic extraction only");
     return {
       keywords: extractKeywords(text),

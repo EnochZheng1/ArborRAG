@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Heuristic + optional LLM Re-ranking Module
@@ -22,14 +23,14 @@ const LLM_TOP_N   = Math.min(12, Math.max(3, parseInt(process.env.RERANKER_LLM_T
  */
 async function llmScoreChunks(query, chunks) {
   const scores = new Map();
-  if (!llmConfig[llmConfig.provider]?.apiKey) return scores;
+  if (!isLlmConfigured()) return scores;
 
   const snippets = chunks.map((c, i) => {
     const text = (c.content || c.content_clean || '').slice(0, 300).replace(/\n+/g, ' ');
     return `[${i + 1}] ${text}`;
   }).join('\n\n');
 
-  const prompt = `Rate each snippet's relevance to the question on a scale of 0–10. Reply with ONLY a numbered list like:
+  const prompt = getCustomPrompt('llmReranking', { query, snippets }) ?? `Rate each snippet's relevance to the question on a scale of 0–10. Reply with ONLY a numbered list like:
 1. 7
 2. 3
 ...
@@ -64,7 +65,10 @@ Ratings (0-10):`;
  * @param {number} maxChunks
  * @returns {Promise<Array>}
  */
-export async function rerankerChunks(query, chunks, maxChunks = 10) {
+export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
+  // Accept either a number (legacy) or an options object
+  const maxChunks = typeof optionsOrMaxChunks === 'number' ? optionsOrMaxChunks : (optionsOrMaxChunks?.topK ?? 10);
+  const minScore  = typeof optionsOrMaxChunks === 'object' ? (optionsOrMaxChunks?.minScore ?? 0) : 0;
   if (!chunks || chunks.length === 0) return [];
 
   const queryTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
@@ -82,8 +86,8 @@ export async function rerankerChunks(query, chunks, maxChunks = 10) {
     // Signal 2 — BM25 rank position (0–1, pos 0 → 1.0)
     const rankScore = n > 1 ? 1 - i / (n - 1) : 1;
 
-    // Signal 3 — embedding cosine similarity (default 0.5 if missing)
-    const embScore = chunk.similarity != null ? chunk.similarity : 0.5;
+    // Signal 3 — embedding cosine similarity (default 0.0 if missing)
+    const embScore = chunk.similarity != null && Number.isFinite(chunk.similarity) ? chunk.similarity : 0.0;
 
     const score = 0.4 * overlapScore + 0.4 * rankScore + 0.2 * embScore;
 
@@ -110,11 +114,16 @@ export async function rerankerChunks(query, chunks, maxChunks = 10) {
     const GAP_THRESHOLD = 0.3;
     for (let i = 1; i < results.length; i++) {
       const drop = results[i - 1].rerank_score - results[i].rerank_score;
-      if (drop >= GAP_THRESHOLD && i >= 2) {
+      if (drop >= GAP_THRESHOLD && i >= 1) {
         results = results.slice(0, i);
         break;
       }
     }
+  }
+
+  // Apply minScore filter if provided
+  if (minScore > 0) {
+    results = results.filter(r => r.rerank_score >= minScore);
   }
 
   return results.slice(0, maxChunks);

@@ -1,6 +1,7 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Query Decomposition Module
@@ -37,7 +38,7 @@ export async function decomposeQuery(query, options = {}) {
     return result;
   }
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return {
       isComplex: false,
       original: query,
@@ -47,7 +48,7 @@ export async function decomposeQuery(query, options = {}) {
   }
 
   try {
-    const prompt = `Analyze this query and determine if it should be broken into simpler sub-queries for better information retrieval.
+    const prompt = getCustomPrompt('queryDecomposition', { query, maxSubQueries }) ?? `Analyze this query and determine if it should be broken into simpler sub-queries for better information retrieval.
 
 Query: "${query}"
 

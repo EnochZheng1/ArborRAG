@@ -8,7 +8,7 @@
  * Borderline cases are recorded in pending_decisions for human review.
  */
 
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { safeJson } from "../db/db.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
@@ -16,6 +16,7 @@ import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { ingestLogger as logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
 
@@ -80,9 +81,12 @@ function detectTemporalSignal(content) {
 // ── LLM helpers ───────────────────────────────────────────────────────────────
 
 async function normalizeWithLLM(kpContent, existingContent) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) return null;
+  if (!isLlmConfigured()) return null;
 
-  const prompt = `Two knowledge statements are about the same topic. Merge them into one canonical statement.
+  const prompt = getCustomPrompt('kpNormalization', {
+    statementA: kpContent.slice(0, 400),
+    statementB: existingContent.slice(0, 400)
+  }) ?? `Two knowledge statements are about the same topic. Merge them into one canonical statement.
 
 Rules:
 1. Preserve ALL specific numbers, percentages, durations, and dates from BOTH statements (e.g., "90 days", "85%", "7 hours").

@@ -2,7 +2,7 @@ import { runTransaction, logAudit } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { searchNodesByName } from "../kg/recallNodes.js";
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
@@ -10,6 +10,7 @@ import { getEffectiveLang } from "../utils/datasetLang.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { generateNodeId, ensureRootNode } from "./nodeHierarchy.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 // Lowered from 0.40 → 0.35: slightly more aggressive reuse.
 // Node lookup now uses a direct DB sibling scan (not BM25) so every sibling
@@ -87,7 +88,7 @@ function _createTopicNode(nodeData) {
  * to avoid a circular import.
  */
 async function _confirmTopicMatchWithLLM(topicName, candidate) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) return false;
+  if (!isLlmConfigured()) return false;
 
   const lang = getEffectiveLang(topicName);
   const nodeList = `1. ${candidate.node_id} - ${candidate.name}: ${candidate.node_summary || (isChineseLang(lang) ? "(无摘要)" : "(no summary)")}`;
@@ -195,7 +196,7 @@ export async function findOrCreateTopicNode(topicName, parentId, options = {}) {
  */
 export async function canonicalizeTopicHints(uniqueTopics, useLLM) {
   const mapping = new Map();
-  if (!useLLM || !llmConfig[llmConfig.provider]?.apiKey) return mapping;
+  if (!useLLM || !isLlmConfigured()) return mapping;
 
   for (const topic of uniqueTopics) {
     if (topic === 'General') continue;
@@ -211,12 +212,15 @@ export async function canonicalizeTopicHints(uniqueTopics, useLLM) {
         .filter((n, i, arr) => arr.indexOf(n) === i) // deduplicate
         .slice(0, 12);
 
-      const prompt = `You are organizing a knowledge graph. A new document has a topic category.
+      const candidateList = candidateNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
+      const prompt = getCustomPrompt('topicCanonicalization', {
+        topic, candidateList
+      }) ?? `You are organizing a knowledge graph. A new document has a topic category.
 
 New topic: "${topic}"
 
 Candidate existing nodes in the graph:
-${candidateNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}
+${candidateList}
 
 Is the new topic semantically equivalent to any candidate (same concept, possibly different phrasing)?
 - If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim)

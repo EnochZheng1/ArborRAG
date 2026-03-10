@@ -211,8 +211,8 @@ router.patch('/settings', (req, res) => {
     }
 
     if (tree_routing_mode !== undefined) {
-      if (!['keyword', 'llm'].includes(tree_routing_mode)) {
-        return res.status(400).json({ error: '`tree_routing_mode` must be "keyword" or "llm"' });
+      if (!['keyword', 'vector', 'llm'].includes(tree_routing_mode)) {
+        return res.status(400).json({ error: '`tree_routing_mode` must be "keyword", "vector", or "llm"' });
       }
       DatasetConfigRepo.set('tree_routing_mode', tree_routing_mode);
     }

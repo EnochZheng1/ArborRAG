@@ -1,7 +1,8 @@
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { retrieveForComparison, buildMultiNodeContext } from "./multiNodeRetriever.js";
 import { logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 /**
  * Comparison Query Handler
@@ -55,7 +56,7 @@ export async function generateComparison(query, entities, aspects = []) {
  * Use LLM to generate comparison analysis
  */
 async function llmGenerateComparison(query, comparisonData, aspects) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return generateBasicComparison(comparisonData, aspects);
   }
 
@@ -78,11 +79,12 @@ async function llmGenerateComparison(query, comparisonData, aspects) {
 
   const context = contextParts.join("\n");
 
-  const prompt = `You are a comparison analyst. Generate a detailed comparison based on the provided information.
+  const aspectsText = aspects.length > 0 ? `Comparison Aspects: ${aspects.join(", ")}` : "";
+  const prompt = getCustomPrompt('comparison', { query, aspects: aspectsText, context }) ?? `You are a comparison analyst. Generate a detailed comparison based on the provided information.
 
 User Query: "${query}"
 
-${aspects.length > 0 ? `Comparison Aspects: ${aspects.join(", ")}` : ""}
+${aspectsText}
 
 Context:
 ${context}

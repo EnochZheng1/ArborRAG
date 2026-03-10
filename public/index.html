@@ -94,6 +94,13 @@
       <!-- Ask Tab -->
       <section class="tab-content active" id="tab-ask">
         <div class="chat-layout">
+          <!-- Mode toggle -->
+          <div class="chat-mode-toggle" id="chat-mode-toggle">
+            <button class="mode-btn active" data-mode="ask">Ask</button>
+            <button class="mode-btn" data-mode="manage">Manage</button>
+            <button class="mode-btn mode-btn-history hidden" id="manage-history-btn" title="Change History">History</button>
+          </div>
+
           <!-- Chat messages area -->
           <div class="chat-messages" id="chat-messages">
             <div class="chat-welcome" id="chat-welcome">
@@ -248,6 +255,15 @@
                 </div>
               </div>
             </div>
+          </div>
+
+          <!-- Manage history panel (slide-in drawer) -->
+          <div class="manage-history-panel hidden" id="manage-history-panel">
+            <div class="manage-history-header">
+              <h4>Change History</h4>
+              <button class="btn btn-sm" id="manage-history-close">&times;</button>
+            </div>
+            <div class="manage-history-list" id="manage-history-list"></div>
           </div>
         </div>
       </section>
@@ -424,9 +440,11 @@
               <label>Tree Routing (Query)</label>
               <div class="toggle-group" id="tree-routing-toggle">
                 <button class="toggle-btn active" data-value="keyword">Keyword</button>
+                <button class="toggle-btn" data-value="vector">Vector</button>
                 <button class="toggle-btn" data-value="llm">LLM</button>
               </div>
-              <p class="option-hint">Keyword: fast, exact term matching. LLM: semantic routing (bridges vocabulary gaps, uses extra tokens).</p>
+              <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
+              <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
             </div>
             <div class="form-actions">
               <button class="btn btn-secondary" id="cancel-schema-settings">Cancel</button>
@@ -794,6 +812,31 @@
           </div>
           <div class="form-actions">
             <button class="btn btn-primary" id="settings-save-btn">Save</button>
+          </div>
+        </div>
+
+        <!-- Prompt Settings -->
+        <div class="settings-card" id="prompts-card">
+          <div class="prompts-header">
+            <h3>LLM Prompts</h3>
+            <button class="btn btn-sm btn-danger" id="prompts-reset-all-btn">Reset All to Defaults</button>
+          </div>
+          <p class="prompts-subtitle">Customize LLM prompts for this dataset. Use <code>{{variable}}</code> placeholders for dynamic values.</p>
+
+          <div class="prompt-filter-row">
+            <select id="prompt-category-filter" class="option-select">
+              <option value="all">All Categories</option>
+              <option value="ingestion">Ingestion</option>
+              <option value="query">Query</option>
+              <option value="routing">Routing</option>
+            </select>
+            <label class="prompt-custom-filter">
+              <input type="checkbox" id="prompt-custom-only"> Show customized only
+            </label>
+          </div>
+
+          <div id="prompts-list" class="prompts-list">
+            <!-- Prompt cards rendered by JS -->
           </div>
         </div>
       </section>

@@ -2,8 +2,9 @@ import { safeJson, logAudit, runTransaction } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
+import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { bm25RecallNodes, searchNodesByName } from "../kg/recallNodes.js";
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
@@ -91,7 +92,7 @@ export function findBestNodeMatch(chunk) {
  * @returns {Promise<object>} LLM suggestion
  */
 export async function suggestNodeWithLLM(chunk, candidates) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     throw new Error("LLM API key required for node suggestion");
   }
 
@@ -376,7 +377,7 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
             const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
             ChunkRepo.supersede(decision.chunkId, newChunkId);
             if (kp.keywords?.length > 0) {
-              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (_) { /* non-fatal */ }
+              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (kwErr) { logger.warn(`Keyword merge failed for ${targetNodeId}: ${kwErr.message}`); }
             }
             results.mapped.push({
               chunkIndex: kp.index, chunkId: newChunkId,
@@ -390,7 +391,11 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
           default: {
             const chunkId = assignKPToNode(kp, targetNodeId, documentId);
             if (kp.keywords?.length > 0) {
-              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (_) { /* non-fatal */ }
+              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (kwErr) { logger.warn(`Keyword merge failed for ${targetNodeId}: ${kwErr.message}`); }
+            }
+            // Back-fill incoming_chunk_id on queued decisions so human review can link to the stored KP
+            if (decision.queued) {
+              try { DecisionRepo.updateIncomingChunkId(targetNodeId, chunkId); } catch (_) {}
             }
             results.mapped.push({
               chunkIndex: kp.index, chunkId,
@@ -627,7 +632,7 @@ export async function generateNodeAliases(nodeId, options = {}) {
   }
 
   // Use LLM to generate aliases
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return generateSimpleAliases(node.name);
   }
 

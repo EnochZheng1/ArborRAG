@@ -2,7 +2,7 @@ import { safeJson, runTransaction } from "../db/db.js";
 import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
-import { cosineSimilarity, getEmbeddingModel } from "./embedder.js";
+import { cosineSimilarity, getEmbeddingModel, getEmbeddingDimension } from "./embedder.js";
 
 /**
  * Vector storage and retrieval using SQLite
@@ -16,6 +16,10 @@ import { cosineSimilarity, getEmbeddingModel } from "./embedder.js";
  * @returns {number} Embedding record ID
  */
 export function storeEmbedding(refType, refId, embedding) {
+  const expectedDim = getEmbeddingDimension();
+  if (Array.isArray(embedding) && embedding.length !== expectedDim) {
+    throw new Error(`Embedding dimension mismatch: got ${embedding.length}, expected ${expectedDim} for ${refType}:${refId}`);
+  }
   const model = getEmbeddingModel();
   const embeddingJson = JSON.stringify(embedding);
 

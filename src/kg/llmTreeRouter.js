@@ -10,6 +10,7 @@
 import { callLLM } from "../utils/llm.js";
 import { parseLLMJson } from "../utils/parseJSON.js";
 import { queryLogger as logger } from "../utils/logger.js";
+import { getCustomPrompt } from "../prompts/promptManager.js";
 
 // ── In-memory LRU cache ────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ async function _scoreBatch(query, batch) {
     return parts.join(" ");
   }).join("\n");
 
-  const prompt = `Rate each node's relevance (0-10) to the query. Consider semantic meaning, not just keywords.
+  const prompt = getCustomPrompt('llmTreeRouting', { query, nodeList }) ?? `Rate each node's relevance (0-10) to the query. Consider semantic meaning, not just keywords.
 
 Query: "${query}"
 

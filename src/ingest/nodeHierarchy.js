@@ -1,6 +1,6 @@
 import { runTransaction, logAudit } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
-import { callLLM, llmConfig } from "../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { getPrompt, isChineseLang } from "../utils/langDetect.js";
 import { getEffectiveLang } from "../utils/datasetLang.js";
@@ -75,7 +75,7 @@ function _createNode(nodeData) {
  * @returns {Promise<object>} Suggested hierarchy
  */
 export async function analyzeDocumentStructure(docTitle, chunks, lang) {
-  if (!llmConfig[llmConfig.provider]?.apiKey) {
+  if (!isLlmConfigured()) {
     return null;
   }
 

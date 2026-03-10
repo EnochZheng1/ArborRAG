@@ -37,5 +37,15 @@ export const DatasetConfigRepo = {
       `INSERT INTO dataset_config (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`
     ).run(key, String(value));
+  },
+
+  /** Delete a single key. */
+  delete(key) {
+    return db.prepare("DELETE FROM dataset_config WHERE key = ?").run(key);
+  },
+
+  /** Delete all keys matching a prefix (e.g. "prompt:"). */
+  deleteByPrefix(prefix) {
+    return db.prepare("DELETE FROM dataset_config WHERE key LIKE ?").run(`${prefix}%`);
   }
 };

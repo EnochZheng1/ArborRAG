@@ -141,7 +141,7 @@ export const ChunkRepo = {
     const params = terms.map(t => `%${t}%`);
     return db.prepare(`
       SELECT c.* FROM chunks c
-      WHERE c.status = 'active' AND (${conditions})
+      WHERE c.status = 'active' AND c.superseded_by IS NULL AND (${conditions})
       ORDER BY c.uploaded_at DESC
       LIMIT ?
     `).all(...params, limit);
@@ -306,10 +306,20 @@ export const ChunkRepo = {
     ).run(newChunkId, existingId);
   },
 
-  /** Delete a chunk and its FTS entry by primary key. */
+  /** Delete a chunk, its FTS entry, and its embedding by primary key. */
   deleteById(id) {
     db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?').run(String(id));
+    db.prepare("DELETE FROM embeddings WHERE ref_type = 'chunk' AND ref_id = ?").run(String(id));
     db.prepare('DELETE FROM chunks WHERE id = ?').run(id);
+  },
+
+  /** Update content_clean + rebuild FTS + invalidate embedding for a chunk. */
+  updateContent(chunkId, newContent) {
+    db.prepare("UPDATE chunks SET content_clean = ?, uploaded_at = datetime('now') WHERE id = ?")
+      .run(newContent, chunkId);
+    db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?').run(String(chunkId));
+    this.insertFts(chunkId, newContent);
+    db.prepare("DELETE FROM embeddings WHERE ref_type = 'chunk' AND ref_id = ?").run(String(chunkId));
   },
 
   /** INSERT a Knowledge Point row (includes KP-specific columns). */

@@ -2,7 +2,7 @@
  * Query expansion and multilingual variant building.
  */
 
-import { callLLM, llmConfig } from "../../utils/llm.js";
+import { callLLM, isLlmConfigured } from "../../utils/llm.js";
 import { parseLLMJson } from "../../utils/parseJSON.js";
 import { queryLogger as logger } from "../../utils/logger.js";
 import { detectLanguage } from "../../utils/langDetect.js";
@@ -17,7 +17,7 @@ const EXPANSION_CACHE_MAX = 500;
 export async function expandQuery(query) {
   if (queryExpansionCache.has(query)) return queryExpansionCache.get(query);
 
-  if (!llmConfig[llmConfig.provider]?.apiKey) return [query];
+  if (!isLlmConfigured()) return [query];
 
   try {
     const prompt = `Given this search query, generate 3-5 related search terms or synonyms that might help find relevant content. Include both the original language and translations if applicable.
