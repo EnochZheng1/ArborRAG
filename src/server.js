@@ -44,6 +44,34 @@ app.use(settingsRouter);
 // ── Static files ─────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "../public")));
 
+// ── Health & metrics (no DB context required) ────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime_seconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    datasets: getAllConnections().length
+  });
+});
+
+app.get('/metrics', (req, res) => {
+  const connections = getAllConnections();
+  const queue = { queued: 0, processing: 0, completed: 0, failed: 0, rate_limited: 0, cancelled: 0 };
+  for (const { connection } of connections) {
+    try {
+      const rows = connection.prepare("SELECT status, COUNT(*) as c FROM ingestion_jobs GROUP BY status").all();
+      for (const r of rows) { if (queue[r.status] !== undefined) queue[r.status] += r.c; }
+    } catch {}
+  }
+  res.json({
+    uptime_seconds: Math.floor(process.uptime()),
+    memory_mb: Math.round(process.memoryUsage().rss / 1048576),
+    datasets: connections.length,
+    queue,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // ── Dataset middleware ────────────────────────────────────────────────────────
 // Resolves X-Dataset-ID header and runs all downstream handlers inside the
 // correct SQLite connection via AsyncLocalStorage.

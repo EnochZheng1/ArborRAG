@@ -181,7 +181,8 @@ router.get('/settings', (req, res) => {
     res.json({
       mapping_mode:        DatasetConfigRepo.get('mapping_mode')        ?? 'free',
       mapping_strictness:  DatasetConfigRepo.get('mapping_strictness')  ?? 'soft',
-      schema_template_id:  DatasetConfigRepo.get('schema_template_id')  ?? null
+      schema_template_id:  DatasetConfigRepo.get('schema_template_id')  ?? null,
+      tree_routing_mode:   DatasetConfigRepo.get('tree_routing_mode')   ?? 'keyword'
     });
   } catch (err) {
     logger.error("GET /schema/settings error:", err.message);
@@ -193,7 +194,7 @@ router.get('/settings', (req, res) => {
 
 router.patch('/settings', (req, res) => {
   try {
-    const { mapping_mode, mapping_strictness } = req.body;
+    const { mapping_mode, mapping_strictness, tree_routing_mode } = req.body;
 
     if (mapping_mode !== undefined) {
       if (!['free', 'guided'].includes(mapping_mode)) {
@@ -209,10 +210,18 @@ router.patch('/settings', (req, res) => {
       DatasetConfigRepo.set('mapping_strictness', mapping_strictness);
     }
 
+    if (tree_routing_mode !== undefined) {
+      if (!['keyword', 'llm'].includes(tree_routing_mode)) {
+        return res.status(400).json({ error: '`tree_routing_mode` must be "keyword" or "llm"' });
+      }
+      DatasetConfigRepo.set('tree_routing_mode', tree_routing_mode);
+    }
+
     const newMode        = DatasetConfigRepo.get('mapping_mode')       ?? 'free';
     const newStrictness  = DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
-    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness}`);
-    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness });
+    const newRouting     = DatasetConfigRepo.get('tree_routing_mode')  ?? 'keyword';
+    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting}`);
+    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting });
   } catch (err) {
     logger.error("PATCH /schema/settings error:", err.message);
     res.status(500).json({ error: err.message });

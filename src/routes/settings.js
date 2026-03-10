@@ -18,7 +18,8 @@ function currentState() {
     model:           llmConfig[p].model,
     embeddingModel:  llmConfig[p].embeddingModel,
     openaiConfigured: !!llmConfig.openai.apiKey,
-    geminiConfigured: !!llmConfig.gemini.apiKey,
+    geminiConfigured: !!llmConfig.gemini.apiKey || llmConfig.gemini.vertexai,
+    vertexai:         llmConfig.gemini.vertexai,
   };
 }
 

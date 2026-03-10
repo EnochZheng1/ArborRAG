@@ -2311,25 +2311,64 @@ select:focus {
 
 /* ── Tests Tab ──────────────────────────────────────────────────────────────── */
 
-.test-group { margin-bottom: 4px; }
+/* ── Test suite (collapsible group) ──────────────────────────────────────── */
+.test-suite { margin-bottom: 6px; }
 
-.test-group-header {
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-secondary);
-  margin: 20px 0 8px;
-  padding-left: 4px;
+.test-suite-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.test-suite-header:hover { background: var(--bg-hover, var(--bg-main)); }
+
+.suite-chevron {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+.suite-chevron--open { transform: rotate(90deg); }
+
+.suite-checkbox { flex-shrink: 0; cursor: pointer; }
+
+.suite-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
 }
 
 .test-group-count {
+  font-size: 0.74rem;
   font-weight: 400;
+  color: var(--text-secondary);
   opacity: 0.7;
 }
+
+.suite-stat {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 99px;
+}
+.suite-stat--passed { color: #065f46; background: #d1fae5; }
+.suite-stat--failed { color: #991b1b; background: #fee2e2; }
+.suite-stat--running { color: #92400e; background: #fef3c7; }
+[data-theme="dark"] .suite-stat--passed { color: #6ee7b7; background: #064e3b; }
+[data-theme="dark"] .suite-stat--failed { color: #fca5a5; background: #7f1d1d; }
+[data-theme="dark"] .suite-stat--running { color: #fbbf24; background: #78350f; }
+
+.suite-run-btn { margin-left: auto; }
+
+.test-suite-body { padding: 4px 0 4px 20px; }
+.test-suite-body.hidden { display: none; }
 
 .test-card {
   background: var(--bg-card);
@@ -5838,4 +5877,21 @@ select:focus {
   font-size: 9px;
   fill: var(--text-secondary);
   pointer-events: none;
+}
+
+/* Expandable error detail in Documents table */
+.error-detail { display: inline; }
+.error-detail summary { cursor: pointer; list-style: none; }
+.error-detail summary::-webkit-details-marker { display: none; }
+.error-detail-full {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary, #1a1a2e);
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--text-danger, #ef4444);
 }

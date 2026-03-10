@@ -420,6 +420,14 @@
               </div>
               <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
             </div>
+            <div class="form-group">
+              <label>Tree Routing (Query)</label>
+              <div class="toggle-group" id="tree-routing-toggle">
+                <button class="toggle-btn active" data-value="keyword">Keyword</button>
+                <button class="toggle-btn" data-value="llm">LLM</button>
+              </div>
+              <p class="option-hint">Keyword: fast, exact term matching. LLM: semantic routing (bridges vocabulary gaps, uses extra tokens).</p>
+            </div>
             <div class="form-actions">
               <button class="btn btn-secondary" id="cancel-schema-settings">Cancel</button>
               <button class="btn btn-primary" id="save-schema-settings">Save</button>
@@ -564,6 +572,8 @@
             </select>
             <button id="retry-all-docs-btn"  class="btn btn-warning btn-sm" style="display:none">Retry All Paused</button>
             <button id="cancel-all-docs-btn" class="btn btn-danger  btn-sm" style="display:none">Cancel All</button>
+            <button id="clear-completed-btn" class="btn btn-secondary btn-sm" style="display:none">Clear Completed</button>
+            <button id="clear-failed-btn"    class="btn btn-secondary btn-sm" style="display:none">Clear Failed</button>
             <button id="refresh-docs-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
           </div>
         </div>
@@ -721,10 +731,6 @@
             </button>
             <button id="sync-embeddings-btn" class="btn btn-secondary">
               <span data-i18n="sync_embeddings">Sync Embeddings</span>
-              <span class="loading-spinner hidden"></span>
-            </button>
-            <button id="extract-entities-btn" class="btn btn-secondary" title="Extract entities and facts from documents">
-              <span data-i18n="extract_entities">Extract Entities</span>
               <span class="loading-spinner hidden"></span>
             </button>
             <button id="refresh-stats-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>

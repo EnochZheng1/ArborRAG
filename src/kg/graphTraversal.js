@@ -87,6 +87,9 @@ export function getChildren(nodeId) {
     parent_id: r.parent_id,
     level: r.level,
     node_summary: r.node_summary,
+    node_description: r.node_description || '',
+    aliases: safeJson(r.aliases_json, []),
+    keywords: safeJson(r.keywords_json, []),
     scope: safeJson(r.scope_json, {}),
     authority_level_mode: r.authority_level_mode,
     conflict_score: r.conflict_score
@@ -303,6 +306,9 @@ export function getRootNodes() {
     name: r.name,
     level: r.level,
     node_summary: r.node_summary,
+    node_description: r.node_description || '',
+    aliases: safeJson(r.aliases_json, []),
+    keywords: safeJson(r.keywords_json, []),
     scope: safeJson(r.scope_json, {})
   }));
 }

@@ -341,6 +341,36 @@ export async function handleReasoningQuery(query, classification, trace) {
   let enhancedFacts = [];
   let enhancedEntities = [];
 
+  // Step 0: Hierarchical tree retrieval — navigates tree with LLM routing
+  // to find relevant branches that keyword-only methods miss.
+  try {
+    const hierarchicalResult = await hierarchicalRetrieve(query, {
+      maxChunks: 15,
+      beamWidth: 3,
+      maxDepth: 5,
+      includeAncestors: true,
+      includeSiblings: true,
+      includeDescendants: true,
+    });
+
+    if (hierarchicalResult.chunks.length > 0) {
+      const treeContext = getTreeContextSummary(hierarchicalResult.chunks);
+      const treeChunkText = hierarchicalResult.chunks
+        .slice(0, 12)
+        .map(c => `[${c.node_name || 'unknown'}] ${(c.content || c.content_clean || '').slice(0, 500)}`)
+        .join('\n\n');
+      additionalContext = `## Tree-Retrieved Context\nPaths: ${(treeContext.paths || []).slice(0, 3).join(' | ')}\n\n${treeChunkText}`;
+
+      trace?.addStep('Hierarchical Tree Retrieval', `Found ${hierarchicalResult.chunks.length} chunks via tree navigation`, {
+        node_count: hierarchicalResult.nodes?.length || 0,
+        paths: treeContext.paths?.slice(0, 3)
+      });
+    }
+  } catch (err) {
+    trace?.addStep('Hierarchical Tree Retrieval', `Skipped: ${err.message}`, null, 'skipped');
+    logger.debug(`Hierarchical retrieval for reasoning failed: ${err.message}`);
+  }
+
   try {
     const enhancedResults = await enhancedRetrieval(query, {
       useEntities: true,
@@ -352,11 +382,14 @@ export async function handleReasoningQuery(query, classification, trace) {
     });
 
     if (enhancedResults.chunks.length > 0 || enhancedResults.facts.length > 0) {
-      additionalContext = buildEnhancedContext(enhancedResults, {
+      const enhancedText = buildEnhancedContext(enhancedResults, {
         maxLength: 4000,
         includeFacts: true,
         includeEntityInfo: true
       });
+      additionalContext = additionalContext
+        ? `${additionalContext}\n\n${enhancedText}`
+        : enhancedText;
       enhancedFacts = enhancedResults.facts;
       enhancedEntities = enhancedResults.entities;
 
@@ -447,6 +480,37 @@ export async function handleAggregationQuery(query, classification, queryScope, 
     }
   } catch (err) {
     logger.warn("Document title search in aggregation failed:", err.message);
+  }
+
+  // Hierarchical tree retrieval for aggregation: navigates tree with LLM routing
+  try {
+    const hierarchicalResult = await hierarchicalRetrieve(query, {
+      maxChunks: 20,
+      beamWidth: 3,
+      maxDepth: 5,
+      includeAncestors: true,
+      includeSiblings: true,
+      includeDescendants: true,
+    });
+
+    if (hierarchicalResult.chunks.length > 0) {
+      const existingIds = new Set(allChunks.map(c => c.id));
+      let added = 0;
+      for (const c of hierarchicalResult.chunks) {
+        if (!existingIds.has(c.id)) {
+          existingIds.add(c.id);
+          allChunks.push(c);
+          added++;
+        }
+      }
+      if (added > 0) {
+        trace?.addStep('Hierarchical Tree Retrieval', `Added ${added} chunks via tree navigation`, {
+          node_count: hierarchicalResult.nodes?.length || 0
+        });
+      }
+    }
+  } catch (err) {
+    logger.debug(`Hierarchical retrieval for aggregation failed: ${err.message}`);
   }
 
   // Enhanced retrieval for aggregation: includes child nodes and entity-based content

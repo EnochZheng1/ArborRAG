@@ -9,10 +9,14 @@
  * provider-specific SDKs directly.
  */
 
+import path from "path";
+import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { logger } from "./logger.js";
 import { recordTokenUsage } from "./tokenTracker.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Per-call LLM timeout: 8 minutes. Long enough for big-document KP extraction,
 // short enough to detect a truly hung network call and release the retry budget.
@@ -24,16 +28,21 @@ const LLM_TIMEOUT_MS = Math.max(
 // ── Runtime-mutable config ────────────────────────────────────────────────────
 
 export const llmConfig = {
-  provider: process.env.LLM_PROVIDER || 'openai',
+  provider: process.env.LLM_PROVIDER || 'gemini',
   openai: {
     model:          process.env.OPENAI_MODEL           || 'gpt-5-mini',
     embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-large',
     apiKey:         process.env.OPENAI_API_KEY         || '',
   },
   gemini: {
-    model:          process.env.GEMINI_MODEL           || 'gemini-2.0-flash',
+    model:          process.env.GEMINI_MODEL           || 'gemini-2.5-flash',
     embeddingModel: process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001',
     apiKey:         process.env.GEMINI_API_KEY         || '',
+    // Vertex AI settings (service account auth instead of API key)
+    vertexai:       process.env.VERTEX_AI === 'true',
+    project:        process.env.VERTEX_PROJECT         || '',
+    location:       process.env.VERTEX_LOCATION        || 'us-central1',
+    serviceAccountKeyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '',
   },
 };
 
@@ -64,7 +73,29 @@ function openaiClient() {
 }
 
 function geminiClient() {
-  if (!_gemini) _gemini = new GoogleGenAI({ apiKey: llmConfig.gemini.apiKey });
+  if (!_gemini) {
+    const cfg = llmConfig.gemini;
+    if (cfg.vertexai) {
+      // Vertex AI mode: authenticate via service account key file
+      const opts = {
+        vertexai: true,
+        project:  cfg.project,
+        location: cfg.location,
+      };
+      if (cfg.serviceAccountKeyFile) {
+        // Resolve relative paths from project root
+        const keyPath = path.isAbsolute(cfg.serviceAccountKeyFile)
+          ? cfg.serviceAccountKeyFile
+          : path.resolve(__dirname, '../../', cfg.serviceAccountKeyFile);
+        opts.googleAuthOptions = { keyFile: keyPath };
+      }
+      logger.info(`Gemini client: Vertex AI (project=${cfg.project}, location=${cfg.location})`);
+      _gemini = new GoogleGenAI(opts);
+    } else {
+      // AI Studio mode: authenticate via API key
+      _gemini = new GoogleGenAI({ apiKey: cfg.apiKey });
+    }
+  }
   return _gemini;
 }
 
@@ -187,14 +218,28 @@ async function _callLLMOnce({
     return content;
 
   } else {
-    if (!llmConfig.gemini.apiKey) throw new Error('GEMINI_API_KEY is not configured');
+    if (!llmConfig.gemini.apiKey && !llmConfig.gemini.vertexai) {
+      throw new Error('GEMINI_API_KEY is not configured (set VERTEX_AI=true to use Vertex AI instead)');
+    }
 
     let _geminiTimeoutId;
     const resp = await Promise.race([
       geminiClient().models.generateContent({
         model:    llmConfig.gemini.model,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config:   { temperature, maxOutputTokens },
+        config:   {
+          temperature,
+          maxOutputTokens,
+          // gemini-2.5-flash is a thinking model — thinking tokens count against
+          // maxOutputTokens. For calls with tight caps, set a proportional budget
+          // so actual output isn't starved. Disable thinking entirely for very
+          // small caps (≤300 tokens) where reasoning overhead isn't worthwhile.
+          ...(maxOutputTokens != null && maxOutputTokens <= 300
+            ? { thinkingConfig: { thinkingBudget: 0 } }
+            : maxOutputTokens != null && maxOutputTokens <= 1024
+              ? { thinkingConfig: { thinkingBudget: 256 } }
+              : {}),
+        },
       }),
       new Promise((_, reject) => {
         _geminiTimeoutId = setTimeout(

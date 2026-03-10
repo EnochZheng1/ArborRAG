@@ -136,7 +136,10 @@ If a node should be part of the schema but isn't listed, re-import with Merge mo
 3. Choose strictness:
    - **Soft** — recommended for most cases. Topics the mapper can't confidently assign become child nodes under the nearest schema ancestor. Your tree grows deliberately but isn't rigid.
    - **Hard** — for tightly-controlled datasets. Every KP is forced into an existing schema node. No new nodes are ever created during ingest.
-4. Click **Save**
+4. Choose **Tree Routing** mode (affects query-time retrieval, not ingestion):
+   - **Keyword** (default) — the tree beam search uses BM25 keyword scoring to navigate nodes. Fast and cost-free.
+   - **LLM** — the beam search sends candidate nodes to the LLM for semantic relevance scoring. This bridges vocabulary gaps (e.g., a query about "vacation days" can find a node named "Leave & Attendance" even with no keyword overlap). Costs additional LLM calls per query. Scores are blended: `max(LLM score, keyword score)`, so strong keyword hits are never suppressed.
+5. Click **Save**
 
 The mode badge in the tree header will update to show the current mode (e.g. `Guided (soft)`).
 
@@ -250,3 +253,9 @@ Yes — open Schema Settings and select **Free**. All schema node flags remain i
 
 **Q: Do existing ingested documents get re-mapped?**
 No. Mode and strictness only affect new ingestion jobs. Existing KPs stay in their current nodes.
+
+**Q: When should I enable LLM tree routing?**
+Enable it when queries frequently fail to find the right node due to vocabulary mismatch — for example, if your schema uses formal terms ("Compensation & Benefits") but users ask with informal phrasing ("how much do I get paid"). LLM routing adds latency and cost (one LLM call per beam search level, batched at 40 nodes), so leave it on Keyword mode if keyword matching is working well. LLM routing results are cached (200 entries) to reduce repeat costs.
+
+**Q: Does tree routing mode affect ingestion?**
+No. Tree routing mode only affects query-time retrieval (the `/ask` pipeline). Ingestion mapping uses its own scoring logic based on the Mapping Mode and Strictness settings.

@@ -25,4 +25,10 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Service account credentials
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
 .claude/

@@ -5,7 +5,7 @@ import { getAllConnections } from "../db/datasetManager.js";
 import { runWithDb } from "../db/activeDb.js";
 import { RateLimitError } from "../utils/rateLimitError.js";
 import { JobRepo } from "../db/repositories/JobRepo.js";
-import { emitQueueUpdate } from "../utils/progressEmitter.js";
+import { emitQueueUpdate, emitJobProgress } from "../utils/progressEmitter.js";
 
 // Job queue concurrency: default 1 (sequential) to respect low OpenAI rate limits.
 // Set env INGEST_QUEUE_CONCURRENCY=2 to process multiple jobs in parallel.
@@ -13,11 +13,10 @@ const DEFAULT_CONCURRENCY = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE
 const DEFAULT_MAX_ATTEMPTS = Math.max(1, Number.parseInt(process.env.INGEST_QUEUE_MAX_ATTEMPTS || "3", 10) || 3);
 const DEFAULT_RETRY_DELAY_MS = Math.max(0, Number.parseInt(process.env.INGEST_QUEUE_RETRY_DELAY_MS || "5000", 10) || 5000);
 const CLEANUP_ON_SUCCESS = process.env.INGEST_CLEANUP_ON_SUCCESS !== "false";
-// Stuck-job timeout: 0 = disabled (default). Only enable if you know your
-// documents finish well within the threshold (e.g. INGEST_STUCK_TIMEOUT_MINUTES=60).
-// With large PDFs that take hours, leave this disabled — server-restart recovery
-// (requeueRecoverable) handles the crash/reboot case instead.
-const STUCK_JOB_TIMEOUT_MINUTES = Math.max(0, Number.parseInt(process.env.INGEST_STUCK_TIMEOUT_MINUTES || "0", 10) || 0);
+// Stuck-job timeout: default 30 minutes. Set INGEST_STUCK_TIMEOUT_MINUTES=0 to
+// disable explicitly (e.g. for very large PDFs that take hours). Server-restart
+// recovery (requeueRecoverable) handles the crash/reboot case independently.
+const STUCK_JOB_TIMEOUT_MINUTES = Math.max(0, Number.parseInt(process.env.INGEST_STUCK_TIMEOUT_MINUTES ?? "30", 10) || 0);
 // How often to run the stuck-job sweep (ms).
 const STUCK_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // How often to emit a heartbeat from a running job (ms) — used for diagnostics.
@@ -167,6 +166,7 @@ async function processClaimedJob(job, conn, datasetId) {
       // If the pipeline created a document before failing, link it to the job
       // so the unified Documents view can associate them without duplicating.
       if (result?.documentId) JobRepo.setDocumentId(conn, job.id, result.documentId);
+      emitJobProgress(job.id, 'error', 0, reason, 'failed', datasetId);
       const willRetry = failJob(conn, job, reason, result);
       if (!willRetry) maybeCleanupUploadedFile(job.file_path, "failed");
       return;
@@ -180,15 +180,18 @@ async function processClaimedJob(job, conn, datasetId) {
       // processDocument already rolled back the partial document state.
       // Pause the job so the user can resume it after their quota resets.
       if (result?.documentId) JobRepo.setDocumentId(conn, job.id, result.documentId);
+      emitJobProgress(job.id, 'rate_limited', 0, err.message, 'rate_limited', datasetId);
       pauseRateLimitedJob(conn, job, `Rate limit hit (429) — resume when quota resets: ${err.message}`);
       // Keep file on disk — job may be retried when quota resets.
     } else if (isTransientError(err)) {
       // Network/timeout failures: requeue without burning the retry budget.
       if (result?.documentId) JobRepo.setDocumentId(conn, job.id, result.documentId);
+      emitJobProgress(job.id, 'error', 0, err.message, 'failed', datasetId);
       failTransientJob(conn, job, err.message);
       // Keep file on disk for retry.
     } else {
       if (result?.documentId) JobRepo.setDocumentId(conn, job.id, result.documentId);
+      emitJobProgress(job.id, 'error', 0, err.message, 'failed', datasetId);
       const willRetry = failJob(conn, job, err.message, result);
       if (!willRetry) maybeCleanupUploadedFile(job.file_path, "failed");
     }

@@ -30,6 +30,7 @@
    - 5.5 hierarchicalRetrieve — Beam Search
    - 5.6 BM25 Node Scoring Formula
    - 5.7 Hierarchical Chunk Scoring
+   - 5.8 LLM Tree Routing
 6. [Post-Retrieval Processing](#6-post-retrieval-processing)
    - 6.1 LLM Reranker
    - 6.2 Context Expansion
@@ -79,6 +80,8 @@ src/
     qa.js                     — ask(), handleSimpleLookup(), handleAggregationQuery()
     recallNodes.js            — hybridRecallNodes, hierarchicalRecallNodes orchestrators
     hierarchicalRetrieval.js  — beam search + ancestor/sibling/descendant expansion
+    llmTreeRouter.js          — LLM-based semantic node scoring for tree navigation
+    graphTraversal.js         — getChildren(), getRootNodes() (returns description, aliases, keywords)
     nodeScoring.js            — rankNodes(), decideNode() with BM25 absolute cap
     strategies/
       bm25.js                 — bm25RecallNodes, bm25RecallChunks, simpleContentSearch
@@ -518,12 +521,12 @@ Vector similarity computed in JS (dot product + magnitude) since SQLite has no n
   trace:                   false,  // append trace[] to response
   forceQueryType:          null,   // bypass classifier
   topK:                    10,     // top nodes/chunks
-  maxChunks:               20,     // max context chunks
+  maxChunks:               12,     // max context chunks
   minConfidence:           0.0,
   hybridAlpha:             0.5,    // 0=BM25 only, 1=vector only
   rerankerThreshold:       0.3,    // minimum reranker score (0-1)
   contextWindow:           2,      // neighboring chunks on each side
-  temperature:             0.3     // LLM answer temperature
+  temperature:             0.1     // LLM answer temperature
 }
 ```
 
@@ -579,8 +582,8 @@ Classification examples from prompt:
 
 Default parameters extracted from `retrievalOptions`:
 ```js
-topK = 30, maxChunks = 20, minConfidence = 0.0, hybridAlpha = 0.5,
-rerankerThreshold = 0.3, contextWindow = 2, temperature = 0.3
+topK = 30, maxChunks = 12, minConfidence = 0.0, hybridAlpha = 0.5,
+rerankerThreshold = 0.3, contextWindow = 2, temperature = 0.1
 ```
 
 ---
@@ -640,7 +643,7 @@ directChunks = [...directChunkMap.values()].sort by relevance_score DESC
 
 ```js
 hierarchicalRetrieve(query, {
-  maxChunks,              // default 20
+  maxChunks,              // default 12
   beamWidth: 3,           // explore top 3 nodes per depth level
   maxDepth: 5,
   includeAncestors: true,
@@ -656,12 +659,26 @@ hierarchicalRetrieve(query, {
 
 **Internal beam search (`navigateTreeTopDown` in `hierarchicalRetrieval.js`):**
 
+`navigateTreeTopDown` is async and accepts a `useLlmRouting` option (reads `tree_routing_mode`
+from `dataset_config`; default `'keyword'`).
+
+**Keyword mode (default):**
 1. Start at root children: score each with `rankNodes()`.
 2. Root level: no slice (all root children explored).
 3. Depth ≥ 1: keep top `beamWidth * 2 = 6` nodes.
 4. For each beam node, score its children:
    `childScore = (childScore * 0.72 + parentScore * 0.28) * 0.96^depth`
 5. Continue until depth 5 or no more children.
+
+**LLM routing mode (`tree_routing_mode='llm'`):**
+1. ALL children are added to the next level (keyword pre-filter is bypassed).
+2. `llmScoreNodes(query, candidateNodes)` scores each node 0-10, normalized to 0-2.0.
+3. `_blendLlmScores()` merges: `max(llmScore, keywordScore)` — LLM rescues zero-keyword
+   nodes without suppressing nodes that already have strong keyword hits.
+4. Root nodes are floored at `minNodeScore` when LLM routing is on (prevents single-root
+   tree dead-end).
+5. `expandWithSiblings()` is also async and LLM-aware.
+6. See §5.8 for LLM tree router internals.
 
 **`enrichWithAncestorContext`:** For each seed node, fetch up to 2 ancestor levels.
 Fetch 2 chunks each. Apply `decay = 0.82^level`.
@@ -711,7 +728,7 @@ allChunks.sort((a, b) => {
   const scoreB = b.hierarchical_score || b.relevance_score || 0;
   return scoreB - scoreA;
 });
-let chunks = allChunks.slice(0, maxChunks);  // default 20
+let chunks = allChunks.slice(0, maxChunks);  // default 12
 ```
 
 ---
@@ -745,7 +762,13 @@ if (useReranking && chunks.length > 1) {
 2. Call LLM with `reranking` prompt (see §8): returns JSON integer array `[8,3,9,5,...]`.
 3. Normalize: `score = rawScore / 10`.
 4. Filter: `score >= minScore`.
-5. Return sorted by score descending, capped at `topK`, with `rerank_score` field added.
+5. **Score-gap cutoff:** if top score >= 6 and the gap between consecutive scores >= 3,
+   lower-scoring chunks are cut off. This prevents low-relevance chunks from diluting context.
+6. Return sorted by score descending, capped at `topK`, with `rerank_score` field added.
+
+**Document-scope filter (Step 5b):** After reranking, if the query names a specific document
+or company (term >= 5 chars found in `doc_title`), cross-document chunks are filtered out.
+This prevents irrelevant chunks from other documents bleeding into answers about a specific entity.
 
 ---
 
@@ -754,7 +777,8 @@ if (useReranking && chunks.length > 1) {
 ```js
 const expandedChunks = expandChunksWithContext(chunks, {
   windowBefore: contextWindow,   // default 2
-  windowAfter: contextWindow     // default 2
+  windowAfter: contextWindow,    // default 2
+  maxContextLength: 400          // per-side context length cap
 });
 ```
 
@@ -796,7 +820,7 @@ filtered to facts relevant to query terms.
 ```js
 const chunkContext = buildExpandedContext(expandedChunks, {
   includeNeighbors: true,
-  maxTotalLength: 7000      // max chars for chunk portion
+  maxTotalLength: 12000     // max chars for chunk portion
 });
 const context = chunkContext + factsContext;
 ```
@@ -876,7 +900,7 @@ See §6.5 for full confidence scoring algorithm.
   "facts": [{ "content": "...", "type": "attribute", "confidence": 0.9, "entities": [] }],
   "tree_paths": [["root", "Warranty", "Duration"]],
   "retrieval_sources": { "hierarchical": 12, "direct": 6 },
-  "retrieval_options": { "topK": 30, "maxChunks": 20, ... },
+  "retrieval_options": { "topK": 30, "maxChunks": 12, ... },
   "message": "Could not locate an exact node..."  // only present if usedFallback=true
 }
 ```
@@ -888,35 +912,40 @@ See §6.5 for full confidence scoring algorithm.
 Used for "What X do we have?" type queries that need to enumerate across multiple nodes.
 
 ```
-1. hierarchicalRecallNodes(query, 15, { useHierarchy: true, useAliases: true })
-   → returns top 15 candidate nodes with scores
+1. hierarchicalRetrieve(query, { beamWidth: 3, maxDepth: 5, ... })
+   → tree-retrieved chunks prepended as additional context (same as simple_lookup tree step)
 
-2. AGGREGATION_TOP_N = 8
-   → take top 8 nodes
+2. hierarchicalRecallNodes(query, 30, { useHierarchy: true, useAliases: true })
+   → returns top 30 candidate nodes with scores
 
-3. For each of the 8 nodes:
+3. AGGREGATION_TOP_N = 20
+   → take top 20 nodes
+
+4. For each of the 20 nodes:
    getChunksForNode(nodeId)  → all active chunks (no row limit)
    Push to allChunks with node_id, node_name
 
-4. Also run: searchChunksByDocTitle(query, 30)
+5. Also run: searchChunksByDocTitle(query, 30)
    → append chunks not already in allChunks (by id)
 
-5. Also run: enhancedRetrieval(query, {
+6. Also run: enhancedRetrieval(query, {
      useEntities: true, useFacts: true, useHierarchy: true,
      useMultiHop: false, queryType: 'aggregation', limit: 20 })
    → append any new chunks from entity/fact cross-reference
 
-6. Last resort if allChunks still empty: simpleContentSearch(query, 30)
+7. Tree-retrieved chunks from step 1 merged into allChunks (deduped by id)
 
-7. generateSnippetsForChunks(allChunks, query, { maxLength: 150 })
+8. Last resort if allChunks still empty: simpleContentSearch(query, 30)
+
+9. generateSnippetsForChunks(allChunks, query, { maxLength: 150 })
    → topSnippets: top 5 by snippetScore
 
-8. context = formatChunksAsContext(allChunks.slice(0, 20))
-   Format: "[Chunk {id}] Source: {doc_title} | Authority: {auth} | Type: {kp_type}\n{content}"
-   Chunks separated by "\n\n---\n\n"
+10. context = formatChunksAsContext(allChunks.slice(0, 40))
+    Format: "[Chunk {id}] Source: {doc_title} | Authority: {auth} | Type: {kp_type}\n{content}"
+    Chunks separated by "\n\n---\n\n"
 
-9. callLLMAnswer({ query, nodeId: "multiple", nodeName: sourceNames, context })
-   → JSON: { final_answer, conditions, citations, conflicts, missing_info }
+11. callLLMAnswer({ query, nodeId: "multiple", nodeName: sourceNames, context })
+    → JSON: { final_answer, conditions, citations, conflicts, missing_info }
 
 Return:
 {
@@ -943,7 +972,9 @@ Return:
 - Falls back to `handleSimpleLookup` if 0 recommendations.
 
 **Reasoning:** `handleReasoningQuery(query, classification, trace)`
-- Calls `enhancedRetrieval(query, { useMultiHop: true, ... })` for multi-hop chain.
+- First calls `hierarchicalRetrieve(query, ...)` for tree-navigated chunks.
+- Then calls `enhancedRetrieval(query, { useMultiHop: true, ... })` for multi-hop chain.
+- Tree-retrieved chunks are prepended as context to the reasoner.
 - Then calls `reason(query, { additionalContext })`.
 - Returns `reasoning_steps`, `key_facts`, `limitations`.
 
@@ -960,8 +991,8 @@ All FTS5 queries go through `escapeFtsQuery` to prevent injection of FTS5 operat
 
 ```js
 function extractSearchTerms(query) {
-  // Latin: words 2+ chars
-  const latinTokens = query.toLowerCase().match(/[a-z0-9]{2,}/g) || [];
+  // Latin: words 2+ chars OR standalone digits (captures single-digit numbers like "3", "7")
+  const latinTokens = query.toLowerCase().match(/[a-z]{2,}|\d+/g) || [];
 
   // CJK: extract character sequences, then split into 2-grams and 3-grams
   const cjkSeqs = query.match(/[\u4e00-\u9fa5]+/g) || [];
@@ -1169,6 +1200,58 @@ For each chunk:
     + lexicalBonus
 ```
 
+### 5.8 LLM Tree Routing
+
+**File:** `src/kg/llmTreeRouter.js`
+
+When `tree_routing_mode='llm'` is set in `dataset_config`, the beam search in
+`hierarchicalRetrieval.js` uses LLM-based semantic scoring to bridge vocabulary gaps
+between the query and node names/descriptions.
+
+#### `llmScoreNodes(query, candidateNodes)`
+
+Sends candidate node names, descriptions, aliases, and keywords to the LLM and asks it
+to score each node's relevance to the query on a 0-10 scale.
+
+**Key parameters:**
+```js
+const BATCH_SIZE = 40;           // max nodes per LLM call
+const CACHE_MAX  = 200;          // in-memory LRU cache entries
+const maxOutputTokens = 2048;    // gpt-5-nano reasoning needs headroom
+```
+
+**Behavior:**
+1. If <= 2 candidates: skips LLM call, returns empty Map (falls back to keyword scoring).
+2. Cache key: `normalizedQuery|sortedNodeIds` — avoids redundant LLM calls for the same
+   query-node combination.
+3. Large trees are split into sequential batches (e.g. 106 L1 nodes → 3 batches of 40).
+4. LLM returns JSON array of `{ id, score }` objects.
+5. Scores are normalized: `normalizedScore = rawScore / 10 * 2.0` (range 0-2.0).
+6. On any failure (timeout, parse error, etc.), returns empty Map — beam search falls back
+   to keyword-only scoring gracefully.
+
+#### Score Blending (`_blendLlmScores`)
+
+When LLM scores are available, they are merged with keyword scores using `max()`:
+```
+blendedScore = max(llmScore, keywordScore)
+```
+This ensures:
+- LLM **rescues** nodes with zero keyword overlap (vocabulary gap bridged).
+- LLM never **suppresses** nodes that already have strong keyword hits.
+
+#### Integration with `graphTraversal.js`
+
+`getChildren()` and `getRootNodes()` now return `node_description`, `aliases` (parsed from
+`aliases_json`), and `keywords` (parsed from `keywords_json`) — these fields are passed to
+the LLM router for richer semantic scoring.
+
+#### Configuration
+
+- `dataset_config` key: `tree_routing_mode` (default `'keyword'`)
+- API: `GET/PATCH /schema/settings` supports `tree_routing_mode` (values: `keyword` | `llm`)
+- Frontend: toggle in schema settings modal (Keyword / LLM)
+
 ---
 
 ## 6. Post-Retrieval Processing
@@ -1187,7 +1270,7 @@ See §4.3 STEP 5 for trigger conditions and normalization.
 
 **File:** `src/query/chunkExpander.js`
 
-`expandChunksWithContext(chunks, { windowBefore=1, windowAfter=1, maxContextLength=2000 })`:
+`expandChunksWithContext(chunks, { windowBefore=1, windowAfter=1, maxContextLength=400 })`:
 
 For each chunk:
 1. `ChunkRepo.getSequenceInfo(chunkId)` → `{ id, document_id, chunk_index }`.
@@ -1209,7 +1292,7 @@ WHERE document_id = ? AND chunk_index > ? AND chunk_index <= ? AND status = 'act
 ORDER BY chunk_index ASC LIMIT ?
 ```
 
-`buildExpandedContext(expandedChunks, { includeNeighbors=true, maxTotalLength=7000 })`:
+`buildExpandedContext(expandedChunks, { includeNeighbors=true, maxTotalLength=12000 })`:
 
 Format for each chunk:
 ```
@@ -1244,7 +1327,7 @@ Format for each chunk:
 
 **File:** `src/query/citationGenerator.js`
 
-`generateAnswerWithCitations(query, context, chunks, { lang, temperature=0.3, maxSources })`:
+`generateAnswerWithCitations(query, context, chunks, { lang, temperature=0.1, maxSources })`:
 
 **Step 1 — Build numbered source list:**
 ```
@@ -1317,10 +1400,10 @@ baseWeights = {
 // aggregation:    source_coverage: 1.8, retrieval_quality: 1.3
 ```
 
-**Aggregation:**
+**Aggregation (final score):**
 ```js
 overallScore = weightedSum / totalWeight;
-overallScore = overallScore * 0.92;          // mild linear scaling
+overallScore = overallScore * 0.92;          // linear scaling (replaced earlier sqrt dampening)
 if (chunks.length < 3) overallScore *= 0.85;
 if (nodes.length <= 1) overallScore *= 0.90;
 overallScore = clamp(overallScore, 0.05, 0.95);
@@ -1872,6 +1955,9 @@ CREATE TABLE dataset_config (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 -- key='lang', value='auto'|'en'|'zh-CN'|'zh-TW'
+-- key='mapping_mode', value='free'|'guided'
+-- key='mapping_strictness', value='soft'|'hard'
+-- key='tree_routing_mode', value='keyword'|'llm'
 ```
 
 ### 9.2 ChunkRepo — All SQL
@@ -2101,11 +2187,14 @@ Accessed via direct connection — never goes through the Proxy.
 | `GOOD_THRESHOLD` | 0.70 | nodeScoring.js | Confident node match score |
 | `LOW_THRESHOLD` | 0.55 | nodeScoring.js | Borderline node match score |
 | `GAP_THRESHOLD` | 0.08 | nodeScoring.js | Gap between #1 and #2 for clear winner |
-| `AGGREGATION_TOP_N` | 8 | qa.js | Max nodes for aggregation queries |
-| `maxChunks` | 20 | qa.js | Default context chunks |
+| `AGGREGATION_TOP_N` | 20 | qa.js | Max nodes for aggregation queries |
+| `maxChunks` | 12 | qa.js | Default context chunks |
 | `contextWindow` | 2 | qa.js | Neighbor chunks per side |
 | `rerankerThreshold` | 0.3 | qa.js | Min normalized reranker score |
-| `temperature` | 0.3 | qa.js | LLM answer temperature |
+| `temperature` | 0.1 | qa.js | LLM answer temperature |
+| `reranker_gap_cutoff` | top>=6, gap>=3 | reranker.js | Score-gap cutoff for low-relevance chunks |
+| `maxContextLength` | 400 | chunkExpander.js | Per-side context length cap |
+| `maxTotalLength` | 12000 | chunkExpander.js | Total expanded context length |
 | `beamWidth` | 3 | qa.js → hierarchicalRetrieval | Nodes per depth level in beam |
 | `ancestorLevels` | 2 | qa.js | Ancestor levels to enrich |
 | `siblingNodesPerSeed` | 3 | qa.js | Siblings per seed node |
@@ -2130,7 +2219,15 @@ Accessed via direct connection — never goes through the Proxy.
 | `confidence:high` | >= 0.75 | confidenceScorer.js | High confidence threshold |
 | `confidence:medium` | >= 0.55 | confidenceScorer.js | Medium confidence threshold |
 | `confidence:low` | >= 0.35 | confidenceScorer.js | Low confidence threshold |
+| `LLM_ROUTER_BATCH_SIZE` | 40 | llmTreeRouter.js | Max nodes per LLM scoring call |
+| `LLM_ROUTER_CACHE_MAX` | 200 | llmTreeRouter.js | In-memory LRU cache entries |
+| `LLM_ROUTER_maxOutputTokens` | 2048 | llmTreeRouter.js | Token limit for LLM scoring |
+| `tree_routing_mode` | `'keyword'` | initDatasetDb.js | Default tree routing mode |
+| `INGEST_SEGMENT_BATCH` | 1 | knowledgeExtractor.js | Segment batch size (env override) |
+| `INGEST_KP_BATCH` | 1 | nodeMapper.js | KP decision batch size (env override) |
+| `INGEST_BATCH_CONCURRENCY` | 1 | pipeline/index.js | Docs per batch (env override) |
+| `INGEST_QUEUE_CONCURRENCY` | 1 | jobQueue.js | Concurrent jobs (env override) |
 
 ---
 
-*End of document. All values verified directly from source code as of 2026-02-26.*
+*End of document. All values verified directly from source code as of 2026-03-09.*

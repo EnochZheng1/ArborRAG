@@ -69,15 +69,15 @@ export const JobRepo = {
   },
 
   /**
-   * Cancel all queued jobs on a specific connection (used before closing a dataset).
+   * Cancel all non-terminal jobs on a specific connection (used before closing a dataset).
    * Takes a raw better-sqlite3 connection, not the Proxy, so it works outside request context.
    * @returns {number} Number of jobs cancelled
    */
-  cancelAllQueued(conn) {
+  cancelAllOnConnection(conn) {
     return conn.prepare(`
       UPDATE ingestion_jobs
       SET status = 'cancelled', finished_at = datetime('now'), updated_at = datetime('now')
-      WHERE status = 'queued'
+      WHERE status IN ('queued', 'processing', 'rate_limited')
     `).run().changes;
   },
 
@@ -299,6 +299,22 @@ export const JobRepo = {
     const map = new Map();
     for (const r of rows) map.set(r.id, r.pos);
     return map;
+  },
+
+  purgeCompleted() {
+    return db.prepare("DELETE FROM ingestion_jobs WHERE status = 'completed'").run().changes;
+  },
+
+  purgeFailed() {
+    return db.prepare("DELETE FROM ingestion_jobs WHERE status IN ('failed', 'cancelled')").run().changes;
+  },
+
+  getQueuePosition(jobId) {
+    const row = db.prepare(`
+      SELECT COUNT(*) + 1 as position FROM ingestion_jobs
+      WHERE status = 'queued' AND id < ?
+    `).get(jobId);
+    return row?.position || null;
   },
 
   /** Touch updated_at to signal the job is still alive (heartbeat). */

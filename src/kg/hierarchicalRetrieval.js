@@ -12,11 +12,13 @@
 import { safeJson } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { queryLogger as logger } from "../utils/logger.js";
 import {
   getNode, getChildren, getAncestors, getSiblings, getDescendants,
   getPathToNode, getRelatedNodes, findCommonAncestor
 } from "./graphTraversal.js";
+import { llmScoreNodes } from "./llmTreeRouter.js";
 
 /**
  * Calculate text similarity score (simple term overlap)
@@ -213,7 +215,9 @@ function getRootNodes() {
     parent_id: r.parent_id,
     level: r.level,
     node_summary: r.node_summary,
+    node_description: r.node_description || '',
     aliases: safeJson(r.aliases_json, []),
+    keywords: safeJson(r.keywords_json, []),
     scope: safeJson(r.scope_json, {})
   }));
 }
@@ -313,12 +317,13 @@ function getNodeChunks(nodeId, query, limit = 10) {
  * Top-down tree navigation - find relevant branches
  * Uses beam search to explore most promising paths
  */
-export function navigateTreeTopDown(query, options = {}) {
+export async function navigateTreeTopDown(query, options = {}) {
   const {
     beamWidth = 3,      // How many branches to explore at each level
     maxDepth = 5,       // Maximum tree depth to explore
     minNodeScore = 0.1,  // Minimum relevance score to continue exploring
-    depthDecay = 0.96
+    depthDecay = 0.96,
+    useLlmRouting = false
   } = options;
 
   const queryTerms = extractQueryTerms(query);
@@ -326,19 +331,29 @@ export function navigateTreeTopDown(query, options = {}) {
   const visitedNodes = new Set();
 
   // Start with root nodes
-  let currentLevel = getRootNodes().map(node => ({
+  const roots = getRootNodes();
+  let currentLevel = roots.map(node => ({
     node,
     score: scoreNodeRelevance(node, query, queryTerms),
     path: [node.node_id]
   }));
 
+  // LLM hybrid scoring at root level
+  if (useLlmRouting && roots.length > 0) {
+    const llmScores = await _blendLlmScores(query, roots, currentLevel);
+    currentLevel = llmScores;
+  }
+
+  // When LLM routing is on, ensure all root nodes score at least minNodeScore
+  // so their children are always explored (depth-1 is where the LLM adds value).
+  if (useLlmRouting) {
+    for (const item of currentLevel) {
+      if (item.score < minNodeScore) item.score = minNodeScore;
+    }
+  }
+
   // Sort by score. At the root level we keep ALL nodes regardless of beamWidth.
-  // Slicing here is the primary cause of missed branches: "Company Overview" always
-  // absorbs slots by matching the company name present in every query, starving
-  // deeper topic branches (Employee Benefits, Technical Support, etc.) of a slot.
-  // Beam narrowing is applied at depth 1+ where the tree has already been focused.
   currentLevel.sort((a, b) => b.score - a.score);
-  // (no slice here — explore every root node)
 
   // Add initial nodes if they score well
   for (const item of currentLevel) {
@@ -369,13 +384,35 @@ export function navigateTreeTopDown(query, options = {}) {
         // Inherit from parent and apply depth decay to avoid drifting too deep.
         const combinedScore = (childScore * 0.72 + current.score * 0.28) * Math.pow(depthDecay, depth);
 
-        if (combinedScore >= minNodeScore) {
+        if (useLlmRouting) {
+          // When LLM routing is on, add ALL children so the LLM can evaluate
+          // nodes that have zero keyword overlap (the whole point of LLM routing).
+          // Use keyword score as initial estimate; LLM will override.
+          nextLevel.push({
+            node: child,
+            score: Math.max(combinedScore, minNodeScore), // keep alive for LLM
+            path: [...current.path, child.node_id]
+          });
+        } else if (combinedScore >= minNodeScore) {
           nextLevel.push({
             node: child,
             score: combinedScore,
             path: [...current.path, child.node_id]
           });
         }
+      }
+    }
+
+    if (nextLevel.length === 0) break;
+
+    // LLM scoring at this depth level — scores replace keyword scores
+    if (useLlmRouting && nextLevel.length > 0) {
+      const nodesAtLevel = nextLevel.map(item => item.node);
+      const blended = await _blendLlmScores(query, nodesAtLevel, nextLevel);
+      nextLevel.length = 0;
+      // After LLM scoring, apply the real minNodeScore filter
+      for (const item of blended) {
+        if (item.score >= minNodeScore) nextLevel.push(item);
       }
     }
 
@@ -402,8 +439,35 @@ export function navigateTreeTopDown(query, options = {}) {
   // Sort by relevance
   relevantNodes.sort((a, b) => b.relevance_score - a.relevance_score);
 
-  logger.debug(`Top-down navigation found ${relevantNodes.length} relevant nodes`);
+  logger.debug(`Top-down navigation found ${relevantNodes.length} relevant nodes (llm=${useLlmRouting})`);
   return relevantNodes;
+}
+
+/**
+ * Blend LLM scores with existing keyword scores for a set of candidates.
+ * Uses max(llm, keyword) so LLM can rescue nodes that keywords miss entirely
+ * (the primary value prop) without penalizing nodes that keywords already found.
+ * All candidates are sent to the LLM (batched in groups of 40 by llmScoreNodes).
+ */
+async function _blendLlmScores(query, nodes, levelItems) {
+  // Send ALL candidates to LLM — llmScoreNodes handles batching internally.
+  // Pre-filtering by keyword score would defeat LLM routing's purpose: bridging
+  // vocabulary gaps where keyword score is zero.
+  const llmScores = await llmScoreNodes(query, nodes);
+
+  if (llmScores.size === 0) {
+    return levelItems;
+  }
+
+  return levelItems.map(item => {
+    const llmResult = llmScores.get(item.node.node_id);
+    if (llmResult) {
+      // Use the higher of LLM vs keyword score.
+      // This lets LLM rescue zero-keyword nodes without suppressing keyword hits.
+      return { ...item, score: Math.max(llmResult.score, item.score) };
+    }
+    return item;
+  });
 }
 
 /**
@@ -461,12 +525,13 @@ export function enrichWithAncestorContext(chunks, options = {}) {
 /**
  * Sibling expansion - find related content in sibling nodes
  */
-export function expandWithSiblings(seedNodes, query, options = {}) {
+export async function expandWithSiblings(seedNodes, query, options = {}) {
   const {
     maxSiblings = 3,
     chunksPerSibling = 3,
     minSiblingScore = 0.15,
-    siblingDecay = 0.78
+    siblingDecay = 0.78,
+    useLlmRouting = false
   } = options;
 
   const queryTerms = extractQueryTerms(query);
@@ -482,14 +547,27 @@ export function expandWithSiblings(seedNodes, query, options = {}) {
     const seedScore = typeof seed === "string" ? 0 : (seed.relevance_score || seed.score || 0);
 
     const siblings = getSiblings(nodeId, false);
+    const unprocessed = siblings.filter(s => !processedSiblings.has(s.node_id));
+    if (unprocessed.length === 0) continue;
 
-    // Score siblings by relevance
-    const scoredSiblings = siblings
-      .filter(s => !processedSiblings.has(s.node_id))
-      .map(s => ({
-        ...s,
-        score: scoreNodeRelevance(s, query, queryTerms)
-      }))
+    // Score siblings — keyword first, then LLM override
+    let scoredSiblings = unprocessed.map(s => ({
+      ...s,
+      score: scoreNodeRelevance(s, query, queryTerms)
+    }));
+
+    // LLM scoring for siblings when enabled
+    if (useLlmRouting && unprocessed.length > 0) {
+      const llmScores = await llmScoreNodes(query, unprocessed);
+      if (llmScores.size > 0) {
+        scoredSiblings = scoredSiblings.map(s => {
+          const llm = llmScores.get(s.node_id);
+          return llm ? { ...s, score: Math.max(llm.score, s.score) } : s;
+        });
+      }
+    }
+
+    scoredSiblings = scoredSiblings
       .filter(s => s.score >= minSiblingScore)
       .sort((a, b) => b.score - a.score)
       .slice(0, maxSiblings);
@@ -723,7 +801,14 @@ export async function hierarchicalRetrieve(query, options = {}) {
   );
 
   // Step 1: Top-down navigation to find relevant branches
-  const relevantNodes = navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96 });
+  let useLlmRouting = false;
+  try {
+    const routingMode = DatasetConfigRepo.get('tree_routing_mode');
+    useLlmRouting = routingMode === 'llm';
+    if (useLlmRouting) logger.debug(`Tree routing: LLM mode enabled`);
+  } catch (_) { /* default to keyword */ }
+
+  const relevantNodes = await navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96, useLlmRouting });
   results.nodes = relevantNodes;
   results.sources.add('tree_navigation');
 
@@ -828,11 +913,12 @@ export async function hierarchicalRetrieve(query, options = {}) {
   // Step 4: Sibling expansion
   if (includeSiblings && relevantNodes.length > 0) {
     const seedNodes = relevantNodes.slice(0, 5);
-    const siblingChunks = expandWithSiblings(seedNodes, retrievalQuery, {
+    const siblingChunks = await expandWithSiblings(seedNodes, retrievalQuery, {
       maxSiblings: siblingNodesPerSeed,
       chunksPerSibling: 3,
       minSiblingScore: 0.15,
-      siblingDecay: 0.78
+      siblingDecay: 0.78,
+      useLlmRouting
     });
 
     for (const chunk of siblingChunks) {

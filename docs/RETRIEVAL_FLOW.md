@@ -43,12 +43,12 @@
 - `trace=false`
 - `forceQueryType=null`
 - `topK=10`
-- `maxChunks=20`
+- `maxChunks=12`
 - `minConfidence=0.0`
 - `hybridAlpha=0.5`
 - `rerankerThreshold=0.2`
 - `contextWindow=2`
-- `temperature=0.3`
+- `temperature=0.1`
 
 边界收敛：
 
@@ -109,6 +109,21 @@
 - `descendantDepth=2`
 - `descendantNodesPerSeed=5`
 
+**LLM 树路由模式（可选）：**
+
+当 `dataset_config` 中 `tree_routing_mode='llm'` 时，beam search 使用 LLM 语义评分替代纯关键词匹配：
+
+- `navigateTreeTopDown()` 现为 async 函数，接受 `useLlmRouting` 选项。
+- LLM 路由开启时：所有子节点加入 nextLevel（跳过关键词预过滤），由 `llmScoreNodes()` 统一评分后再筛选。
+- 分数融合策略：`max(llmScore, keywordScore)` — LLM 拯救零关键词命中的节点，但不会压制已有强关键词命中的节点。
+- 根节点设置 `minNodeScore` 下限（防止单根树死路）。
+- `expandWithSiblings()` 同样为 async + LLM 感知。
+- `llmScoreNodes()` 内部批处理：`BATCH_SIZE=40`，大树分多批顺序调用（如 106 个 L1 节点 → 3 批）。
+- LRU 缓存 200 条，key 为 `normalizedQuery|sortedNodeIds`。
+- `<=2` 候选时跳过 LLM 调用。失败时返回空 Map（回退到关键词评分）。
+
+配置方式：`GET/PATCH /schema/settings` 支持 `tree_routing_mode`（`keyword` | `llm`）。前端在 Schema 设置弹窗中提供切换。
+
 输出：
 
 - `hierarchicalChunks`
@@ -149,10 +164,12 @@
 
 重排细节：
 
-- 仅在 chunk 数 > 3 且有 LLM key 时触发。
+- 仅在 chunk 数 > 1 且有 LLM key 时触发。
 - 重排候选上限 40 条。
 - LLM 输出 0-10 分，过滤条件为 `score >= minScore * 10`。
+- **得分间隔截断**：若最高分 >= 6 且相邻分数差 >= 3，截断低分 chunk，防止低相关 chunk 稀释上下文。
 - `reranker` 结果有 5 分钟缓存。
+- **文档范围过滤**（重排后）：若 query 提及具体文档/公司名称（>= 5 字符匹配 doc_title），过滤掉跨文档 chunk。修复了类似"TechServe CEO 信息混入 Quantum Labs 结果"的问题。
 
 ### 4.7 Step G: 邻域上下文扩展
 
@@ -160,9 +177,9 @@
 
 - `windowBefore=contextWindow`
 - `windowAfter=contextWindow`
-- `maxContextLength=400`（每侧约 200 字）
+- `maxContextLength=400`（每侧约 200 字。旧默认值 2000 导致上下文拥挤，仅 ~3 条 chunk 能进入 LLM 上下文）
 
-再调用 `buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 12000 })` 形成最终 chunk 上下文。
+再调用 `buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 12000 })` 形成最终 chunk 上下文（旧默认值 7000 已调高以容纳更多 chunk）。
 
 ### 4.8 Step H: 实体事实补充
 
@@ -189,15 +206,19 @@
 
 `handleAggregationQuery()` 与 simple_lookup 不同点：
 
-1. 节点召回：
+1. **树检索前置**：先调用 `hierarchicalRetrieve(query, ...)` 获取树导航 chunk（与 simple_lookup 相同的树检索步骤）。
+2. 节点召回：
    - `useHybridSearch=true` -> `hierarchicalRecallNodes(query, 30, { useHierarchy: true, useAliases: true })`
    - 否则 `bm25RecallNodes(query, 30)`
-2. 使用节点上限：`AGGREGATION_TOP_N=20`。
-3. 对前 N 节点拉全量 chunk。
-4. 追加文档标题检索结果（处理“某文档里有什么”类问题）。
-5. 再做 `enhancedRetrieval(query, { useEntities/useFacts/useHierarchy })` 补充。
-6. 若仍为空，最后回退 `simpleContentSearch`。
-7. 将最多 40 条 chunk 组 context，调用 `callLLMAnswer` 生成聚合回答。
+3. 使用节点上限：`AGGREGATION_TOP_N=20`。
+4. 对前 N 节点拉全量 chunk。
+5. 追加文档标题检索结果（处理”某文档里有什么”类问题）。
+6. 再做 `enhancedRetrieval(query, { useEntities/useFacts/useHierarchy })` 补充。
+7. 将步骤 1 的树检索 chunk 合并到 allChunks（按 id 去重）。
+8. 若仍为空，最后回退 `simpleContentSearch`。
+9. 将最多 40 条 chunk 组 context，调用 `callLLMAnswer` 生成聚合回答。
+
+注意：此前只有 `handleSimpleLookup` 使用树导航，现在 aggregation 和 reasoning 也先做树检索以提升召回覆盖。
 
 ## 6. Reasoning / Recommendation / Comparison 差异
 
@@ -205,7 +226,9 @@
 
 `handleReasoningQuery()`：
 
-- 先调用 `enhancedRetrieval(..., useMultiHop=true, queryType="reasoning")` 获取多跳补充上下文。
+- **先调用 `hierarchicalRetrieve(query, ...)` 获取树导航 chunk**（新增步骤）。
+- 再调用 `enhancedRetrieval(..., useMultiHop=true, queryType="reasoning")` 获取多跳补充上下文。
+- 树检索 chunk 作为上下文前缀传给推理器。
 - 再调用 `reason()` 推理器。
 - 返回推理步骤、关键事实、限制项等。
 
@@ -249,13 +272,14 @@
 
 核心逻辑：
 
-1. Top-down beam search（`navigateTreeTopDown`）：
-   - 根层不按 beamWidth 截断。
+1. Top-down beam search（`navigateTreeTopDown`，现为 async）：
+   - 根层不按 beamWidth 截断（所有根节点都探索）。
    - 深层按 `beamWidth * 2` 保留。
    - 子节点分数融合：`child*0.72 + parent*0.28`，并乘 `depthDecay=0.96^depth`。
+   - **LLM 路由模式**（`tree_routing_mode='llm'`）：跳过关键词预过滤，所有子节点送入 `llmScoreNodes()` 评分后再筛选。分数融合 `max(llmScore, keywordScore)`。
 2. 从相关节点取 chunk。
 3. 祖先补充：`ancestorDecay=0.82`。
-4. 兄弟扩展：`siblingDecay=0.78`。
+4. 兄弟扩展：`siblingDecay=0.78`（`expandWithSiblings` 同样为 async + LLM 感知）。
 5. 后代探索（受限深度与数量）。
 6. 层级评分（`applyHierarchicalScoring`）：
    - 结构衰减：`structuralDecayBase=0.88`
@@ -309,7 +333,9 @@
 
 ## 12. 常见调参建议（按现状）
 
-1. 召回太少：优先增大 `maxChunks`，其次降低 `rerankerThreshold`。
-2. 跨文档串答：检查层级是否命中正确节点，必要时提高文档标题约束或加强节点命名。
-3. 数字事实漏召回：确认 `keywordTagSearch` 与实体事实表是否有对应标签/事实。
+1. 召回太少：优先增大 `maxChunks`（当前默认 12），其次降低 `rerankerThreshold`。
+2. 跨文档串答：检查层级是否命中正确节点，必要时提高文档标题约束或加强节点命名。文档范围过滤（Step 5b）可缓解此问题。
+3. 数字事实漏召回：确认 `keywordTagSearch` 与实体事实表是否有对应标签/事实。`extractSearchTerms` 现在能捕获单位数数字（如 "3", "7"）。
 4. 向量无效：先检查是否执行过 `/embeddings/sync`。
+5. 树导航命中差、词汇鸿沟：尝试开启 LLM 树路由（`tree_routing_mode='llm'`）。Schema 设置 → Tree Routing → LLM。注意会增加 LLM 调用成本。
+6. 置信度评分异常：当前使用线性缩放 `overallScore * 0.92`（已移除 sqrt 阻尼），若得分过于集中可检查各 factor 权重。

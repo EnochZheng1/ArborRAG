@@ -37,6 +37,7 @@ function initWebSocket() {
       } else if (msg.type === 'queue_update') {
         // A job was enqueued or finished — refresh the Documents view immediately
         // instead of waiting for the next polling cycle.
+        markTabsDirty('documents', 'tree', 'stats');
         _scheduleUnifiedReload();
       }
     } catch { /* ignore */ }
@@ -63,7 +64,10 @@ function _scheduleUnifiedReload() {
   _reloadDebounce = setTimeout(() => {
     _reloadDebounce = null;
     const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
-    if (docsTabActive) loadUnifiedView().catch(console.error);
+    if (docsTabActive) {
+      _tabDirty['documents'] = false; // loading now — clear the dirty flag
+      loadUnifiedView().catch(console.error);
+    }
   }, 150);
 }
 
@@ -458,6 +462,27 @@ let allDatasets = [];
 let selectedDatasetIds = new Set();
 const DATASET_KEY = 'treekb_dataset_id';
 
+// ── Tab state caching ────────────────────────────────────────────────────────
+// Tracks whether each tab's data is "dirty" (needs re-fetch on next visit).
+// A tab starts dirty (never loaded). After a successful load, it becomes clean.
+// External events (uploads, WS updates, dataset switch) mark relevant tabs dirty.
+const _tabDirty = {
+  tree: true, upload: false, documents: true, decisions: true,
+  tests: true, stats: true, datasets: true, settings: true, ask: false
+};
+// Whether there are active (queued/processing) jobs — forces documents to refresh
+let _hasActiveJobs = false;
+
+/** Mark one or more tabs as needing a refresh on next visit. */
+function markTabsDirty(...tabs) {
+  for (const t of tabs) { if (t in _tabDirty) _tabDirty[t] = true; }
+}
+
+/** Mark all tabs dirty (e.g. on dataset switch). */
+function markAllTabsDirty() {
+  for (const k of Object.keys(_tabDirty)) _tabDirty[k] = true;
+}
+
 // Query History Management
 const HISTORY_KEY = 'treekb_query_history';
 const MAX_HISTORY = 20;
@@ -646,15 +671,22 @@ function initTabs() {
       // Close mobile sidebar
       closeMobileSidebar();
 
-      // Load data for specific tabs
-      if (tabId === 'tree') { loadTree(); initSchemaPanel(); }
-      if (tabId === 'upload') loadSchemaSettings();
-      if (tabId === 'documents') loadDocuments();
-      if (tabId === 'decisions') loadDecisions();
-      if (tabId === 'tests') loadTests();
-      if (tabId === 'stats') loadStats();
-      if (tabId === 'datasets') loadDatasets();
-      if (tabId === 'settings') loadSettings();
+      // Only re-fetch data if the tab is dirty (data changed since last visit).
+      // Documents tab also refreshes when there are active jobs (to show progress).
+      const dirty = _tabDirty[tabId];
+      const needsRefresh = dirty || (tabId === 'documents' && _hasActiveJobs);
+
+      if (needsRefresh) {
+        _tabDirty[tabId] = false; // mark clean before fetch (re-dirtied if fetch fails)
+        if (tabId === 'tree')      { loadTree(); initSchemaPanel(); }
+        if (tabId === 'upload')    loadSchemaSettings();
+        if (tabId === 'documents') loadDocuments();
+        if (tabId === 'decisions') loadDecisions();
+        if (tabId === 'tests')     loadTests();
+        if (tabId === 'stats')     loadStats();
+        if (tabId === 'datasets')  loadDatasets();
+        if (tabId === 'settings')  loadSettings();
+      }
     });
   });
 }
@@ -2340,9 +2372,7 @@ async function loadNodeDetail(nodeId) {
               <strong>This node:</strong> ${debugInfo.chunks_in_this_node} chunks, ${debugInfo.mentions_for_node_chunks || 0} mentions<br>
               <strong>Database totals:</strong> ${debugInfo.total_entities_in_db} entities, ${debugInfo.total_mentions_in_db} mentions<br>
               <strong>Nodes with entities:</strong> ${nodesWithEntitiesStr}
-              ${debugInfo.total_entities_in_db === 0 ?
-                '<br><br><strong>Tip:</strong> Go to Stats tab and click "Extract Entities" to process documents.' :
-                debugInfo.entities_with_this_node_id === 0 && debugInfo.mentions_for_node_chunks === 0 ?
+              ${debugInfo.entities_with_this_node_id === 0 && debugInfo.mentions_for_node_chunks === 0 && debugInfo.total_entities_in_db > 0 ?
                 '<br><br><strong>Note:</strong> Entities exist but are linked to other nodes. This node\'s chunks may not have been extracted yet.' : ''}
             </small>
           </div>
@@ -2811,6 +2841,7 @@ async function handleUpload() {
     selectedFiles = [];
     document.getElementById('file-list').classList.add('hidden');
     document.getElementById('file-input').value = '';
+    markTabsDirty('documents', 'tree', 'stats');
     loadDocuments().catch(console.error);
   } catch (error) {
     showToast(error.message, 'error');
@@ -2836,10 +2867,18 @@ function _renderUploadJobRow(r, liveJob) {
   let statusText, statusClass;
   if (jobStatus === 'completed') { statusText = 'completed'; statusClass = 'processed'; }
   else if (jobStatus === 'processing') { statusText = 'processing'; statusClass = 'processing'; }
-  else if (jobStatus === 'queued') { statusText = 'queued'; statusClass = 'pending'; }
+  else if (jobStatus === 'queued') {
+    const pos = job?.queue_position;
+    statusText = pos != null ? `queued (#${pos})` : 'queued';
+    statusClass = 'pending';
+  }
   else if (jobStatus === 'failed') { statusText = 'failed'; statusClass = 'failed'; }
   else if (jobStatus === 'cancelled') { statusText = 'cancelled'; statusClass = 'failed'; }
-  else if (jobStatus === 'rate_limited') { statusText = 'rate limited'; statusClass = 'rate_limited'; }
+  else if (jobStatus === 'rate_limited') {
+    const attempts = job?.attempt_count;
+    statusText = attempts ? `rate limited (attempt ${attempts})` : 'rate limited';
+    statusClass = 'rate_limited';
+  }
   else if (r.success === true) { statusText = 'processed'; statusClass = 'processed'; }
   else if (r.success === false) { statusText = 'failed'; statusClass = 'failed'; }
   else { statusText = jobStatus || 'queued'; statusClass = 'pending'; }
@@ -2970,6 +3009,25 @@ function initDocuments() {
   document.getElementById('doc-status-filter').addEventListener('change', loadUnifiedView);
   document.getElementById('retry-all-docs-btn')?.addEventListener('click',  retryAllJobs);
   document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
+  document.getElementById('clear-completed-btn')?.addEventListener('click', clearCompletedJobs);
+  document.getElementById('clear-failed-btn')?.addEventListener('click', clearFailedJobs);
+}
+
+async function clearCompletedJobs() {
+  try {
+    const r = await api('/ingest/jobs/completed', { method: 'DELETE' });
+    showToast(`${r.deleted} completed job${r.deleted !== 1 ? 's' : ''} cleared.`, 'info');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function clearFailedJobs() {
+  if (!confirm('Remove all failed job records? Document data will not be deleted.')) return;
+  try {
+    const r = await api('/ingest/jobs/failed', { method: 'DELETE' });
+    showToast(`${r.deleted} failed job${r.deleted !== 1 ? 's' : ''} cleared.`, 'info');
+    loadUnifiedView();
+  } catch (err) { showToast(err.message, 'error'); }
 }
 
 window.retryJob = async function(jobId) {
@@ -3068,12 +3126,18 @@ async function loadUnifiedView() {
     }
 
     // Update bulk action button visibility
-    const hasQueued  = rows.some(r => r.status === 'queued' || r.status === 'processing' || r.status === 'rate_limited');
-    const hasPaused  = rows.some(r => r.status === 'rate_limited' || r.status === 'failed');
-    const retryBtn   = document.getElementById('retry-all-docs-btn');
-    const cancelBtn  = document.getElementById('cancel-all-docs-btn');
-    if (retryBtn)  retryBtn.style.display  = hasPaused ? '' : 'none';
-    if (cancelBtn) cancelBtn.style.display = hasQueued  ? '' : 'none';
+    const hasQueued     = rows.some(r => r.status === 'queued' || r.status === 'processing' || r.status === 'rate_limited');
+    const hasPaused     = rows.some(r => r.status === 'rate_limited' || r.status === 'failed');
+    const hasCompleted  = rows.some(r => r.row_type === 'job' && r.status === 'completed');
+    const hasFailed     = rows.some(r => r.row_type === 'job' && r.status === 'failed');
+    const retryBtn      = document.getElementById('retry-all-docs-btn');
+    const cancelBtn     = document.getElementById('cancel-all-docs-btn');
+    const clearCompBtn  = document.getElementById('clear-completed-btn');
+    const clearFailBtn  = document.getElementById('clear-failed-btn');
+    if (retryBtn)    retryBtn.style.display    = hasPaused    ? '' : 'none';
+    if (cancelBtn)   cancelBtn.style.display   = hasQueued    ? '' : 'none';
+    if (clearCompBtn) clearCompBtn.style.display = hasCompleted ? '' : 'none';
+    if (clearFailBtn) clearFailBtn.style.display = hasFailed   ? '' : 'none';
 
     if (rows.length === 0) {
       tbody.innerHTML = `<tr><td colspan="8">${renderEmptyState(
@@ -3092,10 +3156,14 @@ async function loadUnifiedView() {
 
     // Auto-refresh while jobs are queued or processing
     const hasActive = rows.some(r => r.status === 'queued' || r.status === 'processing');
+    _hasActiveJobs = hasActive;
     const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
     if (hasActive && docsTabActive) {
-      // 20s fallback poll — only a safety net; queue_update WS events handle most refreshes
-    _unifiedPollTimer = setTimeout(() => loadUnifiedView().catch(console.error), 20000);
+      // Adaptive polling: when WebSocket is connected, use long interval (safety net);
+      // when disconnected, poll more aggressively to compensate.
+      const wsConnected = _ws && _ws.readyState === WebSocket.OPEN;
+      const pollInterval = wsConnected ? 60000 : 5000;
+      _unifiedPollTimer = setTimeout(() => loadUnifiedView().catch(console.error), pollInterval);
     }
   } catch (error) {
     tbody.innerHTML = `<tr><td colspan="8" class="loading-text error">${escapeHtml(error.message)}</td></tr>`;
@@ -3135,10 +3203,11 @@ function _renderUnifiedRow(row) {
     const pct = row.processing_progress ?? 0;
     const msg = escapeHtml(row.processing_message || row.processing_step || 'Processing…');
     const elapsedStr = row.started_at ? ` · ${_elapsedSince(row.started_at)}` : '';
+    const etaStr = (pct > 5 && row.started_at) ? ` · ETA ${_estimateEta(row.started_at, pct)}` : '';
     progressCell = `
       <div class="doc-progress-wrap" id="job-progress-${row.job_id}">
         <div class="doc-progress-bar"><div class="doc-progress-fill" style="width:${pct}%"></div></div>
-        <span class="doc-progress-msg">${msg}<span class="doc-progress-elapsed">${elapsedStr}</span></span>
+        <span class="doc-progress-msg">${msg}<span class="doc-progress-elapsed">${elapsedStr}${etaStr}</span></span>
       </div>`;
   } else if (row.status === 'queued') {
     const posLabel = row.queue_position != null ? `Position ${row.queue_position} in queue` : 'Waiting in queue…';
@@ -3147,9 +3216,14 @@ function _renderUnifiedRow(row) {
     const err = row.error_message
       ? escapeHtml(row.error_message.replace(/^Rate limit hit \(429\) — resume when quota resets: /, ''))
       : 'API quota exceeded';
-    progressCell = `<span class="text-warning" title="${err}">Rate limited</span>`;
+    const attempts = row.attempt_count ? ` (attempt ${row.attempt_count})` : '';
+    progressCell = `<span class="text-warning" title="${err}">Rate limited${attempts}</span>`;
   } else if (row.status === 'failed' && row.error_message) {
-    progressCell = `<span class="text-danger" title="${escapeHtml(row.error_message)}">${escapeHtml(row.error_message.slice(0, 60))}${row.error_message.length > 60 ? '…' : ''}</span>`;
+    const short = escapeHtml(row.error_message.slice(0, 60)) + (row.error_message.length > 60 ? '…' : '');
+    const full = escapeHtml(row.error_message);
+    progressCell = row.error_message.length > 60
+      ? `<details class="error-detail"><summary class="text-danger">${short}</summary><pre class="error-detail-full">${full}</pre></details>`
+      : `<span class="text-danger">${full}</span>`;
   } else if (row.processing_step || row.processing_message) {
     progressCell = escapeHtml(row.processing_message || row.processing_step);
   }
@@ -3210,6 +3284,19 @@ function _elapsedSince(dateStr) {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
+function _estimateEta(startedAt, progressPct) {
+  if (!startedAt || progressPct <= 0) return '';
+  const normalized = String(startedAt).replace(' ', 'T') + 'Z';
+  const elapsedMs = Date.now() - new Date(normalized).getTime();
+  if (elapsedMs <= 0) return '';
+  const totalEstMs = (elapsedMs / progressPct) * 100;
+  const remainMs = totalEstMs - elapsedMs;
+  const sec = Math.max(0, Math.round(remainMs / 1000));
+  if (sec < 60) return `~${sec}s`;
+  if (sec < 3600) return `~${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `~${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
 // Keep loadDocuments as an alias so any existing callers still work
 const loadDocuments = loadUnifiedView;
 
@@ -3221,6 +3308,7 @@ window.deleteDocument = async function(id) {
   try {
     await api(`/documents/${id}`, { method: 'DELETE' });
     showToast(t('success'), 'success');
+    markTabsDirty('tree', 'stats');
     loadUnifiedView();
   } catch (error) {
     showToast(error.message, 'error');
@@ -3232,7 +3320,6 @@ function initStats() {
   document.getElementById('refresh-stats-btn').addEventListener('click', loadStats);
   document.getElementById('sync-embeddings-btn').addEventListener('click', syncEmbeddings);
   document.getElementById('sync-aliases-btn').addEventListener('click', syncAliases);
-  document.getElementById('extract-entities-btn').addEventListener('click', extractEntities);
 }
 
 async function loadStats() {
@@ -3472,32 +3559,6 @@ async function syncAliases() {
   }
 }
 
-async function extractEntities() {
-  const btn = document.getElementById('extract-entities-btn');
-  const spinner = btn.querySelector('.loading-spinner');
-
-  btn.disabled = true;
-  spinner.classList.remove('hidden');
-
-  try {
-    const result = await api('/extraction/bulk', {
-      method: 'POST',
-      body: JSON.stringify({ useLLM: true, batchSize: 5 })
-    });
-
-    const entities = result.total_entities || 0;
-    const facts = result.total_facts || 0;
-    const docs = result.documents_processed || 0;
-
-    showToast(`Extracted ${entities} entities and ${facts} facts from ${docs} documents`, 'success');
-    loadStats();
-  } catch (error) {
-    showToast(error.message, 'error');
-  } finally {
-    btn.disabled = false;
-    spinner.classList.add('hidden');
-  }
-}
 
 // ============================================
 // Query History
@@ -4141,9 +4202,13 @@ function switchDataset(id, name, reload = true) {
   const select = document.getElementById('dataset-select');
   if (select) select.value = id;
 
+  // All tabs need fresh data from the new dataset
+  markAllTabsDirty();
+
   if (reload) {
     // Reload active tab data with new dataset context
     const activeTab = document.querySelector('.nav-btn.active')?.dataset.tab;
+    _tabDirty[activeTab] = false; // loading now, so mark clean
     if (activeTab === 'tree') loadTree();
     else if (activeTab === 'ask') {
       // Clear the chat area when switching datasets
@@ -5787,12 +5852,103 @@ function renderTestList() {
     (groups[t.category] ??= []).push(t);
   }
 
-  container.innerHTML = Object.entries(groups).map(([cat, tests]) => `
-    <div class="test-group">
-      <div class="test-group-header">${escapeHtml(cat)} <span class="test-group-count">(${tests.length})</span></div>
-      ${tests.map(t => renderTestCard(t)).join('')}
-    </div>
-  `).join('');
+  // Compute per-suite status summary
+  function suiteStats(tests) {
+    let passed = 0, failed = 0, running = 0;
+    for (const t of tests) {
+      const s = testResults[t.id]?.status;
+      if (s === 'passed') passed++;
+      else if (s === 'failed') failed++;
+      else if (s === 'running') running++;
+    }
+    return { passed, failed, running, total: tests.length };
+  }
+
+  // Remember which suites were expanded (default: all collapsed)
+  const prevExpanded = container._suiteExpanded ?? {};
+
+  container.innerHTML = Object.entries(groups).map(([cat, tests]) => {
+    const slug = cat.replace(/\W+/g, '_').toLowerCase();
+    const expanded = prevExpanded[slug] ?? true; // default open
+    const stats = suiteStats(tests);
+    const statsBadges = [
+      stats.passed  ? `<span class="suite-stat suite-stat--passed">✓ ${stats.passed}</span>` : '',
+      stats.failed  ? `<span class="suite-stat suite-stat--failed">✗ ${stats.failed}</span>` : '',
+      stats.running ? `<span class="suite-stat suite-stat--running">⟳ ${stats.running}</span>` : '',
+    ].filter(Boolean).join('');
+
+    return `
+    <div class="test-suite" data-suite="${slug}">
+      <div class="test-suite-header" data-suite-toggle="${slug}">
+        <span class="suite-chevron ${expanded ? 'suite-chevron--open' : ''}">&#9654;</span>
+        <input type="checkbox" class="suite-checkbox" data-suite-check="${slug}" checked title="Select/deselect all tests in this suite">
+        <span class="suite-name">${escapeHtml(cat)}</span>
+        <span class="test-group-count">(${tests.length})</span>
+        ${statsBadges}
+        <button class="btn btn-secondary btn-xs suite-run-btn" data-run-suite="${slug}" title="Run this suite">Run Suite</button>
+      </div>
+      <div class="test-suite-body ${expanded ? '' : 'hidden'}" data-suite-body="${slug}">
+        ${tests.map(t => renderTestCard(t)).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  // ── Wire suite interactions ───────────────────────────────────────────────
+  // Toggle expand/collapse
+  container.querySelectorAll('[data-suite-toggle]').forEach(hdr => {
+    hdr.addEventListener('click', (e) => {
+      // Don't toggle when clicking checkbox, run button, or inner controls
+      if (e.target.closest('.suite-checkbox, .suite-run-btn, [data-run-test], [data-delete-test]')) return;
+      const slug = hdr.dataset.suiteToggle;
+      const body = container.querySelector(`[data-suite-body="${slug}"]`);
+      const chevron = hdr.querySelector('.suite-chevron');
+      if (!body) return;
+      const wasOpen = !body.classList.contains('hidden');
+      body.classList.toggle('hidden');
+      chevron?.classList.toggle('suite-chevron--open', !wasOpen);
+      // Persist state
+      container._suiteExpanded ??= {};
+      container._suiteExpanded[slug] = !wasOpen;
+    });
+  });
+
+  // Suite select-all checkbox
+  container.querySelectorAll('.suite-checkbox').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const slug = cb.dataset.suiteCheck;
+      const body = container.querySelector(`[data-suite-body="${slug}"]`);
+      if (!body) return;
+      body.querySelectorAll('.test-checkbox').forEach(tc => { tc.checked = cb.checked; });
+    });
+  });
+
+  // Individual checkbox → sync suite checkbox state
+  container.querySelectorAll('.test-checkbox').forEach(tc => {
+    tc.addEventListener('change', () => {
+      const suite = tc.closest('.test-suite');
+      if (!suite) return;
+      const slug = suite.dataset.suite;
+      const all = suite.querySelectorAll('.test-checkbox');
+      const checked = suite.querySelectorAll('.test-checkbox:checked');
+      const suiteCb = container.querySelector(`[data-suite-check="${slug}"]`);
+      if (suiteCb) {
+        suiteCb.checked = checked.length === all.length;
+        suiteCb.indeterminate = checked.length > 0 && checked.length < all.length;
+      }
+    });
+  });
+
+  // Run Suite button
+  container.querySelectorAll('[data-run-suite]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const slug = btn.dataset.runSuite;
+      const body = container.querySelector(`[data-suite-body="${slug}"]`);
+      if (!body) return;
+      const ids = [...body.querySelectorAll('.test-checkbox')].map(cb => cb.dataset.testId);
+      if (ids.length) runTests('explicit', null, ids);
+    });
+  });
 
   // Wire individual Run buttons
   container.querySelectorAll('[data-run-test]').forEach(btn => {
@@ -5863,7 +6019,6 @@ function renderTestCard(test) {
         <div class="test-card-info">
           <div class="test-card-header">
             <span class="test-card-name">${escapeHtml(test.name)}</span>
-            <span class="test-card-cat">${escapeHtml(test.category)}</span>
           </div>
           <div class="test-card-desc">${escapeHtml(test.description || test.query || '')}</div>
           ${assertionHint}
@@ -5879,12 +6034,14 @@ function renderTestCard(test) {
 
 // ── Run tests ─────────────────────────────────────────────────────────────────
 
-async function runTests(mode, singleId = null) {
+async function runTests(mode, singleId = null, explicitIds = null) {
   if (isRunning) return;
 
   let ids;
   if (mode === 'single') {
     ids = [singleId];
+  } else if (mode === 'explicit' && explicitIds) {
+    ids = explicitIds;
   } else if (mode === 'selected') {
     ids = [...document.querySelectorAll('.test-checkbox:checked')].map(cb => cb.dataset.testId);
     if (ids.length === 0) { showToast('No tests selected', 'error'); return; }
@@ -5924,55 +6081,66 @@ async function runTests(mode, singleId = null) {
   }
   // ───────────────────────────────────────────────────────────────────────────
 
-  // Mark all as running
-  for (const id of ids) {
-    testResults[id] = { status: 'running', detail: '' };
-    updateCard(id);
-  }
-  updateSummary();
-
-  // Execute each test sequentially
-  for (const id of ids) {
-    const test = allTests.find(t => t.id === id);
-    if (!test) { testResults[id] = { status: 'failed', detail: 'Test not found' }; updateCard(id); continue; }
-    try {
-      const result = await test.run(apiCallWrapper);
-      testResults[id] = { status: result.passed ? 'passed' : 'failed', detail: result.detail ?? '' };
-    } catch (err) {
-      testResults[id] = { status: 'failed', detail: err.message };
+  try {
+    // Mark all as running
+    for (const id of ids) {
+      testResults[id] = { status: 'running', detail: '' };
+      updateCard(id);
     }
-    updateCard(id);
     updateSummary();
-  }
 
-  isRunning = false;
-  document.getElementById('run-all-tests-btn').disabled = false;
-  document.getElementById('run-selected-tests-btn').disabled = false;
-
-  const passed = ids.filter(id => testResults[id]?.status === 'passed').length;
-  const failed = ids.filter(id => testResults[id]?.status === 'failed').length;
-  showToast(`Tests complete: ${passed} passed, ${failed} failed`, failed > 0 ? 'error' : 'success');
-
-  renderTestReport(ids);
-
-  // ── Post-run cleanup ────────────────────────────────────────────────────────
-  // Restore original dataset first so the UI lands on the right context
-  currentDatasetId   = savedDatasetId;
-  currentDatasetName = savedDatasetName;
-
-  // Delete the isolated test dataset (and everything it contains)
-  if (testDatasetId) {
-    try {
-      await api(`/datasets/${testDatasetId}?confirm=yes`, { method: 'DELETE' });
-      showToast('Test dataset deleted — knowledge base is clean', 'success');
-    } catch (err) {
-      showToast(`Warning: test dataset ${testDatasetId} could not be deleted — please remove it manually`, 'error');
+    // Execute each test sequentially
+    for (const id of ids) {
+      const test = allTests.find(t => t.id === id);
+      if (!test) { testResults[id] = { status: 'failed', detail: 'Test not found' }; updateCard(id); continue; }
+      try {
+        const result = await test.run(apiCallWrapper);
+        testResults[id] = { status: result.passed ? 'passed' : 'failed', detail: result.detail ?? '' };
+      } catch (err) {
+        testResults[id] = { status: 'failed', detail: err.message };
+      }
+      updateCard(id);
+      updateSummary();
     }
-  }
 
-  // Reset shared accuracy test state
-  accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
-  // ───────────────────────────────────────────────────────────────────────────
+    const passed = ids.filter(id => testResults[id]?.status === 'passed').length;
+    const failed = ids.filter(id => testResults[id]?.status === 'failed').length;
+    showToast(`Tests complete: ${passed} passed, ${failed} failed`, failed > 0 ? 'error' : 'success');
+
+    renderTestReport(ids);
+  } finally {
+    // ── Post-run cleanup (ALWAYS runs, even if tests throw) ─────────────────
+    isRunning = false;
+    document.getElementById('run-all-tests-btn').disabled = false;
+    document.getElementById('run-selected-tests-btn').disabled = false;
+
+    // Restore original dataset first so the UI lands on the right context
+    currentDatasetId   = savedDatasetId;
+    currentDatasetName = savedDatasetName;
+
+    // Delete the isolated test dataset (and everything it contains)
+    if (testDatasetId) {
+      // Wait briefly for any in-flight ingestion jobs to be cancelled by deleteDataset
+      try {
+        await api(`/datasets/${testDatasetId}?confirm=yes`, { method: 'DELETE' });
+        showToast('Test dataset deleted — knowledge base is clean', 'success');
+      } catch (err) {
+        // Retry once after a short delay — the dataset might have a busy connection
+        try {
+          await new Promise(r => setTimeout(r, 2000));
+          await api(`/datasets/${testDatasetId}?confirm=yes`, { method: 'DELETE' });
+          showToast('Test dataset deleted — knowledge base is clean', 'success');
+        } catch (retryErr) {
+          showToast(`Warning: test dataset could not be deleted — please remove it manually`, 'error');
+        }
+      }
+    }
+
+    // Reset shared accuracy test state
+    accuracyState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+    multidocState = { jobId: null, docId: null, chunkCount: 0, ingested: false };
+    // ─────────────────────────────────────────────────────────────────────────
+  }
 }
 
 /** Delete any [Test Run] datasets left behind by a previously crashed test suite. */
@@ -6443,6 +6611,12 @@ function initSchemaPanel() {
     document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   });
+  document.getElementById('tree-routing-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
 
   loadSchemaSettings();
   loadSchemaTemplates();
@@ -6614,6 +6788,9 @@ async function openSchemaSettings() {
   document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.value === s.mapping_strictness);
   });
+  document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === (s.tree_routing_mode || 'keyword'));
+  });
   const strictness = document.getElementById('strictness-group');
   if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
   document.getElementById('schema-settings-modal').classList.remove('hidden');
@@ -6622,10 +6799,11 @@ async function openSchemaSettings() {
 async function saveSchemaSettings() {
   const mode       = document.querySelector('#mapping-mode-toggle .toggle-btn.active')?.dataset.value || 'free';
   const strictness = document.querySelector('#mapping-strictness-toggle .toggle-btn.active')?.dataset.value || 'soft';
+  const routing    = document.querySelector('#tree-routing-toggle .toggle-btn.active')?.dataset.value || 'keyword';
   try {
     await api('/schema/settings', {
       method: 'PATCH',
-      body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness })
+      body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness, tree_routing_mode: routing })
     });
     showToast('Schema settings saved', 'success');
     document.getElementById('schema-settings-modal').classList.add('hidden');

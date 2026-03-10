@@ -16,6 +16,7 @@ import {
   retryAllIngestionJobs,
   getIngestionQueueStats
 } from "../ingest/jobQueue.js";
+import { JobRepo } from "../db/repositories/JobRepo.js";
 import { runWithDb } from "../db/activeDb.js";
 import { apiLogger } from "../utils/logger.js";
 
@@ -165,6 +166,26 @@ router.post("/ingest/jobs/retry-all", (req, res) => {
     res.json({ success: true, retried });
   } catch (err) {
     apiLogger.error("Retry all jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete("/ingest/jobs/completed", (req, res) => {
+  try {
+    const deleted = JobRepo.purgeCompleted();
+    res.json({ ok: true, deleted });
+  } catch (err) {
+    apiLogger.error("Purge completed jobs error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete("/ingest/jobs/failed", (req, res) => {
+  try {
+    const deleted = JobRepo.purgeFailed();
+    res.json({ ok: true, deleted });
+  } catch (err) {
+    apiLogger.error("Purge failed jobs error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

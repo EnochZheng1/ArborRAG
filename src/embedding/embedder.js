@@ -1,8 +1,12 @@
+import path from "path";
+import { fileURLToPath } from "url";
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { embedLogger as logger } from "../utils/logger.js";
 import { recordTokenUsage } from "../utils/tokenTracker.js";
 import { llmConfig, getCurrentEmbedModel } from "../utils/llm.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Embedding generation — supports OpenAI and Gemini via llmConfig.
@@ -32,9 +36,20 @@ let _openaiClient = null;
 
 function getGeminiClient() {
   if (!_geminiClient) {
-    const apiKey = llmConfig.gemini.apiKey;
-    if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
-    _geminiClient = new GoogleGenAI({ apiKey });
+    const cfg = llmConfig.gemini;
+    if (cfg.vertexai) {
+      const opts = { vertexai: true, project: cfg.project, location: cfg.location };
+      if (cfg.serviceAccountKeyFile) {
+        const keyPath = path.isAbsolute(cfg.serviceAccountKeyFile)
+          ? cfg.serviceAccountKeyFile
+          : path.resolve(__dirname, '../../', cfg.serviceAccountKeyFile);
+        opts.googleAuthOptions = { keyFile: keyPath };
+      }
+      _geminiClient = new GoogleGenAI(opts);
+    } else {
+      if (!cfg.apiKey) throw new Error("GEMINI_API_KEY is not configured (set VERTEX_AI=true for Vertex AI)");
+      _geminiClient = new GoogleGenAI({ apiKey: cfg.apiKey });
+    }
   }
   return _geminiClient;
 }

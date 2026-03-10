@@ -184,8 +184,8 @@ export function deleteDataset(id) {
     // Cancel queued jobs so the pump doesn't pick them up after the connection closes.
     // In-flight jobs will naturally fail when their next DB call throws on the closed conn.
     try {
-      const cancelled = JobRepo.cancelAllQueued(conn);
-      if (cancelled > 0) logger.warn(`Cancelled ${cancelled} queued job(s) for deleted dataset '${dataset.name}'`);
+      const cancelled = JobRepo.cancelAllOnConnection(conn);
+      if (cancelled > 0) logger.warn(`Cancelled ${cancelled} active job(s) for deleted dataset '${dataset.name}'`);
     } catch (_) {}
     try { conn.close(); } catch (_) {}
     pool.delete(id);

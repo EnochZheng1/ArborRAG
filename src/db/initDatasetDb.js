@@ -278,6 +278,7 @@ function initDatasetConfigTable(conn) {
   conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('language', 'auto')`).run();
   conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('mapping_mode', 'free')`).run();
   conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('mapping_strictness', 'soft')`).run();
+  conn.prepare(`INSERT OR IGNORE INTO dataset_config (key, value) VALUES ('tree_routing_mode', 'keyword')`).run();
 }
 
 function initFeedbackTables(conn) {

@@ -52,9 +52,15 @@
 
 默认参数（可通过环境变量覆盖）：
 
-- 并发：`INGEST_QUEUE_CONCURRENCY=2`
+- 并发：`INGEST_QUEUE_CONCURRENCY=1`（默认顺序执行，防止 rate-limit；设为 2+ 可恢复并行）
 - 最大重试：`INGEST_QUEUE_MAX_ATTEMPTS=3`
 - 重试间隔：`INGEST_QUEUE_RETRY_DELAY_MS=5000`
+
+其他批处理大小（均默认为 1，顺序执行；可通过环境变量调大以恢复并行）：
+
+- `INGEST_SEGMENT_BATCH=1`：KP 提取时的分段批次大小（原默认 4）
+- `INGEST_KP_BATCH=1`：KP 决策引擎批次大小（原默认 8）
+- `INGEST_BATCH_CONCURRENCY=1`：pipeline 中每批文档并发数（原默认 3）
 
 状态流转：
 
@@ -131,16 +137,18 @@
 
 1. 识别权威等级（`policy/sop/training/personal`）。
 2. 若开启 LLM：
+   - **章节标题检测**：`detectSectionHeadings()` 识别文本中的标题结构（正则匹配全大写行、markdown `#`、编号章节）。支持 CJK 标题格式：`第X章/节`、`一、`/`（一）` 等。检测到的标题结构作为上下文传递给 KP 提取提示词。
    - 文本按 `5000` 字符分段，`500` 重叠，尽量按段落边界切分。
-   - 每段调用 `kpExtraction` 提示词，`temperature=0.1`。
-   - 每段之间延迟 `200ms`。
+   - 每段调用 `kpExtraction` 提示词，`temperature=0.0, seed=42`（所有 ingestion LLM 调用均使用 temperature 0.0 + seed 42 以提高确定性）。
+   - 每段之间延迟 `200ms`。批次大小由 `INGEST_SEGMENT_BATCH` 控制（默认 1，顺序执行）。
    - 单段失败则降级为段落切分兜底。
 3. 若关闭 LLM 或无 Key：
    - 直接按空行切段（段长 >= 50）生成 `legacy_chunk`。
+   - **段落兜底 chunk**：`extractParagraphFallbacks()` 按 `\n\n` 分割，合并短段，过滤 >= 80 字符，上限 15 条。`kp_type: "paragraph_context"`，`topic_hint: "General"`（根节点）。与已有 KP 去重阈值 0.85 Dice。
 4. 归一化 KP：
    - `statement` 少于 10 字符丢弃。
    - `kp_type` 约束在 `fact/rule/definition/procedure/example/context`。
-   - `content = statement (+ source_excerpt)`，保留原文数字细节用于检索。
+   - `content = "${statement}\n${sourceExcerpt}"`，将原文摘录拼接在 statement 后面，确保原文中的数字等细节始终可通过 FTS5 检索。
 5. 跨分段去重：
    - 用 `wordDiceSimilarity`，阈值 `0.90`。
 6. 重建连续 `index`。
