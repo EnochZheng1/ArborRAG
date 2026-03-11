@@ -1,8 +1,9 @@
 /**
  * DecisionRepo — CRUD for the pending_decisions table.
  *
- * Decisions are created by the KP Decision Engine when borderline cases
- * (Dice in [0.70, 0.90)) need human review before a merge or replace is executed.
+ * Decisions are created by the KP Decision Engine when human review is needed:
+ * value_conflict (LLM-detected contradictions), replace_suggestion (temporal updates),
+ * and node_merge_suggestion (similar sibling nodes).
  */
 
 import { db } from "../db.js";
@@ -97,7 +98,7 @@ export const DecisionRepo = {
     `).run(...chunkIds, ...chunkIds).changes;
   },
 
-  /** Back-fill incoming_chunk_id on the most recent pending decision for a node. */
+  /** Back-fill incoming_chunk_id on the most recent pending decision for a node (legacy fallback). */
   updateIncomingChunkId(nodeId, chunkId) {
     return db.prepare(`
       UPDATE pending_decisions
@@ -108,6 +109,24 @@ export const DecisionRepo = {
         ORDER BY created_at DESC LIMIT 1
       )
     `).run(chunkId, nodeId);
+  },
+
+  /** Back-fill incoming_chunk_id by exact decision ID (preferred over node-based match). */
+  updateIncomingChunkIdById(decisionId, chunkId) {
+    return db.prepare(`
+      UPDATE pending_decisions
+      SET incoming_chunk_id = ?
+      WHERE id = ? AND incoming_chunk_id IS NULL
+    `).run(chunkId, decisionId);
+  },
+
+  /** Bulk-reject all pending decisions of a given action type. Returns count of affected rows. */
+  bulkRejectByAction(action) {
+    return db.prepare(`
+      UPDATE pending_decisions
+      SET status = 'rejected', resolved_at = datetime('now'), resolved_by = 'system'
+      WHERE status = 'pending' AND action = ?
+    `).run(action).changes;
   },
 
   /** Counts per status. Returns { pending, accepted, rejected, auto_resolved, total }. */
@@ -121,5 +140,16 @@ export const DecisionRepo = {
       counts.total += r.n;
     }
     return counts;
+  },
+
+  /** Counts of pending decisions grouped by action type. Returns array of { action, count }. */
+  countPendingByAction() {
+    return db.prepare(`
+      SELECT action, COUNT(*) as count
+      FROM pending_decisions
+      WHERE status = 'pending'
+      GROUP BY action
+      ORDER BY count DESC
+    `).all();
   }
 };

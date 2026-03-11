@@ -49,14 +49,14 @@ router.get("/history", (req, res) => {
 /**
  * POST /manage/revert/:id
  */
-router.post("/revert/:id", (req, res) => {
+router.post("/revert/:id", async (req, res) => {
   try {
     const auditId = parseInt(req.params.id, 10);
     if (isNaN(auditId)) {
       return res.status(400).json({ error: "Invalid audit ID" });
     }
 
-    const result = revertChange(auditId);
+    const result = await revertChange(auditId);
     res.json(result);
   } catch (err) {
     logger.error(`[manage:revert] ${err.message}`);

@@ -7,6 +7,8 @@ import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { logAudit, runTransaction } from "../../db/db.js";
 import { logger } from "../../utils/logger.js";
+import { embedNewChunk } from "../../embedding/chunkEmbeddings.js";
+import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
 
 /**
  * Get recent chatbot changes (for history display).
@@ -49,7 +51,7 @@ function describeChange(change) {
  * @param {number} auditId - The audit_log row ID to revert
  * @returns {{ success: boolean, description: string }}
  */
-export function revertChange(auditId) {
+export async function revertChange(auditId) {
   const entry = AuditRepo.getById(auditId);
   if (!entry) {
     return { success: false, description: "Change not found." };
@@ -64,11 +66,11 @@ export function revertChange(auditId) {
   try {
     switch (entry.action) {
       case "chatbot_add":
-        return revertAdd(entry);
+        return await revertAdd(entry);
       case "chatbot_edit":
-        return revertEdit(entry);
+        return await revertEdit(entry);
       case "chatbot_delete":
-        return revertDelete(entry);
+        return await revertDelete(entry);
       default:
         return { success: false, description: `Unknown action: ${entry.action}` };
     }
@@ -81,7 +83,7 @@ export function revertChange(auditId) {
 /**
  * Revert an ADD → delete the chunk that was added.
  */
-function revertAdd(entry) {
+async function revertAdd(entry) {
   const chunkId = Number(entry.record_id);
   const chunk = ChunkRepo.getById(chunkId);
   if (!chunk) {
@@ -95,6 +97,7 @@ function revertAdd(entry) {
       { reverted_audit_id: entry.id, reverted_action: "chatbot_add" });
   });
 
+  invalidateVectorCache();
   logger.info(`[manage:undo] Reverted ADD — deleted chunk ${chunkId}`);
   return { success: true, description: "Reverted: removed the added knowledge point." };
 }
@@ -102,7 +105,7 @@ function revertAdd(entry) {
 /**
  * Revert an EDIT → restore the old content.
  */
-function revertEdit(entry) {
+async function revertEdit(entry) {
   const chunkId = Number(entry.record_id);
   const chunk = ChunkRepo.getById(chunkId);
   if (!chunk) {
@@ -122,6 +125,13 @@ function revertEdit(entry) {
       { content_clean: oldContent, reverted_audit_id: entry.id, reverted_action: "chatbot_edit" });
   });
 
+  try {
+    await embedNewChunk(chunkId);
+    invalidateVectorCache();
+  } catch (e) {
+    logger.warn(`[manage:undo] Auto-embed failed (non-fatal): ${e.message}`);
+  }
+
   logger.info(`[manage:undo] Reverted EDIT — restored chunk ${chunkId}`);
   return { success: true, description: "Reverted: restored the previous content." };
 }
@@ -129,7 +139,7 @@ function revertEdit(entry) {
 /**
  * Revert a DELETE → re-insert the chunk from snapshot.
  */
-function revertDelete(entry) {
+async function revertDelete(entry) {
   const old = entry.old_value;
   if (!old || !old.content_clean) {
     return { success: false, description: "No snapshot available to restore deleted content." };
@@ -159,9 +169,16 @@ function revertDelete(entry) {
       { content_clean: old.content_clean, reverted_audit_id: entry.id, reverted_action: "chatbot_delete" });
   });
 
+  try {
+    await embedNewChunk(newChunkId);
+    invalidateVectorCache();
+  } catch (e) {
+    logger.warn(`[manage:undo] Auto-embed failed (non-fatal): ${e.message}`);
+  }
+
   logger.info(`[manage:undo] Reverted DELETE — re-inserted as chunk ${newChunkId}`);
   return {
     success: true,
-    description: "Reverted: re-inserted the deleted knowledge point. Run embedding sync to update search indexes."
+    description: "Reverted: re-inserted the deleted knowledge point."
   };
 }

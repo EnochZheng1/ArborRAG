@@ -4,6 +4,7 @@ import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getFullTree, getNode, getChildren, getNodeWithContext, getTreeStats } from "../kg/graphTraversal.js";
 import { createNode, generateAndSaveAliases, generateAliasesForAllNodes } from "../ingest/nodeMapper.js";
 import { getNodeEntitiesAndFacts } from "../extraction/entityFactExtractor.js";
+import { runTransaction, logAudit } from "../db/db.js";
 import { apiLogger } from "../utils/logger.js";
 
 const router = express.Router();
@@ -102,6 +103,54 @@ router.put("/nodes/:id", (req, res) => {
     res.json(getNode(nodeId));
   } catch (err) {
     apiLogger.error("Update node error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a node (re-parents children, deletes all chunks)
+router.delete("/nodes/:id", (req, res) => {
+  try {
+    const nodeId = req.params.id;
+    if (nodeId === "root") return res.status(400).json({ error: "Cannot delete the root node" });
+
+    const node = NodeRepo.findById(nodeId);
+    if (!node) return res.status(404).json({ error: "Node not found" });
+
+    const children = NodeRepo.findByParent(nodeId);
+    const chunkIds = NodeRepo.getChunkIdsForNode(nodeId);
+
+    runTransaction(() => {
+      // Re-parent children to this node's parent
+      if (children.length > 0) {
+        const newParentId = node.parent_id || null;
+        const newLevel = node.level; // children take deleted node's level
+        NodeRepo.reparentChildren(nodeId, newParentId, newLevel);
+      }
+
+      // Delete all chunks belonging to this node
+      for (const id of chunkIds) {
+        ChunkRepo.deleteById(id);
+      }
+
+      // Delete the node itself
+      NodeRepo.deleteNode(nodeId);
+
+      // Audit
+      logAudit("delete_node", "nodes", nodeId, {
+        name: node.name, parent_id: node.parent_id, level: node.level,
+        chunks_deleted: chunkIds.length, children_reparented: children.length
+      }, null);
+    });
+
+    apiLogger.info(`Deleted node ${nodeId} (${node.name}): ${chunkIds.length} chunks removed, ${children.length} children re-parented`);
+    res.json({
+      ok: true,
+      name: node.name,
+      chunksDeleted: chunkIds.length,
+      childrenReparented: children.length
+    });
+  } catch (err) {
+    apiLogger.error("Delete node error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

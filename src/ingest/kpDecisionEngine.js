@@ -22,8 +22,7 @@ import { getCustomPrompt } from "../prompts/promptManager.js";
 
 const IGNORE_CONF_THRESHOLD   = 0.35;
 const IGNORE_MIN_LENGTH       = 15;
-const MERGE_AUTO_THRESHOLD    = 0.90;
-const MERGE_QUEUE_THRESHOLD   = 0.70;
+const MERGE_AUTO_THRESHOLD    = 0.80;
 const REPLACE_AUTO_CONF       = 0.85;
 
 // ── Authority ranks ───────────────────────────────────────────────────────────
@@ -57,6 +56,36 @@ function isBoilerplate(content) {
   return BOILERPLATE_PATTERNS.some(re => re.test(trimmed));
 }
 
+// ── Value extraction for conflict detection ──────────────────────────────────
+
+function extractKeyValues(text) {
+  const vals = [];
+  // Quantities with units: "15 days", "4 hours", "90%"
+  for (const m of text.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi)) {
+    vals.push(m[0].toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  // Currency: "$5,000"
+  for (const m of text.matchAll(/[$¥€£]\s?[\d,]+(?:\.\d+)?/g)) {
+    vals.push(m[0].replace(/\s/g, ''));
+  }
+  // ISO dates: "2024-01-15"
+  for (const m of text.matchAll(/\b\d{4}-\d{2}(?:-\d{2})?\b/g)) {
+    vals.push(m[0]);
+  }
+  return vals;
+}
+
+function hasValueMismatch(textA, textB) {
+  const valsA = extractKeyValues(textA);
+  const valsB = extractKeyValues(textB);
+  if (valsA.length === 0 || valsB.length === 0) return false;
+  const setA = new Set(valsA);
+  const setB = new Set(valsB);
+  if (setA.size !== setB.size) return true;
+  for (const v of setA) if (!setB.has(v)) return true;
+  return false;
+}
+
 // ── Temporal signal detection ─────────────────────────────────────────────────
 
 const TEMPORAL_PATTERNS = [
@@ -80,34 +109,40 @@ function detectTemporalSignal(content) {
 
 // ── LLM helpers ───────────────────────────────────────────────────────────────
 
-async function normalizeWithLLM(kpContent, existingContent) {
+async function checkConflictOrNormalize(kpContent, existingContent) {
   if (!isLlmConfigured()) return null;
 
   const prompt = getCustomPrompt('kpNormalization', {
     statementA: kpContent.slice(0, 400),
     statementB: existingContent.slice(0, 400)
-  }) ?? `Two knowledge statements are about the same topic. Merge them into one canonical statement.
-
-Rules:
-1. Preserve ALL specific numbers, percentages, durations, and dates from BOTH statements (e.g., "90 days", "85%", "7 hours").
-2. When one statement is more specific than the other, keep the more specific phrasing.
-3. The result must be factually precise and complete.
+  }) ?? `Compare these two knowledge statements about the same topic.
 
 Statement A: "${kpContent.slice(0, 400)}"
 Statement B: "${existingContent.slice(0, 400)}"
 
-Return JSON only: {"canonical": "...", "confidence": 0.0-1.0}`;
+Determine:
+1. AGREE — both convey the same fact (possibly different wording). Merge into one canonical statement preserving ALL specific numbers, dates, percentages.
+2. CONFLICT — they state contradictory information (different numbers, dates, statuses, etc. for the same thing). Identify the specific difference.
+
+Return JSON only:
+- If agree: {"relationship":"agree","canonical":"...","confidence":0.0-1.0}
+- If conflict: {"relationship":"conflict","conflict_detail":"A says X while B says Y","confidence":0.0-1.0}`;
 
   try {
     const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 300, taskName: 'kp_normalize' });
     const parsed = await parseLLMJson(text, 'object', { context: 'kp_normalize', fallback: null });
-    if (parsed && typeof parsed.canonical === "string" && parsed.canonical.length >= 10) {
-      return { canonical: parsed.canonical, confidence: parsed.confidence ?? 0.8 };
+    if (!parsed) return null;
+
+    if (parsed.relationship === "conflict" && parsed.conflict_detail) {
+      return { relationship: "conflict", conflict_detail: parsed.conflict_detail, confidence: parsed.confidence ?? 0.8 };
+    }
+    if (typeof parsed.canonical === "string" && parsed.canonical.length >= 10) {
+      return { relationship: "agree", canonical: parsed.canonical, confidence: parsed.confidence ?? 0.8 };
     }
     return null;
   } catch (err) {
     rethrowIfRateLimit(err);
-    logger.warn(`normalizeWithLLM failed: ${err.message}`);
+    logger.warn(`checkConflictOrNormalize failed: ${err.message}`);
     return null;
   }
 }
@@ -168,37 +203,25 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
   }
 
   if (bestCandidate && bestSim >= MERGE_AUTO_THRESHOLD) {
-    // Auto-merge: add this doc to source_documents_json
-    const existingDocs = safeJson(bestCandidate.source_documents_json, []);
-    const alreadyTracked = existingDocs.some(d => d.doc_id === documentId);
-    if (!alreadyTracked) {
-      const merged = [...existingDocs, {
-        doc_id:    documentId,
-        doc_title: kp.doc_title || "",
-        excerpt:   kp.source_excerpt || content.slice(0, 200)
-      }];
-      ChunkRepo.updateSourceDocuments(bestCandidate.id, JSON.stringify(merged));
+    // Check for value mismatch before auto-merging
+    if (hasValueMismatch(content, bestCandidate.content_clean || "")) {
+      // Values differ — fall through to LLM conflict detection
+      logger.debug(`KP skipped auto-merge (value mismatch at Dice ${bestSim.toFixed(2)})`);
+    } else {
+      // Safe to auto-merge: add this doc to source_documents_json
+      const existingDocs = safeJson(bestCandidate.source_documents_json, []);
+      const alreadyTracked = existingDocs.some(d => d.doc_id === documentId);
+      if (!alreadyTracked) {
+        const merged = [...existingDocs, {
+          doc_id:    documentId,
+          doc_title: kp.doc_title || "",
+          excerpt:   kp.source_excerpt || content.slice(0, 200)
+        }];
+        ChunkRepo.updateSourceDocuments(bestCandidate.id, JSON.stringify(merged));
+      }
+      logger.debug(`KP auto-merged into chunk ${bestCandidate.id} (Dice ${bestSim.toFixed(2)})`);
+      return { action: "MERGE", chunkId: bestCandidate.id, reason: `auto-merge (Dice ${bestSim.toFixed(2)})` };
     }
-    logger.debug(`KP auto-merged into chunk ${bestCandidate.id} (Dice ${bestSim.toFixed(2)})`);
-    return { action: "MERGE", chunkId: bestCandidate.id, reason: `auto-merge (Dice ${bestSim.toFixed(2)})` };
-  }
-
-  if (bestCandidate && bestSim >= MERGE_QUEUE_THRESHOLD) {
-    // Borderline → queue for human review
-    DecisionRepo.insert({
-      action:           "merge_suggestion",
-      incoming_chunk_id: null,         // incoming KP not yet stored
-      target_chunk_id:   bestCandidate.id,
-      node_id:           nodeId,
-      confidence:        kp.confidence ?? null,
-      reason:            `Dice similarity ${bestSim.toFixed(2)} in [0.70, 0.90)`,
-      similarity_score:  bestSim,
-      incoming_preview:  content,
-      target_preview:    bestCandidate.content_clean
-    });
-    logger.debug(`KP queued as merge_suggestion (Dice ${bestSim.toFixed(2)})`);
-    // Fall through: store the incoming KP normally so it's not lost
-    return { action: "STORE", reason: "queued merge_suggestion — storing incoming KP", queued: true };
   }
 
   // ── [3] Temporal / authority check (REPLACE) ──────────────────────────────
@@ -219,7 +242,7 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
       };
     } else {
       // Queue for human review
-      DecisionRepo.insert({
+      const rsInsert = DecisionRepo.insert({
         action:           "replace_suggestion",
         incoming_chunk_id: null,
         target_chunk_id:   bestCandidate.id,
@@ -230,11 +253,11 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
         incoming_preview:  content,
         target_preview:    bestCandidate.content_clean
       });
-      return { action: "STORE", reason: "queued replace_suggestion — storing incoming KP", queued: true };
+      return { action: "STORE", reason: "queued replace_suggestion — storing incoming KP", queued: true, decisionId: Number(rsInsert.lastInsertRowid) };
     }
   }
 
-  // ── [4] Normalize (soft similarity + LLM rewrite) ─────────────────────────
+  // ── [4] Conflict-aware LLM check ────────────────────────────────────────
 
   // Threshold raised from 0.40 → 0.55: a dice similarity of 0.40 can match KPs that
   // are related in topic but differ significantly in specificity (e.g., "probationary period"
@@ -242,15 +265,33 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
   // the specific numeric detail (90, 85%, 7 days) is preserved in the KB.
   if (useLLM && bestCandidate && bestSim >= 0.55) {
     try {
-      const normalized = await normalizeWithLLM(content, bestCandidate.content_clean || "");
-      if (normalized && normalized.confidence >= 0.70) {
-        kp.content = normalized.canonical;    // mutate in-place so caller stores canonical
-        logger.debug(`KP normalized with LLM (canonical rewrite, sim=${bestSim.toFixed(2)})`);
-        return { action: "NORMALIZE_THEN_STORE", reason: `LLM canonical rewrite (Dice ${bestSim.toFixed(2)})` };
+      const result = await checkConflictOrNormalize(content, bestCandidate.content_clean || "");
+      if (result) {
+        if (result.relationship === "conflict" && result.confidence >= 0.70) {
+          // Real conflict — queue for human review
+          const vcInsert = DecisionRepo.insert({
+            action:           "value_conflict",
+            incoming_chunk_id: null,
+            target_chunk_id:   bestCandidate.id,
+            node_id:           nodeId,
+            confidence:        result.confidence,
+            reason:            result.conflict_detail || "LLM detected contradictory values",
+            similarity_score:  bestSim,
+            incoming_preview:  content,
+            target_preview:    bestCandidate.content_clean
+          });
+          logger.debug(`KP queued as value_conflict (Dice ${bestSim.toFixed(2)}): ${result.conflict_detail}`);
+          return { action: "STORE", reason: "queued value_conflict", queued: true, decisionId: Number(vcInsert.lastInsertRowid) };
+        }
+        if (result.canonical && result.confidence >= 0.70) {
+          kp.content = result.canonical;    // mutate in-place so caller stores canonical
+          logger.debug(`KP normalized with LLM (canonical rewrite, sim=${bestSim.toFixed(2)})`);
+          return { action: "NORMALIZE_THEN_STORE", reason: `LLM canonical rewrite (Dice ${bestSim.toFixed(2)})` };
+        }
       }
     } catch (err) {
       rethrowIfRateLimit(err);
-      logger.warn(`LLM normalization failed: ${err.message}`);
+      logger.warn(`LLM conflict check failed: ${err.message}`);
     }
   }
 

@@ -57,7 +57,7 @@ export async function handleManageMessage(message, sessionId) {
         result = await handleDelete(session, data);
         break;
       case "UNDO":
-        result = handleUndo(session);
+        result = await handleUndo(session);
         break;
       case "HISTORY":
         result = handleHistory();
@@ -142,7 +142,7 @@ async function executePendingAction(session, pending) {
   if (pending.type === "edit") {
     const chunkId = pending.payload.targetChunkId;
     const newContent = pending.payload.newContent;
-    const editResult = executeEdit(chunkId, newContent);
+    const editResult = await executeEdit(chunkId, newContent);
     if (editResult.success) {
       setFocusNode(session.id, editResult.nodeId);
       const result = buildResponse(session, "EDIT",
@@ -296,7 +296,7 @@ async function handleDelete(session, data) {
     { pendingAction: { actionId, type: "delete" } });
 }
 
-function handleUndo(session) {
+async function handleUndo(session) {
   const changes = getRecentChanges(1);
   if (!changes.length) {
     return buildResponse(session, "UNDO", "No recent chatbot changes to undo.");
@@ -307,7 +307,7 @@ function handleUndo(session) {
     return buildResponse(session, "UNDO", "The most recent change was already a revert and cannot be undone again.");
   }
 
-  const result = revertChange(latest.id);
+  const result = await revertChange(latest.id);
   return buildResponse(session, "UNDO",
     result.success ? `Undo successful: ${result.description}` : `Undo failed: ${result.description}`);
 }

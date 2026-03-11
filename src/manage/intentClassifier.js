@@ -76,17 +76,24 @@ Session context:
 Current focus node: {{focusNode}}
 Pending action: {{pendingAction}}
 
-Tree structure (top levels):
+Existing tree structure (top levels):
 {{treeStructure}}
 
 User message: "{{message}}"
+
+IMPORTANT for topic_hint:
+- topic_hint should describe the SUBJECT of the content, not just an entity name.
+- Look at the existing tree structure above. If there is an existing node that PRECISELY matches the topic of the content, reuse that exact node name.
+- If no existing node fits, create a SPECIFIC descriptive topic (e.g. "Helport Products" not just "Helport", "Employee Benefits" not just "Company").
+- The topic should categorize WHAT the information is about, not WHO it mentions.
+- Do NOT reuse an existing node name unless the content truly belongs under that topic.
 
 Return JSON only:
 {
   "intent": "ADD|EDIT|DELETE|QUERY",
   "confidence": 0.0-1.0,
   "content": "the knowledge statement (for ADD: the full fact to store; for EDIT: the updated statement)",
-  "topic_hint": "suggested topic category for tree placement (2-5 words)",
+  "topic_hint": "specific topic category for tree placement — must match the SUBJECT of the content",
   "subtopic_hint": "optional subtopic (2-5 words or empty string)",
   "target_description": "what existing content to find (for EDIT/DELETE searches)",
   "old_value": "the specific value to change FROM (for EDIT, or empty)",

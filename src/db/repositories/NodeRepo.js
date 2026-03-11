@@ -327,6 +327,25 @@ export const NodeRepo = {
     NodeRepo.rebuildFts(nodeId);
   },
 
+  /** Delete a node: removes FTS entry, node embedding, and the row itself. */
+  deleteNode(nodeId) {
+    db.prepare("DELETE FROM nodes_fts WHERE node_id = ?").run(nodeId);
+    db.prepare("DELETE FROM embeddings WHERE ref_type = 'node' AND ref_id = ?").run(String(nodeId));
+    db.prepare("DELETE FROM nodes WHERE node_id = ?").run(nodeId);
+  },
+
+  /** Re-parent all children of a node to a new parent, updating their level. */
+  reparentChildren(oldParentId, newParentId, newLevel) {
+    return db.prepare(
+      "UPDATE nodes SET parent_id = ?, level = ?, updated_at = datetime('now') WHERE parent_id = ?"
+    ).run(newParentId, newLevel, oldParentId).changes;
+  },
+
+  /** Get all chunk IDs belonging to a node. */
+  getChunkIdsForNode(nodeId) {
+    return db.prepare("SELECT id FROM chunks WHERE node_id = ?").all(nodeId).map(r => r.id);
+  },
+
   /**
    * Merge new keywords into a node's keywords_json, deduplicating (lowercased).
    * Also refreshes the FTS entry to include the keyword text.

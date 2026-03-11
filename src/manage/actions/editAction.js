@@ -10,6 +10,8 @@ import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { getPathToNode } from "../../kg/graphTraversal.js";
 import { logAudit, runTransaction } from "../../db/db.js";
 import { logger } from "../../utils/logger.js";
+import { embedNewChunk } from "../../embedding/chunkEmbeddings.js";
+import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
 
 /**
  * Sanitize text for FTS5 MATCH query.
@@ -102,7 +104,7 @@ export function findEditTargets(targetDescription, oldValue) {
  * @param {string} newContent - New content text
  * @returns {{ success: boolean, before: string, after: string, nodeId: string }}
  */
-export function executeEdit(chunkId, newContent) {
+export async function executeEdit(chunkId, newContent) {
   const chunk = ChunkRepo.getById(chunkId);
   if (!chunk) {
     return { success: false, message: "Chunk not found. It may have been deleted." };
@@ -118,6 +120,14 @@ export function executeEdit(chunkId, newContent) {
       { content_clean: newContent, node_id: chunk.node_id }
     );
   });
+
+  // Auto-embed updated chunk
+  try {
+    await embedNewChunk(chunkId);
+    invalidateVectorCache();
+  } catch (e) {
+    logger.warn(`[manage:edit] Auto-embed failed (non-fatal): ${e.message}`);
+  }
 
   const nodePath = chunk.node_id ? getPathToNode(chunk.node_id).map(n => n.name) : [];
   logger.info(`[manage:edit] Edited chunk ${chunkId} in node ${chunk.node_id}`);

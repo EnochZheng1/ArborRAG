@@ -37,7 +37,7 @@ function initWebSocket() {
       } else if (msg.type === 'queue_update') {
         // A job was enqueued or finished — refresh the Documents view immediately
         // instead of waiting for the next polling cycle.
-        markTabsDirty('documents', 'tree', 'stats');
+        markTabsDirty('ingest', 'tree', 'settings');
         _scheduleUnifiedReload();
       }
     } catch { /* ignore */ }
@@ -63,9 +63,9 @@ function _scheduleUnifiedReload() {
   if (_reloadDebounce) clearTimeout(_reloadDebounce);
   _reloadDebounce = setTimeout(() => {
     _reloadDebounce = null;
-    const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
+    const docsTabActive = document.getElementById('tab-ingest')?.classList.contains('active');
     if (docsTabActive) {
-      _tabDirty['documents'] = false; // loading now — clear the dirty flag
+      _tabDirty['ingest'] = false; // loading now — clear the dirty flag
       loadUnifiedView().catch(console.error);
     }
   }, 150);
@@ -75,7 +75,7 @@ function _scheduleUnifiedReload() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     // Tab became visible — refresh immediately so we catch anything we missed
-    const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
+    const docsTabActive = document.getElementById('tab-ingest')?.classList.contains('active');
     if (docsTabActive) loadUnifiedView().catch(console.error);
   } else {
     // Tab hidden — cancel any pending poll to avoid wasted requests
@@ -90,6 +90,7 @@ const PIPELINE_STAGES = [
   { key: 'kp_extraction',     label: 'Extract KPs' },
   { key: 'mapping_chunks',    label: 'Map to Tree' },
   { key: 'entity_extraction', label: 'Entities' },
+  { key: 'embedding_sync',    label: 'Embed' },
   { key: 'finalizing',        label: 'Finalize' },
 ];
 // Maps every pipeline step name → PIPELINE_STAGES index (0-5).
@@ -100,10 +101,11 @@ const STEP_TO_STAGE = {
   kp_extraction: 2,
   mapping_chunks: 3, generating_aliases: 3,
   entity_extraction: 4,
-  finalizing: 5,
+  embedding_sync: 5,
+  finalizing: 6,
 };
 
-/** Render the 6-step stage tracker row. */
+/** Render the 7-step stage tracker row. */
 function _renderStageTracker(activeStageIdx) {
   return `<div class="job-stage-tracker">` +
     PIPELINE_STAGES.map((s, i) => {
@@ -467,8 +469,8 @@ const DATASET_KEY = 'treekb_dataset_id';
 // A tab starts dirty (never loaded). After a successful load, it becomes clean.
 // External events (uploads, WS updates, dataset switch) mark relevant tabs dirty.
 const _tabDirty = {
-  tree: true, upload: false, documents: true, decisions: true,
-  tests: true, stats: true, datasets: true, settings: true, ask: false
+  tree: true, ingest: true, decisions: true,
+  tests: true, datasets: true, settings: true, ask: false, manage: false
 };
 // Whether there are active (queued/processing) jobs — forces documents to refresh
 let _hasActiveJobs = false;
@@ -610,14 +612,12 @@ document.addEventListener('DOMContentLoaded', () => {
   initLanguage();
   initAsk();
   initTree();
-  initUpload();
-  initDocuments();
+  initIngest();
   initDecisions();
   initTests();
-  initStats();
   initSettings();
   initPrompts();
-  initManageMode();
+  initManageTab();
   initQueryHistory();
   initGraphView();
   initMobileSidebar();
@@ -674,20 +674,18 @@ function initTabs() {
       closeMobileSidebar();
 
       // Only re-fetch data if the tab is dirty (data changed since last visit).
-      // Documents tab also refreshes when there are active jobs (to show progress).
+      // Ingest tab also refreshes when there are active jobs (to show progress).
       const dirty = _tabDirty[tabId];
-      const needsRefresh = dirty || (tabId === 'documents' && _hasActiveJobs);
+      const needsRefresh = dirty || (tabId === 'ingest' && _hasActiveJobs);
 
       if (needsRefresh) {
-        _tabDirty[tabId] = false; // mark clean before fetch (re-dirtied if fetch fails)
+        _tabDirty[tabId] = false;
         if (tabId === 'tree')      { loadTree(); initSchemaPanel(); }
-        if (tabId === 'upload')    loadSchemaSettings();
-        if (tabId === 'documents') loadDocuments();
+        if (tabId === 'ingest')    { loadSchemaSettings(); loadDocuments(); }
         if (tabId === 'decisions') loadDecisions();
         if (tabId === 'tests')     loadTests();
-        if (tabId === 'stats')     loadStats();
         if (tabId === 'datasets')  loadDatasets();
-        if (tabId === 'settings')  { loadSettings(); loadPrompts(); }
+        if (tabId === 'settings')  { loadSettings(); loadPrompts(); loadStats(); loadSchemaSettingsInline(); }
       }
     });
   });
@@ -969,11 +967,6 @@ async function handleFeedback(rating) {
 }
 
 async function handleAsk() {
-  // Route to manage mode handler if active
-  if (window._chatMode === 'manage') {
-    return handleManageMessage();
-  }
-
   const query = document.getElementById('query-input').value.trim();
   if (!query) return;
 
@@ -2403,6 +2396,22 @@ async function loadNodeDetail(nodeId) {
       existingAddBtn.onclick = () => showAddChunkModal(nodeId);
     }
 
+    // Delete node button (not for root)
+    const existingDelBtn = detailHeader.querySelector('.delete-node-btn');
+    if (nodeId !== 'root') {
+      if (!existingDelBtn) {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn btn-danger btn-sm delete-node-btn';
+        delBtn.textContent = 'Delete Node';
+        delBtn.onclick = () => handleDeleteNode(nodeId);
+        detailHeader.insertBefore(delBtn, detailHeader.querySelector('.close-btn'));
+      } else {
+        existingDelBtn.onclick = () => handleDeleteNode(nodeId);
+      }
+    } else if (existingDelBtn) {
+      existingDelBtn.remove();
+    }
+
     const n = node.node || node;
     const chunks = chunksData.chunks || [];
     const entities = entitiesData.entities || [];
@@ -2808,6 +2817,19 @@ async function handleDeleteChunk(chunkId, nodeId) {
   }
 }
 
+async function handleDeleteNode(nodeId) {
+  const msg = 'Delete this node? Its children will be re-parented and all chunks in this node will be permanently removed.';
+  if (!confirm(msg)) return;
+  try {
+    const result = await api(`/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' });
+    showToast(`Deleted "${result.name}" (${result.chunksDeleted} chunks removed, ${result.childrenReparented} children re-parented)`, 'success');
+    hideNodeDetail();
+    loadTree();
+  } catch (err) {
+    showToast(err.message || 'Error deleting node', 'error');
+  }
+}
+
 function populateNodeSelects() {
   const selects = [
     document.getElementById('new-node-parent'),
@@ -2879,8 +2901,9 @@ async function handleAddNode(e) {
   }
 }
 
-// Upload Tab
-function initUpload() {
+// Ingest Tab (upload + documents combined)
+function initIngest() {
+  // Upload zone
   const uploadZone = document.getElementById('upload-zone');
   const fileInput = document.getElementById('file-input');
   const uploadBtn = document.getElementById('upload-btn');
@@ -2908,11 +2931,31 @@ function initUpload() {
 
   uploadBtn.addEventListener('click', handleUpload);
 
-  // Schema nodes only filter — re-populate select when toggled
   const schemaOnlyChk = document.getElementById('schema-nodes-only');
   if (schemaOnlyChk) {
     schemaOnlyChk.addEventListener('change', populateNodeSelects);
   }
+
+  // Ingest sub-navigation
+  document.getElementById('ingest-nav')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.settings-nav-btn');
+    if (!btn) return;
+    const sectionId = btn.dataset.section;
+    document.querySelectorAll('#ingest-nav .settings-nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('#tab-ingest .settings-section').forEach(s => s.classList.remove('active'));
+    document.getElementById(sectionId)?.classList.add('active');
+    // Auto-load documents when switching to that section
+    if (sectionId === 'ingest-section-documents') loadUnifiedView();
+  });
+
+  // Documents section
+  document.getElementById('refresh-docs-btn').addEventListener('click', loadUnifiedView);
+  document.getElementById('doc-status-filter').addEventListener('change', loadUnifiedView);
+  document.getElementById('retry-all-docs-btn')?.addEventListener('click', retryAllJobs);
+  document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
+  document.getElementById('clear-completed-btn')?.addEventListener('click', clearCompletedJobs);
+  document.getElementById('clear-failed-btn')?.addEventListener('click', clearFailedJobs);
 }
 
 let selectedFiles = [];
@@ -3002,7 +3045,7 @@ async function handleUpload() {
     selectedFiles = [];
     document.getElementById('file-list').classList.add('hidden');
     document.getElementById('file-input').value = '';
-    markTabsDirty('documents', 'tree', 'stats');
+    markTabsDirty('ingest', 'tree', 'settings');
     loadDocuments().catch(console.error);
   } catch (error) {
     showToast(error.message, 'error');
@@ -3164,15 +3207,6 @@ function displayUploadResult(results) {
   resultDiv.classList.remove('hidden');
 }
 
-// Documents Tab
-function initDocuments() {
-  document.getElementById('refresh-docs-btn').addEventListener('click',  loadUnifiedView);
-  document.getElementById('doc-status-filter').addEventListener('change', loadUnifiedView);
-  document.getElementById('retry-all-docs-btn')?.addEventListener('click',  retryAllJobs);
-  document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
-  document.getElementById('clear-completed-btn')?.addEventListener('click', clearCompletedJobs);
-  document.getElementById('clear-failed-btn')?.addEventListener('click', clearFailedJobs);
-}
 
 async function clearCompletedJobs() {
   try {
@@ -3318,7 +3352,7 @@ async function loadUnifiedView() {
     // Auto-refresh while jobs are queued or processing
     const hasActive = rows.some(r => r.status === 'queued' || r.status === 'processing');
     _hasActiveJobs = hasActive;
-    const docsTabActive = document.getElementById('tab-documents')?.classList.contains('active');
+    const docsTabActive = document.getElementById('tab-ingest')?.classList.contains('active');
     if (hasActive && docsTabActive) {
       // Adaptive polling: when WebSocket is connected, use long interval (safety net);
       // when disconnected, poll more aggressively to compensate.
@@ -3461,27 +3495,18 @@ function _estimateEta(startedAt, progressPct) {
 // Keep loadDocuments as an alias so any existing callers still work
 const loadDocuments = loadUnifiedView;
 
-document.getElementById('retry-all-docs-btn')?.addEventListener('click',  retryAllJobs);
-document.getElementById('cancel-all-docs-btn')?.addEventListener('click', cancelAllJobs);
-
 window.deleteDocument = async function(id) {
   if (!confirm(t('confirm_delete'))) return;
   try {
     await api(`/documents/${id}`, { method: 'DELETE' });
     showToast(t('success'), 'success');
-    markTabsDirty('tree', 'stats');
+    markTabsDirty('tree', 'settings');
     loadUnifiedView();
   } catch (error) {
     showToast(error.message, 'error');
   }
 };
 
-// Stats Tab
-function initStats() {
-  document.getElementById('refresh-stats-btn').addEventListener('click', loadStats);
-  document.getElementById('sync-embeddings-btn').addEventListener('click', syncEmbeddings);
-  document.getElementById('sync-aliases-btn').addEventListener('click', syncAliases);
-}
 
 async function loadStats() {
   const container = document.getElementById('stats-container');
@@ -4372,16 +4397,22 @@ function switchDataset(id, name, reload = true) {
     _tabDirty[activeTab] = false; // loading now, so mark clean
     if (activeTab === 'tree') loadTree();
     else if (activeTab === 'ask') {
-      // Clear the chat area when switching datasets
       const welcome = document.getElementById('chat-welcome');
       const result = document.getElementById('ask-result');
       if (welcome) welcome.style.display = '';
-      if (result) result.classList.add('hidden');
+      if (result) { result.classList.add('hidden'); result.innerHTML = ''; }
     }
-    else if (activeTab === 'documents') loadDocuments();
+    else if (activeTab === 'manage') {
+      const manageWelcome = document.getElementById('manage-welcome');
+      const manageResult = document.getElementById('manage-result');
+      if (manageWelcome) manageWelcome.style.display = '';
+      if (manageResult) manageResult.innerHTML = '';
+      window._manageSessionId = null;
+    }
+    else if (activeTab === 'ingest') { loadSchemaSettings(); loadDocuments(); }
     else if (activeTab === 'decisions') loadDecisions();
     else if (activeTab === 'tests') loadTests();
-    else if (activeTab === 'stats') loadStats();
+    else if (activeTab === 'settings') { loadSettings(); loadPrompts(); loadStats(); loadSchemaSettingsInline(); }
     else if (activeTab === 'datasets') loadDatasets();
   }
 }
@@ -4622,7 +4653,6 @@ async function handleCreateDataset() {
 function initDecisions() {
   document.getElementById('refresh-decisions-btn')?.addEventListener('click', loadDecisions);
   document.getElementById('decisions-status-filter')?.addEventListener('change', loadDecisions);
-  document.getElementById('run-cleanup-btn')?.addEventListener('click', runCleanupJob);
 }
 
 async function loadDecisions() {
@@ -4642,11 +4672,21 @@ async function loadDecisions() {
 
     // Render stats row
     if (statsDiv) {
+      const actionLabels = {
+        value_conflict: 'Conflicts',
+        replace_suggestion: 'Replacements',
+        merge_suggestion: 'Merges',
+        node_merge_suggestion: 'Node Merges'
+      };
+      const actionPills = (stats.by_action || [])
+        .map(a => `<span class="decision-stat-pill decision-stat-action">${a.count} ${actionLabels[a.action] || a.action}</span>`)
+        .join('');
       statsDiv.innerHTML = `
         <span class="decision-stat-pill decision-stat-pending">${stats.pending} pending</span>
         <span class="decision-stat-pill decision-stat-accepted">${stats.accepted} accepted</span>
         <span class="decision-stat-pill decision-stat-rejected">${stats.rejected} rejected</span>
         <span class="decision-stat-pill decision-stat-auto">${stats.auto_resolved} auto-resolved</span>
+        ${actionPills}
       `;
     }
 
@@ -4663,27 +4703,40 @@ async function loadDecisions() {
     list.querySelectorAll('[data-reject]').forEach(btn => {
       btn.addEventListener('click', () => applyDecision(btn.dataset.reject, 'reject'));
     });
+    list.querySelectorAll('[data-conflict-resolve]').forEach(btn => {
+      btn.addEventListener('click', () => resolveConflict(btn.dataset.conflictResolve, btn.dataset.resolution));
+    });
   } catch (err) {
     list.innerHTML = `<p class="empty-state error">${escapeHtml(err.message)}</p>`;
   }
+}
+
+function highlightValues(text) {
+  return escapeHtml(text)
+    .replace(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi, '<mark>$&</mark>')
+    .replace(/([$¥€£])\s?([\d,]+(?:\.\d+)?)/g, '<mark>$&</mark>')
+    .replace(/\b(\d{4}-\d{2}(?:-\d{2})?)\b/g, '<mark>$&</mark>');
 }
 
 function renderDecisionCard(d) {
   const actionClass = {
     merge_suggestion:      'decision-merge',
     replace_suggestion:    'decision-replace',
-    node_merge_suggestion: 'decision-node-merge'
+    node_merge_suggestion: 'decision-node-merge',
+    value_conflict:        'decision-conflict'
   }[d.action] || '';
 
   const actionLabel = {
     merge_suggestion:      'Merge',
     replace_suggestion:    'Replace',
-    node_merge_suggestion: 'Node Merge'
+    node_merge_suggestion: 'Node Merge',
+    value_conflict:        'Conflict'
   }[d.action] || d.action;
 
   const simStr = d.similarity_score != null ? `Similarity: ${(d.similarity_score * 100).toFixed(0)}%` : '';
   const confStr = d.confidence != null ? `Confidence: ${(d.confidence * 100).toFixed(0)}%` : '';
   const isPending = d.status === 'pending';
+  const isConflict = d.action === 'value_conflict';
 
   return `
     <div class="decision-card ${actionClass}">
@@ -4696,14 +4749,19 @@ function renderDecisionCard(d) {
       ${d.incoming_preview ? `
         <div class="kp-preview-block">
           <span class="kp-preview-label">Incoming</span>
-          <div class="kp-preview">${escapeHtml(d.incoming_preview)}</div>
+          <div class="kp-preview">${isConflict ? highlightValues(d.incoming_preview) : escapeHtml(d.incoming_preview)}</div>
         </div>` : ''}
       ${d.target_preview ? `
         <div class="kp-preview-block">
           <span class="kp-preview-label">Existing</span>
-          <div class="kp-preview">${escapeHtml(d.target_preview)}</div>
+          <div class="kp-preview">${isConflict ? highlightValues(d.target_preview) : escapeHtml(d.target_preview)}</div>
         </div>` : ''}
-      ${isPending ? `
+      ${isPending && d.action === 'value_conflict' ? `
+        <div class="decision-actions">
+          <button class="btn btn-primary btn-small" data-conflict-resolve="${d.id}" data-resolution="keep_incoming">Keep Incoming</button>
+          <button class="btn btn-primary btn-small" data-conflict-resolve="${d.id}" data-resolution="keep_existing">Keep Existing</button>
+          <button class="btn btn-secondary btn-small" data-conflict-resolve="${d.id}" data-resolution="keep_both">Keep Both</button>
+        </div>` : isPending ? `
         <div class="decision-actions">
           <button class="btn btn-primary btn-small" data-accept="${d.id}">Accept</button>
           <button class="btn btn-secondary btn-small" data-reject="${d.id}">Reject</button>
@@ -4722,16 +4780,16 @@ async function applyDecision(id, action) {
   }
 }
 
-async function runCleanupJob() {
-  const btn = document.getElementById('run-cleanup-btn');
-  if (btn) btn.disabled = true;
+async function resolveConflict(id, resolution) {
   try {
-    const result = await api('/decisions/cleanup', { method: 'POST', body: JSON.stringify({}) });
-    showToast(result.message || 'Cleanup job started', 'success');
+    await api(`/decisions/${id}/accept`, {
+      method: 'POST',
+      body: JSON.stringify({ resolution })
+    });
+    showToast(`Conflict resolved: ${resolution.replace(/_/g, ' ')}`, 'success');
+    loadDecisions();
   } catch (err) {
     showToast(err.message, 'error');
-  } finally {
-    if (btn) btn.disabled = false;
   }
 }
 
@@ -6626,6 +6684,44 @@ function initSettings() {
   });
 
   document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
+
+  // Schema settings toggle buttons (moved from schema panel modal)
+  document.getElementById('mapping-mode-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const strictness = document.getElementById('strictness-group');
+    if (strictness) strictness.style.display = btn.dataset.value === 'guided' ? '' : 'none';
+  });
+  document.getElementById('mapping-strictness-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+  document.getElementById('tree-routing-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+  document.getElementById('save-schema-settings')?.addEventListener('click', saveSchemaSettings);
+
+  // Stats section (moved from Stats tab)
+  document.getElementById('sync-embeddings-btn')?.addEventListener('click', syncEmbeddings);
+  document.getElementById('sync-aliases-btn')?.addEventListener('click', syncAliases);
+
+  // Settings sub-navigation
+  document.getElementById('settings-nav')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.settings-nav-btn');
+    if (!btn) return;
+    const sectionId = btn.dataset.section;
+    document.querySelectorAll('.settings-nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('#tab-settings .settings-section').forEach(s => s.classList.remove('active'));
+    document.getElementById(sectionId)?.classList.add('active');
+  });
 }
 
 async function loadSettings() {
@@ -6849,38 +6945,9 @@ function initSchemaPanel() {
     }
   });
 
-  // Schema Settings modal
+  // Schema Settings — navigate to Settings tab
   document.getElementById('schema-settings-btn')?.addEventListener('click', openSchemaSettings);
   document.getElementById('schema-mode-badge')?.addEventListener('click', openSchemaSettings);
-  document.getElementById('close-schema-settings-modal')?.addEventListener('click', () => {
-    document.getElementById('schema-settings-modal').classList.add('hidden');
-  });
-  document.getElementById('cancel-schema-settings')?.addEventListener('click', () => {
-    document.getElementById('schema-settings-modal').classList.add('hidden');
-  });
-  document.getElementById('save-schema-settings')?.addEventListener('click', saveSchemaSettings);
-
-  // Toggle buttons in settings modal
-  document.getElementById('mapping-mode-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const strictness = document.getElementById('strictness-group');
-    if (strictness) strictness.style.display = btn.dataset.value === 'guided' ? '' : 'none';
-  });
-  document.getElementById('mapping-strictness-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-  document.getElementById('tree-routing-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
 
   loadSchemaSettings();
   loadSchemaTemplates();
@@ -6919,6 +6986,32 @@ async function loadSchemaSettings() {
     return s;
   } catch (_) {
     return { mapping_mode: 'free', mapping_strictness: 'soft' };
+  }
+}
+
+async function loadSchemaSettingsInline() {
+  const s = await loadSchemaSettings();
+  // Set toggle state in the inline settings card
+  document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === s.mapping_mode);
+  });
+  document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === s.mapping_strictness);
+  });
+  document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === (s.tree_routing_mode || 'keyword'));
+  });
+  const strictness = document.getElementById('strictness-group');
+  if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
+
+  // Check embedding coverage for vector routing hint
+  const hint = document.getElementById('vector-coverage-hint');
+  if (hint) {
+    try {
+      const cov = await api('/embeddings/coverage');
+      const pct = cov?.nodes?.total > 0 ? (cov.nodes.embedded / cov.nodes.total) : 0;
+      hint.style.display = pct < 0.5 ? '' : 'none';
+    } catch (_) { hint.style.display = 'none'; }
   }
 }
 
@@ -7044,31 +7137,13 @@ async function deleteSchemaTemplate(id, name) {
 }
 
 async function openSchemaSettings() {
-  const s = await loadSchemaSettings();
-  // Set toggle state
-  document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.value === s.mapping_mode);
-  });
-  document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.value === s.mapping_strictness);
-  });
-  document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.value === (s.tree_routing_mode || 'keyword'));
-  });
-  const strictness = document.getElementById('strictness-group');
-  if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
-
-  // Check embedding coverage for vector routing hint
-  const hint = document.getElementById('vector-coverage-hint');
-  if (hint) {
-    try {
-      const cov = await api('/embeddings/coverage');
-      const pct = cov?.nodes?.total > 0 ? (cov.nodes.embedded / cov.nodes.total) : 0;
-      hint.style.display = pct < 0.5 ? '' : 'none';
-    } catch (_) { hint.style.display = 'none'; }
-  }
-
-  document.getElementById('schema-settings-modal').classList.remove('hidden');
+  // Navigate to Settings tab → Schema section
+  document.querySelector('.nav-btn[data-tab="settings"]').click();
+  setTimeout(() => {
+    // Activate the Schema & Mapping nav section
+    const schemaBtn = document.querySelector('.settings-nav-btn[data-section="settings-section-schema"]');
+    if (schemaBtn) schemaBtn.click();
+  }, 100);
 }
 
 async function saveSchemaSettings() {
@@ -7081,82 +7156,69 @@ async function saveSchemaSettings() {
       body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness, tree_routing_mode: routing })
     });
     showToast('Schema settings saved', 'success');
-    document.getElementById('schema-settings-modal').classList.add('hidden');
     loadSchemaSettings();
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
   }
 }
 
-// ── Manage Mode (Knowledge Management Chatbot) ─────────────────────────────
-
-window._chatMode = 'ask';
+// ── Manage Tab ─────────────────────────────────────────────────────────────
 window._manageSessionId = null;
 
-function initManageMode() {
-  const toggle = document.getElementById('chat-mode-toggle');
-  if (!toggle) return;
+function initManageTab() {
+  const input = document.getElementById('manage-input');
+  const sendBtn = document.getElementById('manage-send-btn');
+  if (!input || !sendBtn) return;
 
-  toggle.addEventListener('click', (e) => {
-    const btn = e.target.closest('.mode-btn');
-    if (!btn) return;
+  sendBtn.addEventListener('click', handleManageMessage);
 
-    // Special: History button
-    if (btn.id === 'manage-history-btn') {
-      toggleManageHistory();
-      return;
-    }
-
-    if (!btn.dataset.mode) return;
-    const mode = btn.dataset.mode;
-    window._chatMode = mode;
-
-    toggle.querySelectorAll('.mode-btn[data-mode]').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    const historyBtn = document.getElementById('manage-history-btn');
-    const input = document.getElementById('query-input');
-    const settingsBtn = document.getElementById('toggle-advanced-options');
-
-    if (mode === 'manage') {
-      if (historyBtn) historyBtn.classList.remove('hidden');
-      if (input) input.placeholder = 'Add, edit, or delete knowledge... (e.g., "Product X minimum payout rate is 5.63%")';
-      if (settingsBtn) settingsBtn.style.display = 'none';
-    } else {
-      if (historyBtn) historyBtn.classList.add('hidden');
-      if (input) input.placeholder = "Ask anything... (e.g., 'Compare Product A and B', '\u9500\u552E\u6D41\u7A0B\u662F\u4EC0\u4E48\uFF1F')";
-      if (settingsBtn) settingsBtn.style.display = '';
-      const panel = document.getElementById('manage-history-panel');
-      if (panel) panel.classList.add('hidden');
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleManageMessage();
     }
   });
 
+  // Auto-resize textarea
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+
+  // History button
+  document.getElementById('manage-history-btn')?.addEventListener('click', toggleManageHistory);
   const closeBtn = document.getElementById('manage-history-close');
   if (closeBtn) {
     closeBtn.addEventListener('click', () => {
       document.getElementById('manage-history-panel')?.classList.add('hidden');
     });
   }
+
+  // Example cards in manage welcome — click to fill input
+  document.querySelectorAll('#tab-manage .manage-example[data-example]').forEach(el => {
+    el.addEventListener('click', () => {
+      input.value = el.dataset.example;
+      input.focus();
+    });
+  });
 }
 
 async function handleManageMessage() {
-  const input = document.getElementById('query-input');
+  const input = document.getElementById('manage-input');
   const message = input.value.trim();
   if (!message) return;
 
-  const askBtn = document.getElementById('ask-btn');
-  const resultDiv = document.getElementById('ask-result');
-  const spinner = askBtn.querySelector('.loading-spinner');
+  const sendBtn = document.getElementById('manage-send-btn');
+  const resultDiv = document.getElementById('manage-result');
+  const spinner = sendBtn.querySelector('.loading-spinner');
 
-  askBtn.disabled = true;
+  sendBtn.disabled = true;
   spinner.classList.remove('hidden');
   input.value = '';
 
-  const chatWelcome = document.getElementById('chat-welcome');
-  if (chatWelcome) chatWelcome.style.display = 'none';
+  const manageWelcome = document.getElementById('manage-welcome');
+  if (manageWelcome) manageWelcome.style.display = 'none';
 
-  // Append user bubble (keep existing messages for multi-turn)
-  resultDiv.classList.remove('hidden');
   const existing = resultDiv.innerHTML;
   resultDiv.innerHTML = existing + `
     <div class="user-query-bubble">
@@ -7168,7 +7230,7 @@ async function handleManageMessage() {
     </div>
   `;
 
-  const chatMessages = document.getElementById('chat-messages');
+  const chatMessages = document.getElementById('manage-chat-messages');
   if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
 
   try {
@@ -7192,7 +7254,7 @@ async function handleManageMessage() {
       </div>
     `;
   } finally {
-    askBtn.disabled = false;
+    sendBtn.disabled = false;
     spinner.classList.add('hidden');
     input.focus();
     if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -7264,12 +7326,12 @@ function renderManageHistoryInline(changes) {
 }
 
 function sendManageConfirm() {
-  document.getElementById('query-input').value = '__confirm__';
+  document.getElementById('manage-input').value = '__confirm__';
   handleManageMessage();
 }
 
 function sendManageCancel() {
-  document.getElementById('query-input').value = '__cancel__';
+  document.getElementById('manage-input').value = '__cancel__';
   handleManageMessage();
 }
 

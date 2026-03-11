@@ -26,6 +26,20 @@ function escapeHtml(str) {
  * @param {object} options - Options
  * @returns {Promise<object>} Answer with citations
  */
+/** Check if sources contain specific quantitative values. */
+function sourcesHaveValues(text) {
+  return /\b\d+(?:[.,]\d+)?\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/i.test(text)
+    || /[$¥€£]\s?[\d,]+/.test(text);
+}
+
+/** Check if answer covers at least some numeric values from sources. */
+function answerCoversSourceValues(answer, sourceText) {
+  const sourceNums = [...new Set([...sourceText.matchAll(/\b(\d+)\b/g)].map(m => m[1]))].filter(n => n.length >= 2 || parseInt(n) > 1);
+  if (sourceNums.length === 0) return true;
+  const answerText = answer.toLowerCase();
+  return sourceNums.some(n => answerText.includes(n));
+}
+
 /** Detect false "not in sources" answers that should trigger a retry. */
 function looksLikeNotFound(text) {
   if (!text) return false;
@@ -117,6 +131,24 @@ Answer:`);
         : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`);
       const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry' });
       if (retryText) answerText = retryText;
+    }
+
+    // Structured extraction fallback: if answer still has no citations and sources contain
+    // specific values the answer ignores, switch to a fact-extraction approach
+    const firstPassCitations = extractCitationsFromAnswer(answerText);
+    if (firstPassCitations.length === 0 && sourcesHaveValues(sourceList) && !answerCoversSourceValues(answerText, sourceList)) {
+      logger.debug(`citation_generation: answer missing source values, trying structured extraction`);
+      const extractPrompt = isChineseLang(detectedLang)
+        ? `从以下来源中提取与问题相关的所有具体事实。列出每个事实并标注来源编号[n]。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n提取的事实：`
+        : `Extract ALL specific facts from the sources that answer the question. List each fact with its source number [n]. Include exact numbers, dates, percentages, and durations.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nExtracted facts:`;
+      try {
+        const extractedText = await callLLM({ prompt: extractPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_extraction_fallback' });
+        if (extractedText && !looksLikeNotFound(extractedText) && answerCoversSourceValues(extractedText, sourceList)) {
+          answerText = extractedText;
+        }
+      } catch (extractErr) {
+        logger.debug(`citation_extraction_fallback failed: ${extractErr.message}`);
+      }
     }
 
     // Extract citations used

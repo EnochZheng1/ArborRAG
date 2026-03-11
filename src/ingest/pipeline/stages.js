@@ -21,10 +21,14 @@ import { parseFile, isSupportedFileType } from "../fileParser.js";
 import { extractKnowledgePoints } from "../knowledgeExtractor.js";
 import { detectAuthorityLevel } from "../metadataExtractor.js";
 import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
+import { syncEmbeddings } from "../../embedding/chunkEmbeddings.js";
+import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+
+const AUTO_EMBED = process.env.INGEST_AUTO_EMBED !== "false";
 
 // ── Internal DB helpers ───────────────────────────────────────────────────────
 
@@ -205,7 +209,33 @@ export async function stageExtractEntities(ctx) {
   ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [] };
 }
 
-// ── Stage 6: Mark document as processed ──────────────────────────────────────
+// ── Stage 6: Auto-generate embeddings ────────────────────────────────────────
+
+export async function stageEmbeddingSync(ctx) {
+  const { documentId } = ctx;
+
+  if (!AUTO_EMBED || process.env.DISABLE_EMBEDDINGS === "true") {
+    ctx.setStep(documentId, "embedding_sync", "Auto-embedding skipped.", 98);
+    return;
+  }
+
+  ctx.setStep(documentId, "embedding_sync", "Generating embeddings…", 96);
+
+  try {
+    const result = await syncEmbeddings();
+    invalidateVectorCache();
+    const n = result.nodes?.success || 0;
+    const c = result.chunks?.success || 0;
+    ctx.setStep(documentId, "embedding_sync", `Embedded ${n} nodes, ${c} chunks.`, 98);
+    ctx.results.stats.embeddingsGenerated = n + c;
+  } catch (err) {
+    logger.warn(`[embedding_sync] Failed for doc ${documentId}: ${err.message}`);
+    ctx.setStep(documentId, "embedding_sync", `Embedding sync failed (non-fatal): ${err.message}`, 98);
+    ctx.results.stats.embeddingsGenerated = 0;
+  }
+}
+
+// ── Stage 7: Mark document as processed ──────────────────────────────────────
 
 export function stageFinalize(ctx) {
   const { documentId, results } = ctx;

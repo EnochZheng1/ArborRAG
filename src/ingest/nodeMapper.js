@@ -395,7 +395,13 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
             }
             // Back-fill incoming_chunk_id on queued decisions so human review can link to the stored KP
             if (decision.queued) {
-              try { DecisionRepo.updateIncomingChunkId(targetNodeId, chunkId); } catch (_) {}
+              try {
+                if (decision.decisionId) {
+                  DecisionRepo.updateIncomingChunkIdById(decision.decisionId, chunkId);
+                } else {
+                  DecisionRepo.updateIncomingChunkId(targetNodeId, chunkId);
+                }
+              } catch (_) {}
             }
             results.mapped.push({
               chunkIndex: kp.index, chunkId,

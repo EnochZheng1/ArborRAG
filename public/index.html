@@ -37,41 +37,46 @@
       </div>
 
       <nav class="nav">
+        <!-- Core -->
         <button class="nav-btn active" data-tab="ask">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span>Ask</span>
+        </button>
+        <button class="nav-btn" data-tab="manage">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+          </svg>
+          <span>Manage</span>
         </button>
         <button class="nav-btn" data-tab="tree">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <span>Tree</span>
         </button>
-        <button class="nav-btn" data-tab="upload">
+        <div class="nav-separator"></div>
+        <!-- Data Pipeline -->
+        <button class="nav-btn" data-tab="ingest">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <span>Upload</span>
-        </button>
-        <button class="nav-btn" data-tab="documents">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          <span>Documents</span>
+          <span>Ingest</span>
         </button>
         <button class="nav-btn" data-tab="decisions">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <span>Decisions</span>
         </button>
+        <div class="nav-separator"></div>
+        <!-- Admin -->
         <button class="nav-btn" data-tab="tests">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
           <span>Tests</span>
         </button>
-        <button class="nav-btn" data-tab="stats">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          <span>Stats</span>
+        <button class="nav-btn" data-tab="settings">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
         </button>
         <button class="nav-btn" data-tab="datasets">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
           <span data-i18n="datasets_title">Datasets</span>
-        </button>
-        <button class="nav-btn" data-tab="settings">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          <span>Settings</span>
         </button>
       </nav>
 
@@ -94,51 +99,47 @@
       <!-- Ask Tab -->
       <section class="tab-content active" id="tab-ask">
         <div class="chat-layout">
-          <!-- Mode toggle -->
-          <div class="chat-mode-toggle" id="chat-mode-toggle">
-            <button class="mode-btn active" data-mode="ask">Ask</button>
-            <button class="mode-btn" data-mode="manage">Manage</button>
-            <button class="mode-btn mode-btn-history hidden" id="manage-history-btn" title="Change History">History</button>
-          </div>
-
           <!-- Chat messages area -->
           <div class="chat-messages" id="chat-messages">
-            <div class="chat-welcome" id="chat-welcome">
-              <div class="chat-welcome-icon">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="14"/>
-                  <circle cx="6" cy="19" r="3"/><line x1="12" y1="14" x2="6" y2="16"/>
-                  <circle cx="18" cy="19" r="3"/><line x1="12" y1="14" x2="18" y2="16"/>
-                </svg>
-              </div>
-              <h2 data-i18n="ask_title">Ask a Question</h2>
-              <p data-i18n="ask_subtitle">Query the knowledge base with natural language</p>
-              <!-- Query History inline -->
-              <div class="chat-history" id="query-history">
-                <div class="history-header">
-                  <h4 data-i18n="query_history">Recent Queries</h4>
-                  <button class="btn btn-small btn-text" id="clear-history-btn" data-i18n="clear">Clear</button>
+            <!-- ASK mode content -->
+            <div id="ask-mode-container">
+              <div class="chat-welcome" id="chat-welcome">
+                <div class="chat-welcome-icon">
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="14"/>
+                    <circle cx="6" cy="19" r="3"/><line x1="12" y1="14" x2="6" y2="16"/>
+                    <circle cx="18" cy="19" r="3"/><line x1="12" y1="14" x2="18" y2="16"/>
+                  </svg>
                 </div>
-                <div class="history-list" id="history-list"></div>
+                <h2 data-i18n="ask_title">Ask a Question</h2>
+                <p data-i18n="ask_subtitle">Query the knowledge base with natural language</p>
+                <!-- Query History inline -->
+                <div class="chat-history" id="query-history">
+                  <div class="history-header">
+                    <h4 data-i18n="query_history">Recent Queries</h4>
+                    <button class="btn btn-small btn-text" id="clear-history-btn" data-i18n="clear">Clear</button>
+                  </div>
+                  <div class="history-list" id="history-list"></div>
+                </div>
               </div>
-            </div>
 
-            <div id="ask-result" class="ask-result hidden">
-              <div class="result-header">
-                <span class="query-type-badge" id="query-type-badge"></span>
-                <span class="confidence-badge" id="confidence-badge"></span>
-                <div class="feedback-buttons" id="feedback-buttons">
-                  <button class="feedback-btn" data-rating="up" title="Helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>
-                  <button class="feedback-btn" data-rating="down" title="Not helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/></svg></button>
+              <div id="ask-result" class="ask-result hidden">
+                <div class="result-header">
+                  <span class="query-type-badge" id="query-type-badge"></span>
+                  <span class="confidence-badge" id="confidence-badge"></span>
+                  <div class="feedback-buttons" id="feedback-buttons">
+                    <button class="feedback-btn" data-rating="up" title="Helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>
+                    <button class="feedback-btn" data-rating="down" title="Not helpful"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/></svg></button>
+                  </div>
                 </div>
-              </div>
-              <div class="result-trace hidden" id="result-trace"></div>
-              <div class="result-content" id="result-content"></div>
-              <div class="result-citations hidden" id="result-citations"></div>
-              <div class="result-sources" id="result-sources"></div>
-              <div class="related-questions hidden" id="related-questions">
-                <h4 data-i18n="related_questions">Related Questions</h4>
-                <div class="related-questions-list" id="related-questions-list"></div>
+                <div class="result-trace hidden" id="result-trace"></div>
+                <div class="result-content" id="result-content"></div>
+                <div class="result-citations hidden" id="result-citations"></div>
+                <div class="result-sources" id="result-sources"></div>
+                <div class="related-questions hidden" id="related-questions">
+                  <h4 data-i18n="related_questions">Related Questions</h4>
+                  <div class="related-questions-list" id="related-questions-list"></div>
+                </div>
               </div>
             </div>
           </div>
@@ -152,7 +153,7 @@
               <textarea
                 id="query-input"
                 class="ask-input"
-                placeholder="Ask anything... (e.g., 'Compare Product A and B', '销售流程是什么？')"
+                placeholder="Ask anything... (e.g., 'Compare Product A and B', '&#38144;&#21806;&#27969;&#31243;&#26159;&#20160;&#20040;&#65311;')"
                 rows="1"
               ></textarea>
               <div class="chat-input-actions">
@@ -254,6 +255,64 @@
                   <span class="option-value" id="opt-min-answer-confidence-value">0.30</span>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Manage Tab -->
+      <section class="tab-content" id="tab-manage">
+        <div class="chat-layout">
+          <!-- Chat messages area -->
+          <div class="chat-messages" id="manage-chat-messages">
+            <div class="chat-welcome" id="manage-welcome">
+              <div class="chat-welcome-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                </svg>
+              </div>
+              <h2>Manage Knowledge</h2>
+              <p>Add, edit, or delete knowledge using natural language</p>
+              <div class="manage-examples">
+                <div class="manage-example" data-example="Product X has a minimum payout rate of 5.63%">
+                  <span class="action-badge action-badge-add">ADD</span> State a fact to add it
+                </div>
+                <div class="manage-example" data-example="Change the payout rate from 5.63% to 6.2%">
+                  <span class="action-badge action-badge-edit">EDIT</span> Say what to change
+                </div>
+                <div class="manage-example" data-example="Delete the information about vacation days">
+                  <span class="action-badge action-badge-delete">DELETE</span> Describe what to remove
+                </div>
+                <div class="manage-example" data-example="undo">
+                  <span class="action-badge action-badge-undo">UNDO</span> Revert the last change
+                </div>
+              </div>
+            </div>
+            <div id="manage-result" class="manage-result"></div>
+          </div>
+
+          <!-- Input bar -->
+          <div class="chat-input-bar">
+            <div class="chat-input-wrapper">
+              <textarea
+                id="manage-input"
+                class="ask-input"
+                placeholder="Add, edit, or delete knowledge... (e.g., &quot;Product X minimum payout rate is 5.63%&quot;)"
+                rows="1"
+              ></textarea>
+              <div class="chat-input-actions">
+                <button id="manage-history-btn" class="chat-settings-btn" title="Change History">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </button>
+                <button id="manage-send-btn" class="chat-send-btn" title="Send">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                  <span class="loading-spinner hidden"></span>
+                </button>
+              </div>
+            </div>
+            <div class="chat-input-meta">
+              <span class="ask-keyboard-hint"><kbd>Enter</kbd> to send &middot; <kbd>Shift+Enter</kbd> new line</span>
             </div>
           </div>
 
@@ -413,46 +472,6 @@
           </div>
         </div>
 
-        <!-- Schema Settings Modal -->
-        <div class="modal hidden" id="schema-settings-modal">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h3>Schema Mapping Settings</h3>
-              <button class="close-btn" id="close-schema-settings-modal">&times;</button>
-            </div>
-            <div class="form-group">
-              <label>Mapping Mode</label>
-              <div class="toggle-group" id="mapping-mode-toggle">
-                <button class="toggle-btn active" data-value="free">Free</button>
-                <button class="toggle-btn" data-value="guided">Guided</button>
-              </div>
-              <p class="option-hint">Free: LLM invents topic names. Guided: KPs map to your schema nodes.</p>
-            </div>
-            <div class="form-group" id="strictness-group">
-              <label>Strictness (Guided only)</label>
-              <div class="toggle-group" id="mapping-strictness-toggle">
-                <button class="toggle-btn active" data-value="soft">Soft</button>
-                <button class="toggle-btn" data-value="hard">Hard</button>
-              </div>
-              <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
-            </div>
-            <div class="form-group">
-              <label>Tree Routing (Query)</label>
-              <div class="toggle-group" id="tree-routing-toggle">
-                <button class="toggle-btn active" data-value="keyword">Keyword</button>
-                <button class="toggle-btn" data-value="vector">Vector</button>
-                <button class="toggle-btn" data-value="llm">LLM</button>
-              </div>
-              <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
-              <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
-            </div>
-            <div class="form-actions">
-              <button class="btn btn-secondary" id="cancel-schema-settings">Cancel</button>
-              <button class="btn btn-primary" id="save-schema-settings">Save</button>
-            </div>
-          </div>
-        </div>
-
         <!-- Save Template Modal -->
         <div class="modal hidden" id="save-template-modal">
           <div class="modal-content">
@@ -512,138 +531,122 @@
         </div>
       </section>
 
-      <!-- Upload Tab -->
-      <section class="tab-content" id="tab-upload">
+      <!-- Ingest Tab -->
+      <section class="tab-content" id="tab-ingest">
         <div class="tab-header">
-          <h2 data-i18n="upload_title">Upload Documents</h2>
-          <p data-i18n="upload_subtitle">Add documents to the knowledge base</p>
+          <h2>Ingest</h2>
         </div>
 
-        <div class="upload-container">
-          <div class="upload-zone" id="upload-zone">
-            <div class="upload-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            </div>
-            <p class="upload-label" data-i18n="drop_files">Drop files here or click to browse</p>
-            <p class="upload-hint" data-i18n="supported_formats">Supported: PDF, DOCX, XLSX, HTML, TXT, MD, CSV, JSON</p>
-            <input type="file" id="file-input" multiple accept=".pdf,.docx,.xlsx,.xls,.html,.htm,.txt,.md,.csv,.json" hidden>
-          </div>
+        <!-- Ingest sub-navigation -->
+        <nav class="settings-nav" id="ingest-nav">
+          <button class="settings-nav-btn active" data-section="ingest-section-upload">Upload</button>
+          <button class="settings-nav-btn" data-section="ingest-section-documents">Documents</button>
+        </nav>
 
-          <div class="upload-options">
-            <div class="form-group">
-              <label for="target-node" data-i18n="target_node">
-                Target Node (optional)
-                <span class="field-help" data-tooltip="Pin all content from this document to a specific node in the knowledge tree. Leave empty to let the AI automatically detect and assign topics based on document content.">?</span>
-              </label>
-              <select id="target-node">
-                <option value="">-- Auto-detect --</option>
-              </select>
-              <div id="schema-nodes-only-row" style="display:none; margin-top:4px;">
-                <label class="checkbox-label" style="font-size:12px;">
-                  <input type="checkbox" id="schema-nodes-only">
-                  <span>Schema nodes only</span>
-                  <span class="field-help" data-tooltip="Restrict mapping to existing schema nodes only. Content that does not match any schema node will be assigned to the closest matching schema ancestor instead of creating a new node.">?</span>
+        <!-- Section: Upload -->
+        <div class="settings-section active" id="ingest-section-upload">
+          <div class="settings-card" id="ingest-upload-card">
+            <h3>Upload Documents</h3>
+            <div class="upload-container">
+              <div class="upload-zone" id="upload-zone">
+                <div class="upload-icon">
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </div>
+                <p class="upload-label" data-i18n="drop_files">Drop files here or click to browse</p>
+                <p class="upload-hint" data-i18n="supported_formats">Supported: PDF, DOCX, XLSX, HTML, TXT, MD, CSV, JSON</p>
+                <input type="file" id="file-input" multiple accept=".pdf,.docx,.xlsx,.xls,.html,.htm,.txt,.md,.csv,.json" hidden>
+              </div>
+
+              <div class="upload-options">
+                <div class="form-group">
+                  <label for="target-node" data-i18n="target_node">
+                    Target Node (optional)
+                    <span class="field-help" data-tooltip="Pin all content from this document to a specific node in the knowledge tree. Leave empty to let the AI automatically detect and assign topics based on document content.">?</span>
+                  </label>
+                  <select id="target-node">
+                    <option value="">-- Auto-detect --</option>
+                  </select>
+                  <div id="schema-nodes-only-row" style="display:none; margin-top:4px;">
+                    <label class="checkbox-label" style="font-size:12px;">
+                      <input type="checkbox" id="schema-nodes-only">
+                      <span>Schema nodes only</span>
+                      <span class="field-help" data-tooltip="Restrict mapping to existing schema nodes only. Content that does not match any schema node will be assigned to the closest matching schema ancestor instead of creating a new node.">?</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="form-group" id="schema-branch-row" style="display:none;">
+                  <label for="schema-branch">
+                    Schema Branch (optional)
+                    <span class="field-help" data-tooltip="Limit guided mapping to a specific branch of the schema tree. Useful when you know the document belongs to a particular topic area and want to avoid mapping to unrelated branches.">?</span>
+                  </label>
+                  <select id="schema-branch">
+                    <option value="">-- All schema nodes --</option>
+                  </select>
+                </div>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="upload-use-llm" checked>
+                  <span data-i18n="use_llm_extraction">Use LLM for metadata extraction</span>
+                  <span class="field-help" data-tooltip="Use AI to extract atomic knowledge points, detect topics, and classify content. Produces richer and more accurate results. Uncheck to use basic paragraph splitting — faster but less structured.">?</span>
                 </label>
               </div>
+
+              <div class="file-list hidden" id="file-list">
+                <h4 data-i18n="selected_files">Selected Files</h4>
+                <ul id="file-list-items"></ul>
+                <button id="upload-btn" class="btn btn-primary">
+                  <span data-i18n="upload_btn">Upload & Process</span>
+                  <span class="loading-spinner hidden"></span>
+                </button>
+              </div>
+
+              <div class="upload-result hidden" id="upload-result"></div>
             </div>
-            <div class="form-group" id="schema-branch-row" style="display:none;">
-              <label for="schema-branch">
-                Schema Branch (optional)
-                <span class="field-help" data-tooltip="Limit guided mapping to a specific branch of the schema tree. Useful when you know the document belongs to a particular topic area and want to avoid mapping to unrelated branches.">?</span>
-              </label>
-              <select id="schema-branch">
-                <option value="">-- All schema nodes --</option>
-              </select>
-            </div>
-            <label class="checkbox-label">
-              <input type="checkbox" id="upload-use-llm" checked>
-              <span data-i18n="use_llm_extraction">Use LLM for metadata extraction</span>
-              <span class="field-help" data-tooltip="Use AI to extract atomic knowledge points, detect topics, and classify content. Produces richer and more accurate results. Uncheck to use basic paragraph splitting — faster but less structured.">?</span>
-            </label>
-          </div>
-
-          <div class="file-list hidden" id="file-list">
-            <h4 data-i18n="selected_files">Selected Files</h4>
-            <ul id="file-list-items"></ul>
-            <button id="upload-btn" class="btn btn-primary">
-              <span data-i18n="upload_btn">Upload & Process</span>
-              <span class="loading-spinner hidden"></span>
-            </button>
-          </div>
-
-          <div class="upload-result hidden" id="upload-result"></div>
-        </div>
-      </section>
-
-      <!-- Documents Tab -->
-      <section class="tab-content" id="tab-documents">
-        <div class="tab-header">
-          <h2 data-i18n="documents_title">Documents</h2>
-          <div class="header-actions">
-            <select id="doc-status-filter" class="filter-select">
-              <option value="">All</option>
-              <option value="queued">Queued</option>
-              <option value="processing">Processing</option>
-              <option value="rate_limited">Rate Limited</option>
-              <option value="processed">Processed</option>
-              <option value="failed">Failed</option>
-            </select>
-            <button id="retry-all-docs-btn"  class="btn btn-warning btn-sm" style="display:none">Retry All Paused</button>
-            <button id="cancel-all-docs-btn" class="btn btn-danger  btn-sm" style="display:none">Cancel All</button>
-            <button id="clear-completed-btn" class="btn btn-secondary btn-sm" style="display:none">Clear Completed</button>
-            <button id="clear-failed-btn"    class="btn btn-secondary btn-sm" style="display:none">Clear Failed</button>
-            <button id="refresh-docs-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
           </div>
         </div>
 
-        <div class="documents-container">
-          <table class="data-table" id="documents-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th data-i18n="filename">Filename</th>
-                <th data-i18n="type">Type</th>
-                <th data-i18n="status">Status</th>
-                <th>Progress / Step</th>
-                <th data-i18n="chunks">KPs</th>
-                <th data-i18n="uploaded">Time</th>
-                <th data-i18n="actions">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="documents-tbody">
-              <!-- Skeleton rows -->
-              <tr class="skeleton-row">
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-70"></div></td>
-                <td><div class="skeleton-line w-30"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-                <td><div class="skeleton-line w-50"></div></td>
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-60"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-              </tr>
-              <tr class="skeleton-row">
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-60"></div></td>
-                <td><div class="skeleton-line w-30"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-                <td><div class="skeleton-line w-45"></div></td>
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-55"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-              </tr>
-              <tr class="skeleton-row">
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-80"></div></td>
-                <td><div class="skeleton-line w-30"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-                <td><div class="skeleton-line w-35"></div></td>
-                <td><div class="skeleton-line w-20"></div></td>
-                <td><div class="skeleton-line w-50"></div></td>
-                <td><div class="skeleton-line w-40"></div></td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- Section: Documents -->
+        <div class="settings-section" id="ingest-section-documents">
+          <div class="settings-card" id="ingest-documents-card">
+            <div class="settings-card-header">
+              <h3>Documents</h3>
+              <div class="header-actions" style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+                <select id="doc-status-filter" class="filter-select">
+                  <option value="">All</option>
+                  <option value="queued">Queued</option>
+                  <option value="processing">Processing</option>
+                  <option value="rate_limited">Rate Limited</option>
+                  <option value="processed">Processed</option>
+                  <option value="failed">Failed</option>
+                </select>
+                <button id="refresh-docs-btn" class="btn btn-secondary btn-sm">Refresh</button>
+                <button id="retry-all-docs-btn" class="btn btn-warning btn-sm" style="display:none">Retry All Paused</button>
+                <button id="cancel-all-docs-btn" class="btn btn-danger btn-sm" style="display:none">Cancel All</button>
+                <button id="clear-completed-btn" class="btn btn-secondary btn-sm" style="display:none">Clear Completed</button>
+                <button id="clear-failed-btn" class="btn btn-secondary btn-sm" style="display:none">Clear Failed</button>
+              </div>
+            </div>
+            <div class="documents-container">
+              <table class="data-table" id="documents-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th data-i18n="filename">Filename</th>
+                    <th data-i18n="type">Type</th>
+                    <th data-i18n="status">Status</th>
+                    <th>Progress / Step</th>
+                    <th data-i18n="chunks">KPs</th>
+                    <th data-i18n="uploaded">Time</th>
+                    <th data-i18n="actions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="documents-tbody">
+                  <tr class="skeleton-row"><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-70"></div></td><td><div class="skeleton-line w-30"></div></td><td><div class="skeleton-line w-40"></div></td><td><div class="skeleton-line w-50"></div></td><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-60"></div></td><td><div class="skeleton-line w-40"></div></td></tr>
+                  <tr class="skeleton-row"><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-60"></div></td><td><div class="skeleton-line w-30"></div></td><td><div class="skeleton-line w-40"></div></td><td><div class="skeleton-line w-45"></div></td><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-55"></div></td><td><div class="skeleton-line w-40"></div></td></tr>
+                  <tr class="skeleton-row"><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-80"></div></td><td><div class="skeleton-line w-30"></div></td><td><div class="skeleton-line w-40"></div></td><td><div class="skeleton-line w-35"></div></td><td><div class="skeleton-line w-20"></div></td><td><div class="skeleton-line w-50"></div></td><td><div class="skeleton-line w-40"></div></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -652,7 +655,6 @@
         <div class="tab-header">
           <h2>Decisions</h2>
           <div class="tab-header-actions">
-            <button id="run-cleanup-btn" class="btn btn-secondary">Run Cleanup</button>
             <button id="refresh-decisions-btn" class="btn btn-secondary">Refresh</button>
           </div>
         </div>
@@ -738,105 +740,158 @@
         </div>
       </section>
 
-      <!-- Stats Tab -->
-      <section class="tab-content" id="tab-stats">
-        <div class="tab-header">
-          <h2 data-i18n="stats_title">System Statistics</h2>
-          <div class="header-actions">
-            <button id="sync-aliases-btn" class="btn btn-secondary" title="Generate search aliases for nodes without them">
-              <span data-i18n="sync_aliases">Sync Aliases</span>
-              <span class="loading-spinner hidden"></span>
-            </button>
-            <button id="sync-embeddings-btn" class="btn btn-secondary">
-              <span data-i18n="sync_embeddings">Sync Embeddings</span>
-              <span class="loading-spinner hidden"></span>
-            </button>
-            <button id="refresh-stats-btn" class="btn btn-secondary" data-i18n="refresh">Refresh</button>
-          </div>
-        </div>
-
-        <div class="stats-container" id="stats-container">
-          <!-- Skeleton stats -->
-          <div class="skeleton-stats">
-            <div class="skeleton-stat-card">
-              <div class="skeleton-circle"></div>
-              <div class="skeleton-line w-60"></div>
-              <div class="skeleton-line w-40"></div>
-            </div>
-            <div class="skeleton-stat-card">
-              <div class="skeleton-circle"></div>
-              <div class="skeleton-line w-50"></div>
-              <div class="skeleton-line w-45"></div>
-            </div>
-            <div class="skeleton-stat-card">
-              <div class="skeleton-circle"></div>
-              <div class="skeleton-line w-70"></div>
-              <div class="skeleton-line w-35"></div>
-            </div>
-            <div class="skeleton-stat-card">
-              <div class="skeleton-circle"></div>
-              <div class="skeleton-line w-55"></div>
-              <div class="skeleton-line w-50"></div>
-            </div>
-          </div>
-        </div>
-      </section>
       <!-- Settings Tab -->
       <section class="tab-content" id="tab-settings">
         <div class="tab-header">
-          <h2>LLM Settings</h2>
+          <h2>Settings</h2>
         </div>
 
-        <div class="settings-card">
-          <h3>Model Provider</h3>
-          <div class="options-grid">
-            <div class="option-group">
-              <label class="option-label-row">Provider</label>
-              <select class="option-select" id="settings-provider">
-                <option value="openai">OpenAI</option>
-                <option value="gemini">Gemini</option>
+        <!-- Settings sub-navigation -->
+        <nav class="settings-nav" id="settings-nav">
+          <button class="settings-nav-btn active" data-section="settings-section-stats">Overview</button>
+          <button class="settings-nav-btn" data-section="settings-section-schema">Schema & Mapping</button>
+          <button class="settings-nav-btn" data-section="settings-section-model">Model Provider</button>
+          <button class="settings-nav-btn" data-section="settings-section-prompts">LLM Prompts</button>
+        </nav>
+
+        <!-- Section: Stats Overview -->
+        <div class="settings-section active" id="settings-section-stats">
+          <div class="settings-card" id="settings-stats-card">
+            <div class="settings-card-header">
+              <h3>Stats Overview</h3>
+              <div class="header-actions" style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+                <button id="sync-aliases-btn" class="btn btn-secondary btn-sm" title="Generate search aliases for nodes without them">
+                  <span data-i18n="sync_aliases">Sync Aliases</span>
+                  <span class="loading-spinner hidden"></span>
+                </button>
+                <button id="sync-embeddings-btn" class="btn btn-secondary btn-sm">
+                  <span data-i18n="sync_embeddings">Sync Embeddings</span>
+                  <span class="loading-spinner hidden"></span>
+                </button>
+              </div>
+            </div>
+            <div id="settings-stats-body">
+              <div class="stats-container" id="stats-container">
+                <div class="skeleton-stats">
+                  <div class="skeleton-stat-card">
+                    <div class="skeleton-circle"></div>
+                    <div class="skeleton-line w-60"></div>
+                    <div class="skeleton-line w-40"></div>
+                  </div>
+                  <div class="skeleton-stat-card">
+                    <div class="skeleton-circle"></div>
+                    <div class="skeleton-line w-50"></div>
+                    <div class="skeleton-line w-45"></div>
+                  </div>
+                  <div class="skeleton-stat-card">
+                    <div class="skeleton-circle"></div>
+                    <div class="skeleton-line w-70"></div>
+                    <div class="skeleton-line w-35"></div>
+                  </div>
+                  <div class="skeleton-stat-card">
+                    <div class="skeleton-circle"></div>
+                    <div class="skeleton-line w-55"></div>
+                    <div class="skeleton-line w-50"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Schema & Mapping -->
+        <div class="settings-section" id="settings-section-schema">
+          <div class="settings-card" id="settings-schema-card">
+            <h3>Schema & Mapping</h3>
+            <div id="settings-schema-body">
+              <div class="form-group">
+                <label>Mapping Mode</label>
+                <div class="toggle-group" id="mapping-mode-toggle">
+                  <button class="toggle-btn active" data-value="free">Free</button>
+                  <button class="toggle-btn" data-value="guided">Guided</button>
+                </div>
+                <p class="option-hint">Free: LLM invents topic names. Guided: KPs map to your schema nodes.</p>
+              </div>
+              <div class="form-group" id="strictness-group">
+                <label>Strictness (Guided only)</label>
+                <div class="toggle-group" id="mapping-strictness-toggle">
+                  <button class="toggle-btn active" data-value="soft">Soft</button>
+                  <button class="toggle-btn" data-value="hard">Hard</button>
+                </div>
+                <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
+              </div>
+              <div class="form-group">
+                <label>Tree Routing (Query)</label>
+                <div class="toggle-group" id="tree-routing-toggle">
+                  <button class="toggle-btn active" data-value="keyword">Keyword</button>
+                  <button class="toggle-btn" data-value="vector">Vector</button>
+                  <button class="toggle-btn" data-value="llm">LLM</button>
+                </div>
+                <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
+                <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-primary" id="save-schema-settings">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Model Provider -->
+        <div class="settings-section" id="settings-section-model">
+          <div class="settings-card">
+            <h3>Model Provider</h3>
+            <div class="options-grid">
+              <div class="option-group">
+                <label class="option-label-row">Provider</label>
+                <select class="option-select" id="settings-provider">
+                  <option value="openai">OpenAI</option>
+                  <option value="gemini">Gemini</option>
+                </select>
+              </div>
+              <div class="option-group">
+                <label class="option-label-row">LLM Model</label>
+                <input type="text" id="settings-model" class="option-select" placeholder="e.g. gpt-4o-mini">
+              </div>
+              <div class="option-group">
+                <label class="option-label-row">Embedding Model</label>
+                <input type="text" id="settings-embed-model" class="option-select" placeholder="e.g. text-embedding-3-large">
+              </div>
+            </div>
+            <div id="settings-api-status" class="settings-api-status"></div>
+            <div class="settings-warning hidden" id="settings-embed-warning">
+              Switching providers requires re-generating all embeddings (use Sync Embeddings in Overview).
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="settings-save-btn">Save</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Prompt Settings -->
+        <div class="settings-section" id="settings-section-prompts">
+          <div class="settings-card" id="prompts-card">
+            <div class="prompts-header">
+              <h3>LLM Prompts</h3>
+              <button class="btn btn-sm btn-danger" id="prompts-reset-all-btn">Reset All to Defaults</button>
+            </div>
+            <p class="prompts-subtitle">Customize LLM prompts for this dataset. Use <code>{{variable}}</code> placeholders for dynamic values.</p>
+
+            <div class="prompt-filter-row">
+              <select id="prompt-category-filter" class="option-select">
+                <option value="all">All Categories</option>
+                <option value="ingestion">Ingestion</option>
+                <option value="query">Query</option>
+                <option value="routing">Routing</option>
               </select>
+              <label class="prompt-custom-filter">
+                <input type="checkbox" id="prompt-custom-only"> Show customized only
+              </label>
             </div>
-            <div class="option-group">
-              <label class="option-label-row">LLM Model</label>
-              <input type="text" id="settings-model" class="option-select" placeholder="e.g. gpt-4o-mini">
+
+            <div id="prompts-list" class="prompts-list">
+              <!-- Prompt cards rendered by JS -->
             </div>
-            <div class="option-group">
-              <label class="option-label-row">Embedding Model</label>
-              <input type="text" id="settings-embed-model" class="option-select" placeholder="e.g. text-embedding-3-large">
-            </div>
-          </div>
-          <div id="settings-api-status" class="settings-api-status"></div>
-          <div class="settings-warning hidden" id="settings-embed-warning">
-            ⚠ Switching providers requires re-generating all embeddings (use Sync Embeddings in Stats).
-          </div>
-          <div class="form-actions">
-            <button class="btn btn-primary" id="settings-save-btn">Save</button>
-          </div>
-        </div>
-
-        <!-- Prompt Settings -->
-        <div class="settings-card" id="prompts-card">
-          <div class="prompts-header">
-            <h3>LLM Prompts</h3>
-            <button class="btn btn-sm btn-danger" id="prompts-reset-all-btn">Reset All to Defaults</button>
-          </div>
-          <p class="prompts-subtitle">Customize LLM prompts for this dataset. Use <code>{{variable}}</code> placeholders for dynamic values.</p>
-
-          <div class="prompt-filter-row">
-            <select id="prompt-category-filter" class="option-select">
-              <option value="all">All Categories</option>
-              <option value="ingestion">Ingestion</option>
-              <option value="query">Query</option>
-              <option value="routing">Routing</option>
-            </select>
-            <label class="prompt-custom-filter">
-              <input type="checkbox" id="prompt-custom-only"> Show customized only
-            </label>
-          </div>
-
-          <div id="prompts-list" class="prompts-list">
-            <!-- Prompt cards rendered by JS -->
           </div>
         </div>
       </section>

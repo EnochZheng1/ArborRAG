@@ -39,9 +39,25 @@ router.get("/decisions", (req, res) => {
 
 router.get("/decisions/stats", (req, res) => {
   try {
-    res.json(DecisionRepo.countByStatus());
+    const stats = DecisionRepo.countByStatus();
+    stats.by_action = DecisionRepo.countPendingByAction();
+    res.json(stats);
   } catch (err) {
     logger.error("GET /decisions/stats error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Bulk reject by action type ────────────────────────────────────────────────
+
+router.post("/decisions/bulk-reject", (req, res) => {
+  try {
+    const { action } = req.body || {};
+    if (!action) return res.status(400).json({ error: "action is required" });
+    const rejected = DecisionRepo.bulkRejectByAction(action);
+    res.json({ success: true, rejected });
+  } catch (err) {
+    logger.error("POST /decisions/bulk-reject error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -131,6 +147,29 @@ router.post("/decisions/:id/accept", async (req, res) => {
         }
         const result = executeMerge(sourceNodeId, targetNodeId);
         actionResult = { nodesMerged: true, ...result };
+        break;
+      }
+
+      case "value_conflict": {
+        const { resolution } = req.body || {};
+        if (!resolution || !["keep_incoming", "keep_existing", "keep_both"].includes(resolution)) {
+          return res.status(400).json({ error: "resolution must be keep_incoming, keep_existing, or keep_both" });
+        }
+        if (resolution === "keep_both") {
+          // Both chunks stay as-is
+          actionResult = { kept: "both" };
+        } else if (decision.incoming_chunk_id && decision.target_chunk_id) {
+          if (resolution === "keep_incoming") {
+            ChunkRepo.supersede(decision.target_chunk_id, decision.incoming_chunk_id);
+            actionResult = { kept: "incoming", superseded: decision.target_chunk_id };
+          } else {
+            ChunkRepo.supersede(decision.incoming_chunk_id, decision.target_chunk_id);
+            actionResult = { kept: "existing", superseded: decision.incoming_chunk_id };
+          }
+        } else {
+          // Missing chunk refs — just resolve without data changes
+          actionResult = { kept: resolution.replace("keep_", ""), note: "chunk references missing, resolved without data change" };
+        }
         break;
       }
 

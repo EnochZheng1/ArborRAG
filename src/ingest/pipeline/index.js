@@ -19,6 +19,7 @@ import {
   stageExtractKPs,
   stageMapChunks,
   stageExtractEntities,
+  stageEmbeddingSync,
   stageFinalize,
   updateDocumentStatus
 } from "./stages.js";
@@ -130,6 +131,7 @@ const STAGES = [
   { name: "enrich",   fn: stageExtractKPs,     skip: ctx => ctx.isDuplicate },
   { name: "map",      fn: stageMapChunks,      skip: ctx => ctx.isDuplicate },
   { name: "entities", fn: stageExtractEntities,skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
+  { name: "embed",    fn: stageEmbeddingSync,  skip: ctx => ctx.isDuplicate },
   { name: "finalize", fn: stageFinalize,       skip: ctx => ctx.isDuplicate }
 ];
 

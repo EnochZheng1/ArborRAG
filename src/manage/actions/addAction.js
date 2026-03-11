@@ -6,12 +6,16 @@
  */
 
 import { findOrCreateTopicNode, assignKPToNode } from "../../ingest/kpNormaliser.js";
-import { ensureRootNode } from "../../ingest/nodeHierarchy.js";
+import { ensureRootNode, generateNodeId } from "../../ingest/nodeHierarchy.js";
 import { resolveKPAction } from "../../ingest/kpDecisionEngine.js";
 import { getPathToNode, getRootNodes } from "../../kg/graphTraversal.js";
+import { wordDiceSimilarity } from "../../ingest/knowledgeExtractor.js";
+import { createNode } from "../../ingest/nodeMapper.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { logAudit } from "../../db/db.js";
 import { logger } from "../../utils/logger.js";
+import { embedNewChunk, reembedNode } from "../../embedding/chunkEmbeddings.js";
+import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
 
 /**
  * Execute an ADD operation.
@@ -41,6 +45,34 @@ export async function executeAdd(content, topicHint, subtopicHint, session) {
     const result = await findOrCreateTopicNode(effectiveTopic, "root", {});
     targetNodeId = result.node_id;
     isNewNode = result._created || false;
+
+    // Guard: if findOrCreateTopicNode reused an existing node by fuzzy match,
+    // verify the match is actually close enough. A vague topic like "Helport"
+    // can falsely match "Helport office location" (Dice 0.50) when the content
+    // is about products. If the name is different and similarity is below 0.6,
+    // create a separate node with the exact topic name.
+    if (!isNewNode && targetNodeId !== "root") {
+      const matchedName = (result.name || "").toLowerCase().trim();
+      const requestedTopic = effectiveTopic.toLowerCase().trim();
+      if (matchedName !== requestedTopic) {
+        const nameSim = wordDiceSimilarity(requestedTopic, matchedName);
+        if (nameSim < 0.6) {
+          logger.info(`[manage:add] Fuzzy match "${result.name}" (score=${nameSim.toFixed(2)}) too loose for "${effectiveTopic}", creating new node`);
+          try {
+            const newNode = createNode({
+              node_id: generateNodeId(effectiveTopic),
+              name: effectiveTopic,
+              parent_id: "root"
+            });
+            targetNodeId = newNode.node_id;
+            isNewNode = true;
+          } catch (createErr) {
+            // If node already exists (race / collision), keep the fuzzy match
+            logger.debug(`[manage:add] Force-create failed: ${createErr.message}, keeping fuzzy match`);
+          }
+        }
+      }
+    }
   } catch (err) {
     logger.warn(`[manage:add] findOrCreateTopicNode failed: ${err.message}`);
     // Fallback: use root node
@@ -107,7 +139,16 @@ export async function executeAdd(content, topicHint, subtopicHint, session) {
     user_message: session?.lastMessage || ""
   });
 
-  // 7. Build path for display
+  // 7. Auto-embed new chunk (+ node if newly created)
+  try {
+    await embedNewChunk(chunkId);
+    if (isNewNode) await reembedNode(targetNodeId);
+    invalidateVectorCache();
+  } catch (e) {
+    logger.warn(`[manage:add] Auto-embed failed (non-fatal): ${e.message}`);
+  }
+
+  // 8. Build path for display
   const nodePath = getPathToNode(targetNodeId).map(n => n.name);
   const targetNode = NodeRepo.findById(targetNodeId);
 
