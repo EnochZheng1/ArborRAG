@@ -4653,6 +4653,7 @@ async function handleCreateDataset() {
 function initDecisions() {
   document.getElementById('refresh-decisions-btn')?.addEventListener('click', loadDecisions);
   document.getElementById('decisions-status-filter')?.addEventListener('change', loadDecisions);
+  document.getElementById('bulk-dismiss-btn')?.addEventListener('click', bulkDismissMerges);
 }
 
 async function loadDecisions() {
@@ -4688,6 +4689,11 @@ async function loadDecisions() {
         <span class="decision-stat-pill decision-stat-auto">${stats.auto_resolved} auto-resolved</span>
         ${actionPills}
       `;
+
+      // Show bulk-dismiss button only when there are pending merge_suggestions
+      const mergeCount = (stats.by_action || []).find(a => a.action === 'merge_suggestion')?.count || 0;
+      const bulkBtn = document.getElementById('bulk-dismiss-btn');
+      if (bulkBtn) bulkBtn.style.display = mergeCount > 0 ? '' : 'none';
     }
 
     if (!decisions.length) {
@@ -4787,6 +4793,20 @@ async function resolveConflict(id, resolution) {
       body: JSON.stringify({ resolution })
     });
     showToast(`Conflict resolved: ${resolution.replace(/_/g, ' ')}`, 'success');
+    loadDecisions();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function bulkDismissMerges() {
+  if (!confirm('Dismiss all pending merge suggestions? This cannot be undone.')) return;
+  try {
+    const result = await api('/decisions/bulk-reject', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'merge_suggestion' })
+    });
+    showToast(`Dismissed ${result.rejected} merge suggestions`, 'success');
     loadDecisions();
   } catch (err) {
     showToast(err.message, 'error');

@@ -1,6 +1,6 @@
 import fs from "fs";
 import { ingestLogger as logger } from "../utils/logger.js";
-import { processDocument } from "./index.js";
+import { processDocument, runPostIngestEmbeddingSync } from "./index.js";
 import { getAllConnections } from "../db/datasetManager.js";
 import { runWithDb } from "../db/activeDb.js";
 import { RateLimitError } from "../utils/rateLimitError.js";
@@ -175,6 +175,15 @@ async function processClaimedJob(job, conn, datasetId) {
     completeJob(conn, job.id, result, result?.documentId || null);
     maybeCleanupUploadedFile(job.file_path, duplicate ? "duplicate" : "completed");
     logger.info(`[ingest-job:${job.id}] completed`);
+
+    // Run embedding sync once after document is fully processed
+    if (result?.success && !duplicate) {
+      try {
+        await runWithDb(conn, () => runPostIngestEmbeddingSync());
+      } catch (embedErr) {
+        logger.warn(`[ingest-job:${job.id}] Post-ingest embedding sync failed: ${embedErr.message}`);
+      }
+    }
   } catch (err) {
     if (err instanceof RateLimitError) {
       // processDocument already rolled back the partial document state.

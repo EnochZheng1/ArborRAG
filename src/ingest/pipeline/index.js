@@ -131,7 +131,6 @@ const STAGES = [
   { name: "enrich",   fn: stageExtractKPs,     skip: ctx => ctx.isDuplicate },
   { name: "map",      fn: stageMapChunks,      skip: ctx => ctx.isDuplicate },
   { name: "entities", fn: stageExtractEntities,skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
-  { name: "embed",    fn: stageEmbeddingSync,  skip: ctx => ctx.isDuplicate },
   { name: "finalize", fn: stageFinalize,       skip: ctx => ctx.isDuplicate }
 ];
 
@@ -244,5 +243,26 @@ export async function processDocumentBatch(filePaths, options = {}) {
     }
   }
 
+  // Run embedding sync once after all documents are processed
+  if (results.successful > 0) {
+    await runPostIngestEmbeddingSync();
+  }
+
   return results;
+}
+
+/**
+ * Run embedding sync once after ingestion completes.
+ * Called by processDocumentBatch and by jobQueue after each job.
+ */
+export async function runPostIngestEmbeddingSync() {
+  try {
+    await stageEmbeddingSync({
+      documentId: null,
+      setStep: () => {},
+      results: { stats: {} }
+    });
+  } catch (err) {
+    logger.warn(`Post-ingest embedding sync failed (non-fatal): ${err.message}`);
+  }
 }

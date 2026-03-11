@@ -23,7 +23,7 @@ export * from "./chunker.js";
 export * from "./metadataExtractor.js";
 export * from "./nodeMapper.js";
 // Re-export pipeline entry points
-export { processDocument, processDocumentBatch } from "./pipeline/index.js";
+export { processDocument, processDocumentBatch, runPostIngestEmbeddingSync } from "./pipeline/index.js";
 
 // ── Document row helper ───────────────────────────────────────────────────────
 
