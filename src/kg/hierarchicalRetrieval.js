@@ -921,6 +921,9 @@ export async function hierarchicalRetrieve(query, options = {}) {
     }
   }
 
+  // Track which routing mode was used for the query result indicator
+  results.routing_mode = useLlmRouting ? 'llm' : useVectorRouting ? 'vector' : 'keyword';
+
   const relevantNodes = await navigateTreeTopDown(retrievalQuery, { beamWidth, maxDepth, depthDecay: 0.96, useLlmRouting, useVectorRouting, queryEmbedding });
   results.nodes = relevantNodes;
   results.sources.add('tree_navigation');

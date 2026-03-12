@@ -18,6 +18,14 @@ function _wsSend(msg) {
   }
 }
 
+function _updateWsIndicator(status) {
+  const el = document.getElementById('ws-status');
+  if (!el) return;
+  el.className = 'ws-status ws-' + status;
+  el.title = status === 'connected' ? 'Live connection' :
+             status === 'reconnecting' ? 'Reconnecting...' : 'Disconnected';
+}
+
 function initWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   _ws = new WebSocket(`${proto}//${location.host}`);
@@ -25,6 +33,7 @@ function initWebSocket() {
   _ws.addEventListener('open', () => {
     _wsRetries = 0; // reset backoff on successful connection
     _wsQueue.splice(0).forEach(msg => _ws.send(msg));
+    _updateWsIndicator('connected');
   });
 
   _ws.addEventListener('message', (event) => {
@@ -45,7 +54,11 @@ function initWebSocket() {
 
   _ws.addEventListener('close', () => {
     _ws = null;
-    if (_wsRetries >= _WS_MAX_RETRIES) return; // give up after max retries
+    if (_wsRetries >= _WS_MAX_RETRIES) {
+      _updateWsIndicator('disconnected');
+      return; // give up after max retries
+    }
+    _updateWsIndicator('reconnecting');
     const delay = Math.min(_WS_BASE_DELAY_MS * Math.pow(2, _wsRetries), 30000);
     _wsRetries++;
     setTimeout(initWebSocket, delay);
@@ -487,6 +500,7 @@ function markAllTabsDirty() {
 
 // Query History Management
 const HISTORY_KEY = 'treekb_query_history';
+const FAVORITES_KEY = 'treekb_query_favorites';
 const MAX_HISTORY = 20;
 
 function getQueryHistory() {
@@ -499,6 +513,30 @@ function getQueryHistory() {
 
 function saveQueryHistory(history) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
+}
+
+function getQueryFavorites() {
+  try {
+    return JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveQueryFavorites(favs) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(favs));
+}
+
+function toggleFavorite(query) {
+  const favs = getQueryFavorites();
+  const idx = favs.findIndex(f => f.query === query);
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+  } else {
+    favs.unshift({ query, savedAt: Date.now() });
+  }
+  saveQueryFavorites(favs);
+  renderQueryHistory();
 }
 
 function addToHistory(query, queryType, confidence) {
@@ -525,23 +563,57 @@ function renderQueryHistory() {
   if (!historyList) return;
 
   const history = getQueryHistory();
+  const favs = getQueryFavorites();
+  const favSet = new Set(favs.map(f => f.query));
 
-  if (history.length === 0) {
+  let html = '';
+
+  // Favorites section
+  if (favs.length > 0) {
+    html += `<div class="history-section-label">Favorites</div>`;
+    html += favs.map(f => {
+      const truncated = f.query.length > 60 ? f.query.slice(0, 60) + '...' : f.query;
+      return `
+        <div class="history-item" data-query="${encodeURIComponent(f.query)}">
+          <span class="history-fav-btn active" data-fav-query="${encodeURIComponent(f.query)}">&#9733;</span>
+          <span class="history-query">${escapeHtml(truncated)}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // Recent queries section
+  if (history.length > 0) {
+    if (favs.length > 0) html += `<div class="history-section-label">Recent</div>`;
+    html += history.map(item => {
+      const timeAgo = formatTimeAgo(item.timestamp);
+      const truncatedQuery = item.query.length > 60 ? item.query.slice(0, 60) + '...' : item.query;
+      const isFav = favSet.has(item.query);
+      return `
+        <div class="history-item" data-query="${encodeURIComponent(item.query)}">
+          <span class="history-fav-btn${isFav ? ' active' : ''}" data-fav-query="${encodeURIComponent(item.query)}">&#9733;</span>
+          <span class="history-query">${escapeHtml(truncatedQuery)}</span>
+          <span class="history-type">${item.queryType.replace('_', ' ')}</span>
+          <span class="history-time">${timeAgo}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  if (!html) {
     historyList.innerHTML = `<div class="history-empty">${t('no_history')}</div>`;
     return;
   }
 
-  historyList.innerHTML = history.map(item => {
-    const timeAgo = formatTimeAgo(item.timestamp);
-    const truncatedQuery = item.query.length > 60 ? item.query.slice(0, 60) + '...' : item.query;
-    return `
-      <div class="history-item" data-query="${encodeURIComponent(item.query)}">
-        <span class="history-query">${escapeHtml(truncatedQuery)}</span>
-        <span class="history-type">${item.queryType.replace('_', ' ')}</span>
-        <span class="history-time">${timeAgo}</span>
-      </div>
-    `;
-  }).join('');
+  historyList.innerHTML = html;
+
+  // Attach favorite toggle events (stop propagation so clicking star doesn't trigger query)
+  historyList.querySelectorAll('.history-fav-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFavorite(decodeURIComponent(btn.dataset.favQuery));
+    });
+  });
 }
 
 function formatTimeAgo(timestamp) {
@@ -622,6 +694,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initGraphView();
   initMobileSidebar();
   initTreeSearch();
+  initTreeContentSearch();
   initWebSocket();
 });
 
@@ -1093,8 +1166,14 @@ function renderAskExecutionSummary(result) {
   const snippetsCount = Array.isArray(result.snippets) ? result.snippets.length : 0;
   const totalMs = Number(result.trace?.total_duration_ms);
 
+  // Routing mode indicator
+  const routingModeLabels = { keyword: 'Keyword', vector: 'Vector', llm: 'LLM' };
+  const routingMode = result.routing_mode || 'keyword';
+  const routingLabel = routingModeLabels[routingMode] || routingMode;
+
   const metricItems = [
     { label: 'Type', value: formatQueryTypeLabel(result.query_type || 'simple_lookup') },
+    { label: 'Routing', value: routingLabel },
     { label: 'Confidence', value: confidenceText },
     { label: 'Chunks', value: formatSummaryNumber(chunksUsed) },
     { label: 'Sources', value: formatSummaryNumber(sourceCount) },
@@ -2229,6 +2308,118 @@ function initTree() {
   document.getElementById('close-add-chunk-modal').addEventListener('click', hideAddChunkModal);
   document.getElementById('cancel-add-chunk').addEventListener('click', hideAddChunkModal);
   document.getElementById('add-chunk-form').addEventListener('submit', handleAddChunk);
+  document.getElementById('tree-health-btn')?.addEventListener('click', toggleTreeHealth);
+  initBatchOps();
+}
+
+async function toggleTreeHealth() {
+  const panel = document.getElementById('tree-health-panel');
+  if (!panel) return;
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  const summary = document.getElementById('tree-health-summary');
+  const issuesDiv = document.getElementById('tree-health-issues');
+  summary.innerHTML = '<span class="loading-text">Loading health report...</span>';
+  issuesDiv.innerHTML = '';
+  try {
+    const data = await api('/nodes/health');
+    const nodes = data.nodes || [];
+    const issues = data.issues || [];
+    const embedded = nodes.filter(n => n.has_embedding).length;
+    const withSummary = nodes.filter(n => n.has_summary).length;
+    const schema = nodes.filter(n => n.is_schema_node).length;
+    const empty = issues.filter(i => i.issue === 'empty').length;
+    const noEmbed = issues.filter(i => i.issue === 'no_embedding').length;
+    summary.innerHTML = `
+      <div class="health-stat"><span class="health-stat-val">${nodes.length}</span> nodes</div>
+      <div class="health-stat"><span class="health-stat-val">${embedded}</span> embedded</div>
+      <div class="health-stat"><span class="health-stat-val">${withSummary}</span> with summary</div>
+      <div class="health-stat"><span class="health-stat-val">${schema}</span> schema</div>
+      ${issues.length > 0 ? `<div class="health-stat health-stat-warn"><span class="health-stat-val">${issues.length}</span> issues</div>` : '<div class="health-stat health-stat-ok">No issues</div>'}
+    `;
+    if (issues.length > 0) {
+      const issueLabels = { empty: 'Empty (no chunks, no children)', low_chunks: 'Low content (1 chunk)', no_embedding: 'Missing embedding' };
+      issuesDiv.innerHTML = issues.slice(0, 50).map(i => `
+        <div class="health-issue health-issue-${i.issue}">
+          <span class="health-issue-name">${escapeHtml(i.name)}</span>
+          <span class="health-issue-type">${issueLabels[i.issue] || i.issue}</span>
+        </div>
+      `).join('') + (issues.length > 50 ? `<div class="health-issue">...and ${issues.length - 50} more</div>` : '');
+    }
+  } catch (err) {
+    summary.innerHTML = `<span class="loading-text error">${escapeHtml(err.message)}</span>`;
+  }
+}
+
+function _updateBatchToolbar() {
+  const toolbar = document.getElementById('tree-batch-toolbar');
+  const checked = document.querySelectorAll('.tree-node-cb:checked');
+  if (!toolbar) return;
+  if (checked.length > 0) {
+    toolbar.classList.remove('hidden');
+    document.getElementById('batch-count').textContent = `${checked.length} selected`;
+    // Populate reparent dropdown with nodes not in selection
+    const sel = document.getElementById('batch-reparent-select');
+    const selectedIds = new Set([...checked].map(cb => cb.dataset.nodeId));
+    const opts = ['<option value="">Move to...</option>', '<option value="__root__">(Root level)</option>'];
+    (allNodes || []).forEach(n => {
+      if (!selectedIds.has(n.node_id)) opts.push(`<option value="${n.node_id}">${escapeHtml(n.name)}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    document.getElementById('batch-reparent-btn').disabled = !sel.value;
+    sel.onchange = () => { document.getElementById('batch-reparent-btn').disabled = !sel.value; };
+  } else {
+    toolbar.classList.add('hidden');
+  }
+}
+
+function initBatchOps() {
+  document.getElementById('batch-deselect-btn')?.addEventListener('click', () => {
+    document.querySelectorAll('.tree-node-cb:checked').forEach(cb => { cb.checked = false; });
+    _updateBatchToolbar();
+  });
+  document.getElementById('batch-delete-btn')?.addEventListener('click', batchDeleteNodes);
+  document.getElementById('batch-reparent-btn')?.addEventListener('click', batchReparentNodes);
+}
+
+async function batchDeleteNodes() {
+  const checked = document.querySelectorAll('.tree-node-cb:checked');
+  const ids = [...checked].map(cb => cb.dataset.nodeId);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} node(s)? Their chunks will be re-assigned to parent nodes.`)) return;
+  let deleted = 0;
+  for (const id of ids) {
+    try {
+      await api(`/nodes/${id}`, { method: 'DELETE' });
+      deleted++;
+    } catch (err) {
+      showToast(`Failed to delete node: ${err.message}`, 'error');
+    }
+  }
+  showToast(`Deleted ${deleted} node(s)`, 'success');
+  loadTree();
+}
+
+async function batchReparentNodes() {
+  const checked = document.querySelectorAll('.tree-node-cb:checked');
+  const ids = [...checked].map(cb => cb.dataset.nodeId);
+  const newParent = document.getElementById('batch-reparent-select').value;
+  if (!ids.length || !newParent) return;
+  const parentId = newParent === '__root__' ? null : newParent;
+  let moved = 0;
+  for (const id of ids) {
+    try {
+      await api(`/nodes/${id}`, { method: 'PUT', body: JSON.stringify({ parent_id: parentId }) });
+      moved++;
+    } catch (err) {
+      showToast(`Failed to move node: ${err.message}`, 'error');
+    }
+  }
+  showToast(`Moved ${moved} node(s)`, 'success');
+  loadTree();
 }
 
 async function handleEmptyTree() {
@@ -2269,6 +2460,7 @@ async function loadTree() {
     const data = await api('/nodes');
     treeData = data.tree || [];
     allNodes = flattenTree(treeData);
+    _lazyChildrenMap.clear();
 
     if (!data.tree || data.tree.length === 0) {
       treeView.innerHTML = renderEmptyState(
@@ -2280,14 +2472,16 @@ async function loadTree() {
       return;
     }
 
-    // Preserve search wrapper, replace tree content only
-    const searchWrapper = document.getElementById('tree-search-wrapper');
-    const searchHtml = searchWrapper ? searchWrapper.outerHTML : '';
+    // Preserve search row + content results, replace tree content only
+    const searchRow = document.querySelector('.tree-search-row');
+    const contentResults = document.getElementById('tree-content-results');
+    const searchHtml = (searchRow ? searchRow.outerHTML : '') + (contentResults ? contentResults.outerHTML : '');
     treeView.innerHTML = searchHtml + renderTree(data.tree);
     attachTreeEvents();
     populateNodeSelects();
     // Re-init search events
     initTreeSearch();
+    initTreeContentSearch();
 
     // Update graph/tree-diagram if currently in that view
     if (currentGraphView === 'graph') createGraph();
@@ -2307,6 +2501,11 @@ function flattenTree(nodes, result = []) {
   return result;
 }
 
+// Tree virtualization: lazy child rendering
+// Children beyond TREE_RENDER_DEPTH are stored in _lazyChildrenMap and rendered on expand.
+const TREE_RENDER_DEPTH = 2; // render root (0) + first expanded level (1) immediately
+const _lazyChildrenMap = new Map(); // node_id -> children array
+
 function renderTree(nodes, depth = 0) {
   if (!nodes?.length) return '';
 
@@ -2322,14 +2521,29 @@ function renderTree(nodes, depth = 0) {
       ? (childExpanded ? '\u25BC' : '\u25B6')
       : '';
 
+    // Decide whether to render children or defer them
+    let childHtml = '';
+    let lazyAttr = '';
+    if (hasChildren) {
+      if (childDepth < TREE_RENDER_DEPTH) {
+        // Within render depth — render children immediately
+        childHtml = renderTree(node.children, childDepth);
+      } else {
+        // Beyond render depth — store for lazy rendering
+        _lazyChildrenMap.set(node.node_id, node.children);
+        lazyAttr = ' data-lazy="1"';
+      }
+    }
+
     html += `
-      <li class="tree-branch">
-        <div class="tree-node-item" data-node-id="${node.node_id}">
+      <li class="tree-branch"${lazyAttr} data-branch-id="${node.node_id}">
+        <div class="tree-node-item" data-node-id="${node.node_id}" draggable="true">
+          <input type="checkbox" class="tree-node-cb" data-node-id="${node.node_id}" onclick="event.stopPropagation(); _updateBatchToolbar();">
           <span class="tree-toggle">${toggleSymbol}</span>
           <span class="tree-icon">${hasChildren ? '📁' : '📄'}</span>
           <span class="tree-name">${node.name}</span>
         </div>
-        ${hasChildren ? renderTree(node.children, depth + 1) : ''}
+        ${childHtml}
       </li>
     `;
   }
@@ -2338,30 +2552,112 @@ function renderTree(nodes, depth = 0) {
   return html;
 }
 
-function attachTreeEvents() {
-  document.querySelectorAll('.tree-node-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const nodeId = item.dataset.nodeId;
-      const toggle = item.querySelector('.tree-toggle');
-      const sibling = item.nextElementSibling;
-      const children = sibling && sibling.classList.contains('tree-children')
-        ? sibling
-        : null;
+/** Render lazy children for a specific node and attach events. */
+function _materializeLazyChildren(branchEl, nodeId) {
+  const children = _lazyChildrenMap.get(nodeId);
+  if (!children) return;
+  _lazyChildrenMap.delete(nodeId);
+  branchEl.removeAttribute('data-lazy');
 
-      // Toggle expand/collapse
-      if (children) {
-        const isExpanded = children.classList.toggle('expanded');
-        toggle.textContent = isExpanded ? '\u25BC' : '\u25B6';
-      }
+  // Render children at TREE_RENDER_DEPTH so their own children are also lazy
+  const childHtml = renderTree(children, TREE_RENDER_DEPTH);
+  branchEl.insertAdjacentHTML('beforeend', childHtml);
 
-      // Show node detail
-      loadNodeDetail(nodeId).catch(console.error);
-
-      // Update selected state
-      document.querySelectorAll('.tree-node-item').forEach(i => i.classList.remove('selected'));
-      item.classList.add('selected');
-    });
+  // Attach events to newly created items
+  branchEl.querySelectorAll('.tree-node-item').forEach(item => {
+    if (!item._eventsAttached) _attachSingleNodeEvents(item);
   });
+}
+
+/** Force-render ALL lazy children (used before search). */
+function _materializeAllLazy() {
+  // Repeatedly materialize until no lazy nodes remain (handles nested lazy)
+  let safety = 0;
+  while (_lazyChildrenMap.size > 0 && safety++ < 50) {
+    const lazyBranches = document.querySelectorAll('.tree-branch[data-lazy]');
+    if (lazyBranches.length === 0) break;
+    lazyBranches.forEach(branch => {
+      const nodeId = branch.dataset.branchId;
+      if (nodeId) _materializeLazyChildren(branch, nodeId);
+    });
+  }
+}
+
+function _attachSingleNodeEvents(item) {
+  if (item._eventsAttached) return;
+  item._eventsAttached = true;
+
+  item.addEventListener('click', (e) => {
+    // Ignore clicks on checkbox
+    if (e.target.classList.contains('tree-node-cb')) return;
+
+    const nodeId = item.dataset.nodeId;
+    const toggle = item.querySelector('.tree-toggle');
+    const branch = item.closest('.tree-branch');
+
+    // Materialize lazy children on first expand
+    if (branch?.hasAttribute('data-lazy')) {
+      _materializeLazyChildren(branch, nodeId);
+    }
+
+    const sibling = item.nextElementSibling;
+    const children = sibling && sibling.classList.contains('tree-children')
+      ? sibling
+      : null;
+
+    // Toggle expand/collapse
+    if (children) {
+      const isExpanded = children.classList.toggle('expanded');
+      toggle.textContent = isExpanded ? '\u25BC' : '\u25B6';
+    }
+
+    // Show node detail
+    loadNodeDetail(nodeId).catch(console.error);
+
+    // Update selected state
+    document.querySelectorAll('.tree-node-item').forEach(i => i.classList.remove('selected'));
+    item.classList.add('selected');
+  });
+
+  // Drag-and-drop reparenting
+  item.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', item.dataset.nodeId);
+    e.dataTransfer.effectAllowed = 'move';
+    item.classList.add('dragging');
+  });
+  item.addEventListener('dragend', () => {
+    item.classList.remove('dragging');
+    document.querySelectorAll('.drop-target').forEach(el => el.classList.remove('drop-target'));
+  });
+  item.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    item.classList.add('drop-target');
+  });
+  item.addEventListener('dragleave', () => {
+    item.classList.remove('drop-target');
+  });
+  item.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    item.classList.remove('drop-target');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    const targetId = item.dataset.nodeId;
+    if (draggedId === targetId) return;
+    try {
+      await api(`/nodes/${draggedId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ parent_id: targetId })
+      });
+      showToast('Node moved', 'success');
+      loadTree();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  });
+}
+
+function attachTreeEvents() {
+  document.querySelectorAll('.tree-node-item').forEach(item => _attachSingleNodeEvents(item));
 }
 
 async function loadNodeDetail(nodeId) {
@@ -3699,9 +3995,29 @@ async function loadStats() {
 
       ${tokenStatsHtml}
     `;
+
+    // Update the always-visible embedding coverage bar
+    _updateEmbeddingCoverageBar(data.embeddings);
   } catch (error) {
     container.innerHTML = `<p class="loading-text error">${error.message}</p>`;
   }
+}
+
+function _updateEmbeddingCoverageBar(embeddings) {
+  const fill = document.getElementById('embedding-coverage-fill');
+  const text = document.getElementById('embedding-coverage-text');
+  if (!fill || !text) return;
+  const totalNodes = embeddings?.nodes?.total || 0;
+  const totalChunks = embeddings?.chunks?.total || 0;
+  const embeddedNodes = embeddings?.nodes?.embedded || 0;
+  const embeddedChunks = embeddings?.chunks?.embedded || 0;
+  const total = totalNodes + totalChunks;
+  const embedded = embeddedNodes + embeddedChunks;
+  const pct = total > 0 ? Math.round((embedded / total) * 100) : 0;
+  fill.style.width = pct + '%';
+  fill.className = 'embedding-coverage-fill ' + (pct < 30 ? 'low' : pct < 70 ? 'mid' : 'high');
+  text.textContent = total > 0 ? `${pct}% embedded` : 'No data';
+  document.getElementById('embedding-coverage-bar').title = `Embeddings: ${embedded}/${total} (${pct}%)`;
 }
 
 async function syncEmbeddings() {
@@ -4214,6 +4530,10 @@ function initTreeSearch() {
 
 function filterTree(query) {
   const countEl = document.getElementById('tree-search-count');
+
+  // Materialize all lazy children before filtering so all nodes are searchable
+  if (query) _materializeAllLazy();
+
   const treeItems = document.querySelectorAll('.tree-node-item');
 
   if (!query) {
@@ -4292,6 +4612,54 @@ function filterTree(query) {
 
   if (countEl) {
     countEl.textContent = matchCount > 0 ? `${matchCount} node${matchCount !== 1 ? 's' : ''} found` : 'No matches';
+  }
+}
+
+// ============================================
+// Tree Content Search
+// ============================================
+
+function initTreeContentSearch() {
+  const input = document.getElementById('tree-content-search-input');
+  if (!input) return;
+  let debounceTimer = null;
+  input.addEventListener('input', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => searchTreeContent(input.value.trim()), 300);
+  });
+}
+
+async function searchTreeContent(query) {
+  const resultsDiv = document.getElementById('tree-content-results');
+  if (!resultsDiv) return;
+  if (!query || query.length < 2) {
+    resultsDiv.classList.add('hidden');
+    resultsDiv.innerHTML = '';
+    return;
+  }
+  resultsDiv.classList.remove('hidden');
+  resultsDiv.innerHTML = '<span class="loading-text">Searching...</span>';
+  try {
+    const data = await api(`/nodes/search?q=${encodeURIComponent(query)}&limit=30`);
+    if (!data.results?.length) {
+      resultsDiv.innerHTML = '<span class="empty-state">No content matches found.</span>';
+      return;
+    }
+    resultsDiv.innerHTML = data.results.map(r => `
+      <div class="content-search-group">
+        <div class="content-search-node" data-node-id="${escapeHtml(r.node_id)}">${escapeHtml(r.node_name)} <span class="content-search-count">(${r.chunks.length})</span></div>
+        ${r.chunks.slice(0, 3).map(c => `<div class="content-search-chunk">${escapeHtml(c.preview)}</div>`).join('')}
+      </div>
+    `).join('');
+    resultsDiv.querySelectorAll('[data-node-id]').forEach(el => {
+      el.addEventListener('click', () => {
+        resultsDiv.classList.add('hidden');
+        document.getElementById('tree-content-search-input').value = '';
+        showNodeDetail(el.dataset.nodeId);
+      });
+    });
+  } catch (err) {
+    resultsDiv.innerHTML = `<span class="loading-text error">${escapeHtml(err.message)}</span>`;
   }
 }
 
@@ -4653,7 +5021,8 @@ async function handleCreateDataset() {
 function initDecisions() {
   document.getElementById('refresh-decisions-btn')?.addEventListener('click', loadDecisions);
   document.getElementById('decisions-status-filter')?.addEventListener('change', loadDecisions);
-  document.getElementById('bulk-dismiss-btn')?.addEventListener('click', bulkDismissMerges);
+  document.getElementById('decisions-action-filter')?.addEventListener('change', loadDecisions);
+  document.getElementById('bulk-reject-btn')?.addEventListener('click', bulkRejectFiltered);
 }
 
 async function loadDecisions() {
@@ -4662,12 +5031,14 @@ async function loadDecisions() {
   if (!list) return;
 
   const statusFilter = document.getElementById('decisions-status-filter')?.value || 'pending';
+  const actionFilter = document.getElementById('decisions-action-filter')?.value || '';
 
   try {
     list.innerHTML = '<p class="empty-state">Loading…</p>';
 
+    const actionParam = actionFilter ? `&action=${encodeURIComponent(actionFilter)}` : '';
     const [{ decisions }, stats] = await Promise.all([
-      api(`/decisions?status=${encodeURIComponent(statusFilter)}&limit=100`),
+      api(`/decisions?status=${encodeURIComponent(statusFilter)}&limit=100${actionParam}`),
       api('/decisions/stats')
     ]);
 
@@ -4690,10 +5061,21 @@ async function loadDecisions() {
         ${actionPills}
       `;
 
-      // Show bulk-dismiss button only when there are pending merge_suggestions
-      const mergeCount = (stats.by_action || []).find(a => a.action === 'merge_suggestion')?.count || 0;
-      const bulkBtn = document.getElementById('bulk-dismiss-btn');
-      if (bulkBtn) bulkBtn.style.display = mergeCount > 0 ? '' : 'none';
+      // Show bulk-reject button when viewing pending decisions with an action filter
+      const bulkBtn = document.getElementById('bulk-reject-btn');
+      if (bulkBtn) {
+        const actionLabels = { value_conflict: 'Conflicts', replace_suggestion: 'Replacements', merge_suggestion: 'Merges', node_merge_suggestion: 'Node Merges' };
+        if (statusFilter === 'pending' && actionFilter) {
+          const count = (stats.by_action || []).find(a => a.action === actionFilter)?.count || 0;
+          bulkBtn.style.display = count > 0 ? '' : 'none';
+          bulkBtn.textContent = `Reject All ${actionLabels[actionFilter] || actionFilter} (${count})`;
+        } else if (statusFilter === 'pending' && stats.pending > 0) {
+          bulkBtn.style.display = '';
+          bulkBtn.textContent = `Reject All Pending (${stats.pending})`;
+        } else {
+          bulkBtn.style.display = 'none';
+        }
+      }
     }
 
     if (!decisions.length) {
@@ -4722,6 +5104,23 @@ function highlightValues(text) {
     .replace(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi, '<mark>$&</mark>')
     .replace(/([$¥€£])\s?([\d,]+(?:\.\d+)?)/g, '<mark>$&</mark>')
     .replace(/\b(\d{4}-\d{2}(?:-\d{2})?)\b/g, '<mark>$&</mark>');
+}
+
+function buildDiffSummary(incoming, existing) {
+  // Extract values from both texts and show what differs
+  const valRe = /\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b|[$¥€£]\s?[\d,]+(?:\.\d+)?|\b\d{4}-\d{2}(?:-\d{2})?\b/gi;
+  const inVals = [...(incoming.matchAll(valRe))].map(m => m[0].trim());
+  const exVals = [...(existing.matchAll(valRe))].map(m => m[0].trim());
+  if (!inVals.length && !exVals.length) return '';
+  const inSet = new Set(inVals.map(v => v.toLowerCase()));
+  const exSet = new Set(exVals.map(v => v.toLowerCase()));
+  const onlyIn = inVals.filter(v => !exSet.has(v.toLowerCase()));
+  const onlyEx = exVals.filter(v => !inSet.has(v.toLowerCase()));
+  if (!onlyIn.length && !onlyEx.length) return '';
+  const parts = [];
+  if (onlyIn.length) parts.push(`<span class="diff-incoming">${onlyIn.map(v => escapeHtml(v)).join(', ')}</span>`);
+  if (onlyEx.length) parts.push(`<span class="diff-existing">${onlyEx.map(v => escapeHtml(v)).join(', ')}</span>`);
+  return parts.join(' vs ');
 }
 
 function renderDecisionCard(d) {
@@ -4762,6 +5161,8 @@ function renderDecisionCard(d) {
           <span class="kp-preview-label">Existing</span>
           <div class="kp-preview">${isConflict ? highlightValues(d.target_preview) : escapeHtml(d.target_preview)}</div>
         </div>` : ''}
+      ${isConflict && d.incoming_preview && d.target_preview ? `
+        <div class="decision-diff-summary">${buildDiffSummary(d.incoming_preview, d.target_preview)}</div>` : ''}
       ${isPending && d.action === 'value_conflict' ? `
         <div class="decision-actions">
           <button class="btn btn-primary btn-small" data-conflict-resolve="${d.id}" data-resolution="keep_incoming">Keep Incoming</button>
@@ -4799,14 +5200,30 @@ async function resolveConflict(id, resolution) {
   }
 }
 
-async function bulkDismissMerges() {
-  if (!confirm('Dismiss all pending merge suggestions? This cannot be undone.')) return;
+async function bulkRejectFiltered() {
+  const actionFilter = document.getElementById('decisions-action-filter')?.value || '';
+  const label = actionFilter || 'all pending';
+  if (!confirm(`Reject ${label} decisions? This cannot be undone.`)) return;
   try {
-    const result = await api('/decisions/bulk-reject', {
-      method: 'POST',
-      body: JSON.stringify({ action: 'merge_suggestion' })
-    });
-    showToast(`Dismissed ${result.rejected} merge suggestions`, 'success');
+    if (actionFilter) {
+      const result = await api('/decisions/bulk-reject', {
+        method: 'POST',
+        body: JSON.stringify({ action: actionFilter })
+      });
+      showToast(`Rejected ${result.rejected} decisions`, 'success');
+    } else {
+      // Reject all pending — call bulk-reject for each action type with pending decisions
+      const stats = await api('/decisions/stats');
+      let total = 0;
+      for (const { action } of (stats.by_action || [])) {
+        const result = await api('/decisions/bulk-reject', {
+          method: 'POST',
+          body: JSON.stringify({ action })
+        });
+        total += result.rejected || 0;
+      }
+      showToast(`Rejected ${total} decisions`, 'success');
+    }
     loadDecisions();
   } catch (err) {
     showToast(err.message, 'error');

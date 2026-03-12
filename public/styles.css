@@ -457,6 +457,23 @@ body {
   opacity: 0.7;
 }
 
+/* WebSocket connection status indicator */
+.ws-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: background-color 0.3s;
+}
+.ws-connected    { background-color: var(--success); box-shadow: 0 0 4px var(--success); }
+.ws-reconnecting { background-color: var(--warning); animation: ws-pulse 1.2s ease-in-out infinite; }
+.ws-disconnected { background-color: var(--danger); opacity: 0.7; }
+@keyframes ws-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 .nav {
   flex: 1;
   padding: 12px 10px;
@@ -643,6 +660,38 @@ body {
   display: flex;
   gap: 12px;
   align-items: center;
+}
+
+/* Embedding coverage progress bar (Settings header) */
+.embedding-coverage-bar {
+  position: relative;
+  width: 120px;
+  height: 20px;
+  background: var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-left: auto;
+}
+.embedding-coverage-fill {
+  height: 100%;
+  border-radius: 10px;
+  background: var(--success);
+  transition: width 0.4s ease, background-color 0.4s ease;
+  width: 0%;
+}
+.embedding-coverage-fill.low  { background: var(--danger); }
+.embedding-coverage-fill.mid  { background: var(--warning); }
+.embedding-coverage-fill.high { background: var(--success); }
+.embedding-coverage-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  pointer-events: none;
 }
 
 /* Buttons */
@@ -1964,6 +2013,50 @@ select:focus {
   color: rgba(255, 255, 255, 0.95);
 }
 
+/* Tree node checkboxes */
+.tree-node-cb {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+/* Drag-and-drop */
+.tree-node-item.dragging { opacity: 0.4; }
+.tree-node-item.drop-target {
+  background: rgba(37, 99, 235, 0.15);
+  outline: 2px dashed var(--primary);
+  outline-offset: -2px;
+}
+
+/* Batch toolbar */
+.tree-batch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+}
+.batch-count {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin-right: auto;
+}
+.batch-reparent-select {
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-main);
+  color: var(--text-primary);
+  max-width: 200px;
+}
+
 .node-detail {
   background: var(--bg-card);
   border-radius: var(--radius-lg);
@@ -2248,6 +2341,16 @@ select:focus {
 .decision-node-merge  { border-left-color: #7c3aed; }
 .decision-conflict    { border-left-color: #f59e0b; }
 .decision-conflict mark { background: rgba(245,158,11,.25); color: inherit; padding: 1px 3px; border-radius: 3px; font-weight: 600; }
+.decision-diff-summary {
+  font-size: 0.75rem;
+  padding: 4px 8px;
+  background: rgba(245,158,11,.08);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  text-align: center;
+}
+.diff-incoming { color: var(--success); font-weight: 600; }
+.diff-existing { color: var(--danger); font-weight: 600; }
 
 .decision-card-header {
   display: flex;
@@ -3876,6 +3979,47 @@ select:focus {
 }
 
 /* Tree search */
+.tree-search-row {
+  display: flex;
+  gap: 8px;
+  padding: 0 0 8px 0;
+}
+.tree-search-row .tree-search-wrapper {
+  flex: 1;
+  padding: 0;
+}
+
+.tree-content-results {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.content-search-group {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.content-search-group:last-child { border-bottom: none; }
+.content-search-node {
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--primary);
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.content-search-node:hover { text-decoration: underline; }
+.content-search-count { font-weight: 400; color: var(--text-light); font-size: 0.7rem; }
+.content-search-chunk {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  padding: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tree-search-wrapper {
   padding: 0 0 16px 0;
 }
@@ -4575,6 +4719,25 @@ select:focus {
   color: var(--text-light);
   font-size: 0.9rem;
 }
+
+.history-section-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-light);
+  padding: 6px 4px 2px;
+  letter-spacing: 0.5px;
+}
+.history-fav-btn {
+  font-size: 0.85rem;
+  color: var(--text-light);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s;
+  line-height: 1;
+}
+.history-fav-btn:hover { color: var(--warning); }
+.history-fav-btn.active { color: var(--warning); }
 
 /* ============================================
    Graph View Styles
@@ -5569,6 +5732,48 @@ select:focus {
 }
 
 /* ── Schema Panel ────────────────────────────────────────────────────────────── */
+
+/* Tree Health Panel */
+.tree-health-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0 0 12px 0;
+  background: var(--bg-card);
+  padding: 12px 16px;
+}
+.tree-health-summary {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.health-stat {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.health-stat-val { font-weight: 700; color: var(--text-primary); }
+.health-stat-warn .health-stat-val { color: var(--warning); }
+.health-stat-ok { color: var(--success); font-weight: 600; }
+.tree-health-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.health-issue {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  background: rgba(0,0,0,0.02);
+}
+.health-issue-name { font-weight: 500; color: var(--text-primary); }
+.health-issue-type { color: var(--text-light); font-size: 0.7rem; }
+.health-issue-empty .health-issue-type { color: var(--danger); }
+.health-issue-no_embedding .health-issue-type { color: var(--warning); }
 
 .schema-panel {
   border: 1px solid var(--border);

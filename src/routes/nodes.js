@@ -6,10 +6,57 @@ import { createNode, generateAndSaveAliases, generateAliasesForAllNodes } from "
 import { getNodeEntitiesAndFacts } from "../extraction/entityFactExtractor.js";
 import { runTransaction, logAudit } from "../db/db.js";
 import { apiLogger } from "../utils/logger.js";
+import { escapeFtsQuery } from "../kg/strategies/utils.js";
 
 const router = express.Router();
 
 // ==================== NODES ====================
+
+// Tree health report (must come before /:id routes)
+router.get("/nodes/health", (req, res) => {
+  try {
+    const nodes = NodeRepo.getHealthReport();
+    const issues = [];
+    for (const n of nodes) {
+      if (n.chunk_count === 0 && n.child_count === 0) issues.push({ node_id: n.node_id, name: n.name, issue: 'empty' });
+      else if (n.chunk_count === 1 && n.child_count === 0) issues.push({ node_id: n.node_id, name: n.name, issue: 'low_chunks' });
+      if (!n.has_embedding && n.chunk_count > 0) issues.push({ node_id: n.node_id, name: n.name, issue: 'no_embedding' });
+    }
+    res.json({ nodes, issues, total: nodes.length });
+  } catch (err) {
+    apiLogger.error("GET /nodes/health error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Search chunks by content, grouped by node
+router.get("/nodes/search", (req, res) => {
+  try {
+    const q = (req.query.q || "").trim();
+    if (!q) return res.status(400).json({ error: "q parameter is required" });
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+    const safeQ = escapeFtsQuery(q);
+    if (!safeQ) return res.json({ results: [] });
+    const chunks = ChunkRepo.bm25Search(safeQ, limit);
+    // Group by node
+    const byNode = new Map();
+    for (const c of chunks) {
+      if (!byNode.has(c.node_id)) {
+        const node = NodeRepo.findById(c.node_id);
+        byNode.set(c.node_id, { node_id: c.node_id, node_name: node?.name || c.node_id, chunks: [] });
+      }
+      byNode.get(c.node_id).chunks.push({
+        id: c.id,
+        preview: (c.content_clean || "").slice(0, 150),
+        score: c.score
+      });
+    }
+    res.json({ results: [...byNode.values()], total_chunks: chunks.length });
+  } catch (err) {
+    apiLogger.error("GET /nodes/search error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Get full tree structure
 router.get("/nodes", (req, res) => {
@@ -81,14 +128,26 @@ router.post("/nodes", (req, res) => {
 router.put("/nodes/:id", (req, res) => {
   try {
     const nodeId = req.params.id;
-    const { name, summary, scope, aliases, node_description } = req.body;
+    const { name, summary, scope, aliases, node_description, parent_id } = req.body;
 
     if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: "Node not found" });
 
     const hasUpdates = name !== undefined || summary !== undefined ||
                        scope !== undefined || aliases !== undefined ||
-                       node_description !== undefined;
+                       node_description !== undefined || parent_id !== undefined;
     if (!hasUpdates) return res.status(400).json({ error: "No updates provided" });
+
+    // Handle reparenting
+    if (parent_id !== undefined) {
+      const newParent = parent_id === null ? null : parent_id;
+      if (newParent && !NodeRepo.existsById(newParent)) {
+        return res.status(400).json({ error: "Target parent node not found" });
+      }
+      if (newParent === nodeId) {
+        return res.status(400).json({ error: "Cannot set a node as its own parent" });
+      }
+      NodeRepo.reparentNode(nodeId, newParent);
+    }
 
     NodeRepo.update(nodeId, { name, summary, scope, aliases });
 

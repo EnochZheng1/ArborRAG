@@ -29,6 +29,9 @@ const LLM_TIMEOUT_MS = Math.max(
 
 export const llmConfig = {
   provider: process.env.LLM_PROVIDER || 'gemini',
+  // Optional: use a different (potentially larger) model for answer generation only.
+  // Falls back to the default model when not set.
+  answerModel: process.env.ANSWER_MODEL || '',
   openai: {
     model:          process.env.OPENAI_MODEL           || 'gpt-5-mini',
     embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-large',
@@ -151,11 +154,12 @@ async function _callLLMOnce({
   maxOutputTokens = null,
   seed            = null,
   taskName        = 'llm_call',
+  model: modelOverride = null,
 } = {}) {
   if (llmConfig.provider === 'openai') {
     if (!llmConfig.openai.apiKey) throw new Error('OPENAI_API_KEY is not configured');
 
-    const model = llmConfig.openai.model;
+    const model = modelOverride || llmConfig.openai.model;
     const baseParams = {
       model,
       messages: [{ role: 'user', content: prompt }],
@@ -222,10 +226,11 @@ async function _callLLMOnce({
       throw new Error('GEMINI_API_KEY is not configured (set VERTEX_AI=true to use Vertex AI instead)');
     }
 
+    const geminiModel = modelOverride || llmConfig.gemini.model;
     let _geminiTimeoutId;
     const resp = await Promise.race([
       geminiClient().models.generateContent({
-        model:    llmConfig.gemini.model,
+        model:    geminiModel,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config:   {
           temperature,
@@ -266,6 +271,8 @@ export const getCurrentLlmModel      = () =>
   llmConfig.provider === 'openai' ? llmConfig.openai.model      : llmConfig.gemini.model;
 export const getCurrentEmbedModel    = () =>
   llmConfig.provider === 'openai' ? llmConfig.openai.embeddingModel : llmConfig.gemini.embeddingModel;
+/** Return the answer-specific model if configured, otherwise null (use default). */
+export const getAnswerModel          = () => llmConfig.answerModel || null;
 
 /**
  * Check whether the current LLM provider is properly configured.

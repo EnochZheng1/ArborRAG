@@ -89,35 +89,50 @@ function detectSectionHeadings(text) {
     if (trimmed.length >= 3 && trimmed.length <= 80) {
       // Skip URL-like strings and percent-encoded paths (e.g. from PDF metadata)
       if (/^https?:\/\//i.test(trimmed) || /%[0-9A-Fa-f]{2}/.test(trimmed) ||
-          /^[a-z0-9._-]+\.[a-z]{2,5}\//i.test(trimmed)) continue;
+          /^[a-z0-9._-]+\.[a-z]{2,5}\//i.test(trimmed)) { charOffset += line.length + 1; continue; }
 
       // ALL-CAPS heading (allow digits, spaces, punctuation — but no lowercase)
       if (/^[^a-z]*$/.test(trimmed) && /[A-Z]{2,}/.test(trimmed)) {
-        headings.push({ heading: trimmed, startIndex: charOffset });
+        headings.push({ heading: trimmed, startIndex: charOffset, level: 1 });
       }
-      // Markdown heading
-      else if (/^#{1,3}\s+\S/.test(trimmed)) {
-        headings.push({ heading: trimmed.replace(/^#+\s+/, ''), startIndex: charOffset });
+      // Markdown heading — level from # count
+      else if (/^#{1,4}\s+\S/.test(trimmed)) {
+        const hLevel = trimmed.match(/^(#+)/)[1].length; // 1-4
+        headings.push({ heading: trimmed.replace(/^#+\s+/, ''), startIndex: charOffset, level: Math.min(hLevel, 5) });
       }
-      // Numbered section heading (e.g. "1. Probationary Period") — only at paragraph start
+      // Numbered section heading (e.g. "1. Probationary Period") — level 1
       else if (/^\d+\.\s+[A-Z]/.test(trimmed) && trimmed.length <= 60) {
-        headings.push({ heading: trimmed.replace(/^\d+\.\s+/, ''), startIndex: charOffset });
+        headings.push({ heading: trimmed.replace(/^\d+\.\s+/, ''), startIndex: charOffset, level: 1 });
       }
-      // Multi-level numbered section (e.g. "3.1 Chapter Title", "1.2.3 Sub-section")
+      // Multi-level numbered section (e.g. "3.1 Chapter Title" = level 2, "1.2.3 Sub-section" = level 3)
       else if (/^\d+\.\d+(\.\d+)*\s+[A-Z]/.test(trimmed) && trimmed.length <= 80) {
-        headings.push({ heading: trimmed.replace(/^\d+[\d.]*\s+/, ''), startIndex: charOffset });
+        const dotCount = (trimmed.match(/\./g) || []).length; // 1 dot = level 2, 2+ dots = level 3+
+        headings.push({ heading: trimmed.replace(/^\d+[\d.]*\s+/, ''), startIndex: charOffset, level: Math.min(dotCount + 1, 5) });
       }
-      // Numbered section with colon (e.g. "1.2: Overview", "3: Introduction")
+      // Numbered section with colon (e.g. "1.2: Overview")
       else if (/^\d+(\.\d+)*[:.]\s*[A-Z]/.test(trimmed) && trimmed.length <= 80) {
-        headings.push({ heading: trimmed.replace(/^\d+[\d.]*[:.]\s*/, ''), startIndex: charOffset });
+        const dotCount = (trimmed.match(/\./g) || []).length;
+        headings.push({ heading: trimmed.replace(/^\d+[\d.]*[:.]\s*/, ''), startIndex: charOffset, level: Math.min(dotCount + 1, 5) });
       }
-      // CJK chapter/section markers (e.g. "第一章 总则", "第二节 定义", "第3章 工作流程")
-      else if (/^第[一二三四五六七八九十百千万\d]+[章节篇部条]\s*\S/.test(trimmed) && trimmed.length <= 60) {
-        headings.push({ heading: trimmed, startIndex: charOffset });
+      // CJK chapter markers (第X章) — level 1
+      else if (/^第[一二三四五六七八九十百千万\d]+章\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed, startIndex: charOffset, level: 1 });
       }
-      // CJK enumeration headings (e.g. "一、总则", "（二）定义与范围")
-      else if (/^[（(]?[一二三四五六七八九十]+[）)、。]\s*\S/.test(trimmed) && trimmed.length <= 60) {
-        headings.push({ heading: trimmed.replace(/^[（(]?[一二三四五六七八九十]+[）)、。]\s*/, ''), startIndex: charOffset });
+      // CJK section markers (第X节/篇/部) — level 2
+      else if (/^第[一二三四五六七八九十百千万\d]+[节篇部]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed, startIndex: charOffset, level: 2 });
+      }
+      // CJK article markers (第X条) — level 3
+      else if (/^第[一二三四五六七八九十百千万\d]+条\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed, startIndex: charOffset, level: 3 });
+      }
+      // CJK enumeration headings (一、总则) — level 1
+      else if (/^[一二三四五六七八九十]+[、。]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed.replace(/^[一二三四五六七八九十]+[、。]\s*/, ''), startIndex: charOffset, level: 1 });
+      }
+      // CJK sub-enumeration headings (（一）/（二）) — level 2
+      else if (/^[（(][一二三四五六七八九十]+[）)]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed.replace(/^[（(][一二三四五六七八九十]+[）)]\s*/, ''), startIndex: charOffset, level: 2 });
       }
     }
     charOffset += line.length + 1; // +1 for the \n
@@ -127,18 +142,149 @@ function detectSectionHeadings(text) {
 }
 
 /**
- * Given a character position in the text, find the most recent section heading.
- * @param {Array} headings - Sorted headings from detectSectionHeadings
+ * Given a character position in the text, find the current section path
+ * (breadcrumb) based on heading levels.
+ *
+ * @param {Array} headings - Sorted headings from detectSectionHeadings (with level)
  * @param {number} position - Character position in text
- * @returns {string|null} - Nearest preceding heading, or null
+ * @returns {{ heading: string, path: string[] }} - Deepest heading and full path
  */
 function getSectionAtPosition(headings, position) {
-  let result = null;
+  // Track the current heading at each level
+  const levelStack = [null, null, null, null, null]; // levels 1-5
+
   for (const h of headings) {
-    if (h.startIndex <= position) result = h.heading;
-    else break;
+    if (h.startIndex > position) break;
+
+    const lvl = (h.level || 1) - 1; // 0-indexed
+    levelStack[lvl] = h.heading;
+    // When a higher-level heading appears, clear deeper levels
+    for (let i = lvl + 1; i < levelStack.length; i++) levelStack[i] = null;
   }
-  return result;
+
+  const path = levelStack.filter(Boolean);
+  return path.length > 0
+    ? { heading: path[path.length - 1], path }
+    : { heading: null, path: [] };
+}
+
+// ── Table detection and structured extraction ────────────────────────────────
+
+/**
+ * Detect table structures in text: tab-separated rows with consistent column
+ * counts, or markdown-style `| col | col |` tables.
+ *
+ * Returns an array of { startIndex, endIndex, headers: string[], rows: string[][] }.
+ * Each row is an array of cell values.
+ */
+function detectTables(text) {
+  const tables = [];
+  const lines = text.split('\n');
+  let charOffset = 0;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Markdown table: | header | header |
+    if (/^\s*\|.+\|/.test(line)) {
+      const tableStart = charOffset;
+      const tableLines = [];
+      let j = i;
+      while (j < lines.length && /^\s*\|.+\|/.test(lines[j])) {
+        tableLines.push(lines[j]);
+        j++;
+      }
+      if (tableLines.length >= 2) {
+        // Skip separator row (|---|---|)
+        const dataLines = tableLines.filter(l => !/^\s*\|[\s-:|]+\|\s*$/.test(l));
+        if (dataLines.length >= 2) {
+          const parsedRows = dataLines.map(l =>
+            l.split('|').slice(1, -1).map(cell => cell.trim())
+          );
+          const headers = parsedRows[0];
+          const rows = parsedRows.slice(1);
+          const endOffset = charOffset + tableLines.reduce((s, l) => s + l.length + 1, 0);
+          tables.push({ startIndex: tableStart, endIndex: endOffset, headers, rows });
+        }
+      }
+      charOffset += tableLines.reduce((s, l) => s + l.length + 1, 0);
+      i = j;
+      continue;
+    }
+
+    // Tab-separated table: detect runs of 3+ lines with same number of tabs (>=1)
+    const tabCount = (line.match(/\t/g) || []).length;
+    if (tabCount >= 1) {
+      const tableStart = charOffset;
+      const tableLines = [line];
+      let j = i + 1;
+      while (j < lines.length) {
+        const nextTabs = (lines[j].match(/\t/g) || []).length;
+        if (nextTabs === tabCount && lines[j].trim()) {
+          tableLines.push(lines[j]);
+          j++;
+        } else break;
+      }
+      if (tableLines.length >= 3) {
+        const parsedRows = tableLines.map(l => l.split('\t').map(cell => cell.trim()));
+        const headers = parsedRows[0];
+        const rows = parsedRows.slice(1);
+        const endOffset = charOffset + tableLines.reduce((s, l) => s + l.length + 1, 0);
+        tables.push({ startIndex: tableStart, endIndex: endOffset, headers, rows });
+      }
+      charOffset += tableLines.reduce((s, l) => s + l.length + 1, 0);
+      i = j;
+      continue;
+    }
+
+    charOffset += line.length + 1;
+    i++;
+  }
+
+  return tables;
+}
+
+/**
+ * Convert detected tables into structured KP objects.
+ * Each row becomes a KP with column headers as context.
+ */
+function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId = 0 } = {}) {
+  const kps = [];
+  for (const table of tables) {
+    if (!table.headers || table.headers.length === 0) continue;
+    const headerStr = table.headers.join(', ');
+
+    for (const row of table.rows) {
+      // Build a structured statement from header-value pairs
+      const pairs = table.headers
+        .map((h, idx) => row[idx] ? `${h}: ${row[idx]}` : null)
+        .filter(Boolean);
+
+      if (pairs.length === 0) continue;
+      const content = pairs.join(' | ');
+      if (content.length < 10) continue;
+
+      kps.push({
+        content,
+        index: kps.length,
+        doc_title: docTitle,
+        chunk_type: "fact",
+        keywords: extractKeywords(content),
+        fields: {},
+        scope: {},
+        authority_level: authorityLevel,
+        kp_type: "fact",
+        source_excerpt: content.slice(0, 200),
+        source_documents_json: JSON.stringify([{ doc_id: documentId, doc_title: docTitle, excerpt: content.slice(0, 200) }]),
+        topic_hint: headerStr.length <= 80 ? headerStr : headerStr.slice(0, 77) + "...",
+        subtopic_hint: "",
+        confidence: 0.85,  // structured data = high confidence
+        _fromTable: true
+      });
+    }
+  }
+  return kps;
 }
 
 // ── Paragraph-boundary segment splitter ───────────────────────────────────────
@@ -149,8 +295,10 @@ function getSectionAtPosition(headings, position) {
  */
 function splitIntoSegments(text, segmentSize, overlap, headings = []) {
   if (text.length <= segmentSize) {
-    const section = headings.length > 0 ? headings[0].heading : null;
-    return [{ text, sectionHeading: section }];
+    const sectionInfo = headings.length > 0
+      ? getSectionAtPosition(headings, 0)
+      : { heading: null, path: [] };
+    return [{ text, sectionHeading: sectionInfo.heading, sectionPath: sectionInfo.path }];
   }
 
   const segments = [];
@@ -165,8 +313,8 @@ function splitIntoSegments(text, segmentSize, overlap, headings = []) {
       if (boundary > start + segmentSize * 0.6) end = boundary + 2;
     }
 
-    const section = getSectionAtPosition(headings, start);
-    segments.push({ text: text.slice(start, end), sectionHeading: section });
+    const sectionInfo = getSectionAtPosition(headings, start);
+    segments.push({ text: text.slice(start, end), sectionHeading: sectionInfo.heading, sectionPath: sectionInfo.path });
     start = Math.max(start + 1, end - overlap);
 
     // Snap back to paragraph boundary in the overlap zone
@@ -181,13 +329,15 @@ function splitIntoSegments(text, segmentSize, overlap, headings = []) {
 
 // ── LLM call for one segment ──────────────────────────────────────────────────
 
-async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = null) {
+async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = null, sectionPath = []) {
   let prompt = getPrompt("kpExtraction", lang, docTitle, segment);
 
-  // When a section heading was detected from document structure, provide it as
-  // context so the LLM generates more consistent topic_hint values anchored to
-  // the document's own structure, without forcing an exact match.
-  if (sectionHeading) {
+  // When a section path was detected from document structure, provide it as
+  // context so the LLM generates hierarchical topic_hint/subtopic_hint values
+  // anchored to the document's own section structure.
+  if (sectionPath && sectionPath.length >= 2) {
+    prompt += `\n\nContext: This text falls under the document section path: ${sectionPath.map(s => `"${s}"`).join(' > ')}. Use "${sectionPath[0]}" as topic_hint and "${sectionPath.slice(1).join(' > ')}" as subtopic_hint for KPs.`;
+  } else if (sectionHeading) {
     prompt += `\n\nContext: This text falls under the document section: "${sectionHeading}". Use this section name as the topic_hint for KPs, or a more specific sub-topic derived from it.`;
   }
 
@@ -208,6 +358,39 @@ async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = n
     throw new Error("LLM returned empty KP array");
   }
   return raw;
+}
+
+// ── KP quality scoring ──────────────────────────────────────────────────────
+
+/**
+ * Score a KP on specificity. High-quality KPs contain concrete values:
+ * numbers, dates, names, percentages, currencies. Generic statements score lower.
+ *
+ * @param {string} content - The KP statement text
+ * @returns {number} quality adjustment to confidence (-0.15 to +0.10)
+ */
+function scoreKPQuality(content) {
+  let score = 0;
+  // Numbers with units (e.g., "15 days", "4 hours", "90%")
+  if (/\b\d+(?:[.,]\d+)?\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/i.test(content)) score += 0.05;
+  // Currency amounts (e.g., "$5,000", "¥300")
+  if (/[$¥€£]\s?[\d,]+(?:\.\d+)?/.test(content)) score += 0.05;
+  // Dates (ISO or natural: "2024-01-15", "January 15")
+  if (/\b\d{4}-\d{2}(-\d{2})?\b/.test(content) || /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}/i.test(content)) score += 0.03;
+  // Proper nouns (capitalized multi-word names)
+  if (/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/.test(content)) score += 0.02;
+  // Standalone numbers (at least one concrete figure)
+  if (/\b\d{1,6}\b/.test(content)) score += 0.02;
+  // CJK numbers with units
+  if (/\d+\s*[天小时个月年周次人元]/.test(content)) score += 0.03;
+
+  // Penalize generic/vague statements
+  const generic = /^(the company|this policy|employees?|management|it is important|according to)/i;
+  if (generic.test(content.trim()) && score === 0) score -= 0.10;
+  // Very short statements with no specifics
+  if (content.length < 40 && score === 0) score -= 0.05;
+
+  return Math.max(-0.15, Math.min(0.10, score));
 }
 
 // ── Parse and normalise raw KP objects from LLM ───────────────────────────────
@@ -251,8 +434,10 @@ function normaliseKP(raw, index, docTitle, documentId, authorityLevel) {
     }]),
     topic_hint:    String(raw.topic_hint    || "General").slice(0, 80),
     subtopic_hint: String(raw.subtopic_hint || "").slice(0, 80),
-    confidence:    typeof raw.confidence === "number"
-      ? Math.min(1, Math.max(0, raw.confidence)) : 0.8
+    confidence:    Math.min(1, Math.max(0.1,
+      (typeof raw.confidence === "number" ? Math.min(1, Math.max(0, raw.confidence)) : 0.8)
+      + scoreKPQuality(fullContent)
+    ))
   };
 }
 
@@ -322,7 +507,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
   for (let b = startSegment; b < segments.length; b += SEGMENT_BATCH) {
     const batch = segments.slice(b, b + SEGMENT_BATCH);
     const settled = await Promise.allSettled(
-      batch.map(seg => extractKPsFromSegment(seg.text, docTitle, lang, seg.sectionHeading))
+      batch.map(seg => extractKPsFromSegment(seg.text, docTitle, lang, seg.sectionHeading, seg.sectionPath))
     );
 
     let firstRateLimitErr = null;
@@ -374,6 +559,22 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
 
   const deduped = deduplicateAcrossSegments(normalised);
 
+  // Table-aware extraction: detect tables in the original text and convert
+  // each row into a structured KP. Deduplicate against LLM-extracted KPs.
+  const detectedTables = detectTables(text);
+  let tableKPs = [];
+  if (detectedTables.length > 0) {
+    logger.info(`Detected ${detectedTables.length} table(s) with ${detectedTables.reduce((s, t) => s + t.rows.length, 0)} total rows`);
+    const rawTableKPs = tableRowsToKPs(detectedTables, docTitle, { authorityLevel, documentId });
+    // Only keep table KPs that aren't already covered by LLM extraction
+    tableKPs = rawTableKPs.filter(tKP =>
+      !deduped.some(kp => wordDiceSimilarity(tKP.content, kp.content) >= 0.75)
+    );
+    if (tableKPs.length > 0) {
+      logger.info(`Adding ${tableKPs.length} table-extracted KPs (${rawTableKPs.length - tableKPs.length} duplicates removed)`);
+    }
+  }
+
   // Append paragraph fallbacks as a retrieval safety net.
   // These ensure every substantial paragraph is BM25-searchable even when the
   // LLM misses content, merges facts, or omits specific numbers during KP extraction.
@@ -387,8 +588,8 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
     return !deduped.some(kp => wordDiceSimilarity(para.content, kp.content) >= 0.85);
   });
 
-  const result = [...deduped, ...filteredParagraphs].map((kp, i) => ({ ...kp, index: i }));
-  logger.info(`KP extraction complete: ${deduped.length} KPs + ${filteredParagraphs.length} paragraph fallbacks from "${docTitle}"`);
+  const result = [...deduped, ...tableKPs, ...filteredParagraphs].map((kp, i) => ({ ...kp, index: i }));
+  logger.info(`KP extraction complete: ${deduped.length} KPs + ${tableKPs.length} table KPs + ${filteredParagraphs.length} paragraph fallbacks from "${docTitle}"`);
   return result;
 }
 

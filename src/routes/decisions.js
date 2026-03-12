@@ -22,9 +22,10 @@ const router = express.Router();
 
 router.get("/decisions", (req, res) => {
   try {
-    const { status, limit = "50", offset = "0" } = req.query;
+    const { status, action, limit = "50", offset = "0" } = req.query;
     const decisions = DecisionRepo.getAll({
       status: status || null,
+      action: action || null,
       limit:  Math.min(200, Math.max(1, parseInt(limit, 10) || 50)),
       offset: Math.max(0, parseInt(offset, 10) || 0)
     });

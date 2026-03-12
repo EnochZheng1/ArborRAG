@@ -604,10 +604,25 @@ export async function handleAggregationQuery(query, classification, queryScope, 
   });
   trace?.addStep('LLM Complete', 'Answer generated successfully');
 
+  // Calculate confidence for aggregation queries (previously returned none)
+  const aggNodes = candidates.slice(0, AGGREGATION_TOP_N).map(c => c.node);
+  const confidenceResult = calculateConfidence({
+    chunks: allChunks.slice(0, 40),
+    nodes: aggNodes,
+    query,
+    answer: llmResponse.final_answer,
+    queryType: QUERY_TYPES.AGGREGATION
+  });
+  trace?.addStep('Confidence Calibration', `Score: ${confidenceResult.score} (${confidenceResult.level})`, {
+    factors: confidenceResult.factors
+  });
+
   return {
     query_type: QUERY_TYPES.AGGREGATION,
     success: true,
     data: llmResponse,
+    confidence: confidenceResult.score,
+    confidence_details: confidenceResult,
     nodes_used: candidates.slice(0, AGGREGATION_TOP_N).map(c => ({
       node_id: c.node.node_id,
       name: c.node.name
@@ -782,6 +797,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
   let hierarchicalChunks = [];
   let hierarchicalNodes = [];
   let treePaths = [];
+  let _routingMode = 'keyword';
   try {
     trace?.addStep('Hierarchical Tree Retrieval', 'Navigating tree structure with beam search');
 
@@ -807,6 +823,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     hierarchicalChunks = hierarchicalResult.chunks || [];
     hierarchicalNodes = hierarchicalResult.nodes || [];
     treePaths = hierarchicalResult.paths || [];
+    // Capture routing mode for the query result indicator
+    _routingMode = hierarchicalResult.routing_mode || 'keyword';
 
     // Get tree context summary
     const treeContext = getTreeContextSummary(hierarchicalChunks);
@@ -1264,6 +1282,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         entities: f.entities || []
       })),
       tree_paths: treePaths.slice(0, 3),
+      routing_mode: _routingMode || 'keyword',
       retrieval_sources: {
         hierarchical: hierarchicalChunks.length,
         direct: directChunks.length

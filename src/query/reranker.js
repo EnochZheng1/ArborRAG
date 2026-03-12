@@ -6,13 +6,32 @@ import { getCustomPrompt } from "../prompts/promptManager.js";
  * Heuristic + optional LLM Re-ranking Module
  *
  * Scores chunks using three heuristic signals:
- *   - Keyword overlap with query (weight 0.4)
- *   - Original BM25 recall rank position (weight 0.4)
- *   - Embedding cosine similarity if available (weight 0.2)
+ *   - Keyword overlap with query (weight 0.30)
+ *   - Original BM25 recall rank position (weight 0.20)
+ *   - Embedding cosine similarity if available (weight 0.50)
+ *
+ * Query-type aware boosting:
+ *   - Numeric queries: boost chunks containing numbers/percentages
+ *   - Entity queries: boost chunks with proper nouns matching query entities
+ *
+ * Adaptive score-gap cutoff: keeps chunks within 40% of top score.
  *
  * When RERANKER_LLM_ENABLED=true, also calls LLM for a relevance score (0-10)
  * per chunk in a single batched prompt, then blends: 0.5 × llm + 0.5 × heuristic.
  */
+
+/**
+ * Extract negated terms from query (e.g., "not health insurance", "except annual leave").
+ * Returns lowercase terms that should be penalized in ranking.
+ */
+function extractNegatedTerms(query) {
+  const terms = [];
+  for (const m of query.matchAll(/\b(?:not|except|excluding|other\s+than|besides|without|除了|不包括|排除)\s+([a-z\u4e00-\u9fa5\s]+?)(?:\s*[,.\?!]|\s+(?:and|or|what|which|how|do|is|are|can|will|does|the)|\s*$)/gi)) {
+    const term = m[1].toLowerCase().trim();
+    if (term.length >= 2) terms.push(term);
+  }
+  return terms;
+}
 
 const LLM_ENABLED = process.env.RERANKER_LLM_ENABLED === 'true';
 const LLM_TOP_N   = Math.min(12, Math.max(3, parseInt(process.env.RERANKER_LLM_TOP_N, 10) || 8));
@@ -72,13 +91,21 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
   if (!chunks || chunks.length === 0) return [];
 
   const queryTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
+  const queryLower = (query || "").toLowerCase();
   const n = chunks.length;
 
+  // Detect query type for context-aware boosting
+  const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长|\b\d+\b/i.test(query);
+  const isEntityQuery  = /\bwho\b|\bwhich\b|\bwhat.*(?:name|company|person|CEO|manager|director)\b|谁|哪个/i.test(query);
+  // Extract named entities (capitalized multi-word phrases) from query
+  const queryEntities = (query.match(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g) || []).map(e => e.toLowerCase());
+
   const scored = chunks.map((chunk, i) => {
+    const content = (chunk.content || chunk.chunk?.content || chunk.content_clean || "").toLowerCase();
+
     // Signal 1 — keyword overlap (0–1)
     let overlapScore = 0;
     if (queryTerms.length > 0) {
-      const content = (chunk.content || chunk.chunk?.content || chunk.content_clean || "").toLowerCase();
       const matches = queryTerms.filter(t => content.includes(t)).length;
       overlapScore = matches / queryTerms.length;
     }
@@ -89,10 +116,40 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
     // Signal 3 — embedding cosine similarity (default 0.0 if missing)
     const embScore = chunk.similarity != null && Number.isFinite(chunk.similarity) ? chunk.similarity : 0.0;
 
-    const score = 0.4 * overlapScore + 0.4 * rankScore + 0.2 * embScore;
+    let score = 0.30 * overlapScore + 0.20 * rankScore + 0.50 * embScore;
+
+    // Query-type aware boosting
+    if (isNumericQuery && /\d/.test(content)) {
+      // Boost chunks containing numbers for numeric queries
+      score += 0.05;
+      // Extra boost if chunk contains percentages or unit-bearing numbers
+      if (/\b\d+(?:\.\d+)?\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/i.test(content)) {
+        score += 0.05;
+      }
+    }
+    if (isEntityQuery && queryEntities.length > 0) {
+      // Boost chunks containing named entities from the query
+      for (const entity of queryEntities) {
+        if (content.includes(entity)) { score += 0.08; break; }
+      }
+    }
 
     return { ...chunk, rerank_score: score, rerank_score_raw: score, original_rank: i };
   });
+
+  // Negation handling: penalize chunks heavily featuring negated terms
+  const negatedTerms = extractNegatedTerms(query);
+  if (negatedTerms.length > 0) {
+    for (const item of scored) {
+      const chunkContent = (item.content || item.content_clean || '').toLowerCase();
+      for (const term of negatedTerms) {
+        if (chunkContent.includes(term)) {
+          item.rerank_score *= 0.4; // heavy penalty
+          break;
+        }
+      }
+    }
+  }
 
   // Optional LLM scoring pass: score top LLM_TOP_N candidates
   if (LLM_ENABLED && scored.length > 0) {
@@ -108,16 +165,15 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
 
   scored.sort((a, b) => b.rerank_score - a.rerank_score);
 
-  // Score-gap cutoff: if top score is strong and there's a large drop, cut there
+  // Adaptive score-gap cutoff: keep chunks within 40% of the top score.
+  // E.g., if top score is 0.80, cut off below 0.80 × 0.60 = 0.48.
+  // This adapts to the score distribution instead of using a fixed gap threshold.
   let results = scored;
-  if (results.length > 3 && results[0].rerank_score >= 0.6) {
-    const GAP_THRESHOLD = 0.3;
-    for (let i = 1; i < results.length; i++) {
-      const drop = results[i - 1].rerank_score - results[i].rerank_score;
-      if (drop >= GAP_THRESHOLD && i >= 1) {
-        results = results.slice(0, i);
-        break;
-      }
+  if (results.length > 3 && results[0].rerank_score > 0) {
+    const cutoff = results[0].rerank_score * 0.60; // keep within 40% of top
+    const cutIdx = results.findIndex(r => r.rerank_score < cutoff);
+    if (cutIdx > 1) {
+      results = results.slice(0, cutIdx);
     }
   }
 

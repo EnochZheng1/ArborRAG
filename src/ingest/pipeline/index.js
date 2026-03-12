@@ -19,6 +19,9 @@ import {
   stageExtractKPs,
   stageMapChunks,
   stageExtractEntities,
+  stageNodeSummaries,
+  stageTopicCanonicalization,
+  stageOrphanCleanup,
   stageEmbeddingSync,
   stageFinalize,
   updateDocumentStatus
@@ -126,12 +129,15 @@ function rollbackFailedDocument(docId, newNodeIds = []) {
 // ── Pipeline runner ───────────────────────────────────────────────────────────
 
 const STAGES = [
-  { name: "parse",    fn: stageParseFile,      skip: () => false },
-  { name: "register", fn: stageRegister,       skip: () => false },
-  { name: "enrich",   fn: stageExtractKPs,     skip: ctx => ctx.isDuplicate },
-  { name: "map",      fn: stageMapChunks,      skip: ctx => ctx.isDuplicate },
-  { name: "entities", fn: stageExtractEntities,skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
-  { name: "finalize", fn: stageFinalize,       skip: ctx => ctx.isDuplicate }
+  { name: "parse",          fn: stageParseFile,              skip: () => false },
+  { name: "register",       fn: stageRegister,               skip: () => false },
+  { name: "enrich",         fn: stageExtractKPs,             skip: ctx => ctx.isDuplicate },
+  { name: "map",            fn: stageMapChunks,              skip: ctx => ctx.isDuplicate },
+  { name: "entities",       fn: stageExtractEntities,        skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
+  { name: "nodeSummaries",  fn: stageNodeSummaries,          skip: ctx => ctx.isDuplicate },
+  { name: "canonicalize",   fn: stageTopicCanonicalization,  skip: ctx => ctx.isDuplicate },
+  { name: "orphanCleanup", fn: stageOrphanCleanup,          skip: ctx => ctx.isDuplicate },
+  { name: "finalize",       fn: stageFinalize,               skip: ctx => ctx.isDuplicate }
 ];
 
 export async function processDocument(filePath, options = {}) {

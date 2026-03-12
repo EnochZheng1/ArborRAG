@@ -86,6 +86,36 @@ export const NodeRepo = {
     };
   },
 
+  /** Per-node health stats: chunk count, has embedding, is schema, has summary. */
+  getHealthReport() {
+    return db.prepare(`
+      SELECT
+        n.node_id,
+        n.name,
+        n.parent_id,
+        n.level,
+        n.is_schema_node,
+        CASE WHEN n.node_summary IS NOT NULL AND n.node_summary != '' THEN 1 ELSE 0 END AS has_summary,
+        COALESCE(c.chunk_count, 0) AS chunk_count,
+        COALESCE(e.has_embedding, 0) AS has_embedding,
+        COALESCE(ch.child_count, 0) AS child_count,
+        c.last_updated
+      FROM nodes n
+      LEFT JOIN (
+        SELECT node_id, COUNT(*) AS chunk_count, MAX(created_at) AS last_updated
+        FROM chunks WHERE superseded_by IS NULL
+        GROUP BY node_id
+      ) c ON c.node_id = n.node_id
+      LEFT JOIN (
+        SELECT ref_id, 1 AS has_embedding FROM embeddings WHERE ref_type = 'node' GROUP BY ref_id
+      ) e ON e.ref_id = n.node_id
+      LEFT JOIN (
+        SELECT parent_id, COUNT(*) AS child_count FROM nodes GROUP BY parent_id
+      ) ch ON ch.parent_id = n.node_id
+      ORDER BY n.level, n.name
+    `).all();
+  },
+
   // ── Search reads ──────────────────────────────────────────────────────────────
 
   /** LIKE search on name and node_id. */
@@ -339,6 +369,16 @@ export const NodeRepo = {
     return db.prepare(
       "UPDATE nodes SET parent_id = ?, level = ?, updated_at = datetime('now') WHERE parent_id = ?"
     ).run(newParentId, newLevel, oldParentId).changes;
+  },
+
+  /** Move a single node to a new parent, recalculating its level. */
+  reparentNode(nodeId, newParentId) {
+    const newLevel = newParentId
+      ? (this.findById(newParentId)?.level ?? 0) + 1
+      : 0;
+    return db.prepare(
+      "UPDATE nodes SET parent_id = ?, level = ?, updated_at = datetime('now') WHERE node_id = ?"
+    ).run(newParentId, newLevel, nodeId);
   },
 
   /** Get all chunk IDs belonging to a node. */

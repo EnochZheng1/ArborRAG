@@ -23,6 +23,11 @@ import { detectAuthorityLevel } from "../metadataExtractor.js";
 import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
 import { syncEmbeddings } from "../../embedding/chunkEmbeddings.js";
 import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
+import { callLLM, isLlmConfigured } from "../../utils/llm.js";
+import { getCustomPrompt } from "../../prompts/promptManager.js";
+import { findMergeCandidates, queueNodeMergeSuggestion } from "../nodeMerger.js";
+import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
+import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import crypto from "crypto";
 import fs from "fs";
@@ -207,6 +212,151 @@ export async function stageExtractEntities(ctx) {
   ctx.results.stats.entitiesExtracted = 0;
   ctx.results.stats.factsExtracted = 0;
   ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [] };
+}
+
+// ── Stage 5b: Generate node summaries for newly created nodes ─────────────────
+
+export async function stageNodeSummaries(ctx) {
+  const { documentId, options } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+
+  if (!options.useLLM || !isLlmConfigured() || newNodeIds.length === 0) {
+    return; // nothing to summarize
+  }
+
+  ctx.setStep(documentId, "node_summaries", "Generating node summaries…", 86);
+
+  let generated = 0;
+  for (const nodeId of newNodeIds) {
+    const node = NodeRepo.findById(nodeId);
+    if (!node || node.node_summary) continue; // skip if already has summary
+
+    const chunks = ChunkRepo.getForNodeLimited(nodeId, 8);
+    if (chunks.length === 0) continue;
+
+    const chunkTexts = chunks
+      .map(c => (c.content_clean || c.content || '').slice(0, 200))
+      .join('\n- ');
+
+    const prompt = getCustomPrompt('node_summary_generation', { node_name: node.name, chunks: chunkTexts })
+      ?? `Given a knowledge base node named "${node.name}" containing these knowledge points:\n- ${chunkTexts}\n\nWrite a concise 1-2 sentence summary describing what this node covers. Be specific about the topics and types of information it contains. Return ONLY the summary text, nothing else.`;
+
+    try {
+      const summary = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 150, taskName: 'node_summary_generation' });
+      if (summary && summary.trim().length > 10) {
+        NodeRepo.update(nodeId, { summary: summary.trim() });
+        NodeRepo.rebuildFts(nodeId);
+        generated++;
+      }
+    } catch (err) {
+      logger.warn(`Node summary generation failed for "${node.name}": ${err.message}`);
+    }
+
+    // Small delay between LLM calls to respect rate limits
+    if (generated < newNodeIds.length - 1) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+
+  if (generated > 0) {
+    logger.info(`Generated summaries for ${generated}/${newNodeIds.length} new nodes`);
+    ctx.setStep(documentId, "node_summaries", `Generated ${generated} node summaries.`, 88);
+  }
+}
+
+// ── Stage 5c: Check for near-duplicate sibling nodes ──────────────────────────
+
+export async function stageTopicCanonicalization(ctx) {
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+
+  if (newNodeIds.length === 0) return;
+
+  ctx.setStep(documentId, "topic_canonicalization", "Checking for duplicate nodes…", 89);
+
+  let queued = 0;
+  for (const nodeId of newNodeIds) {
+    try {
+      const candidates = await findMergeCandidates(nodeId);
+      for (const candidate of candidates) {
+        // Determine which node has fewer chunks (that one is the merge source)
+        const nodeChunks = ChunkRepo.getForNodeLimited(nodeId, 1).length;
+        const candidateChunks = ChunkRepo.getForNodeLimited(candidate.nodeId, 1).length;
+        const [sourceId, targetId] = nodeChunks <= candidateChunks
+          ? [nodeId, candidate.nodeId]
+          : [candidate.nodeId, nodeId];
+
+        queueNodeMergeSuggestion(sourceId, targetId, {
+          nameSim: candidate.nameSim,
+          contentSim: candidate.contentSim,
+          reason: candidate.reason
+        });
+        queued++;
+      }
+    } catch (err) {
+      logger.warn(`Topic canonicalization failed for node ${nodeId}: ${err.message}`);
+    }
+  }
+
+  if (queued > 0) {
+    logger.info(`Queued ${queued} node merge suggestion(s) from topic canonicalization`);
+    ctx.setStep(documentId, "topic_canonicalization", `Found ${queued} potential merge(s).`, 90);
+  }
+}
+
+// ── Stage 5d: Orphan node cleanup — merge tiny nodes into parent ──────────────
+// Only runs when INGEST_ORPHAN_CLEANUP=true (disabled by default to avoid
+// premature deletion during multi-document batch ingestion).
+
+const ORPHAN_CLEANUP_ENABLED = process.env.INGEST_ORPHAN_CLEANUP === 'true';
+
+export async function stageOrphanCleanup(ctx) {
+  const { documentId } = ctx;
+
+  if (!ORPHAN_CLEANUP_ENABLED) return;
+
+  ctx.setStep(documentId, "orphan_cleanup", "Checking for orphan nodes…", 91);
+
+  try {
+    const allNodes = NodeRepo.getAllSortedByLevel();
+    let cleaned = 0;
+
+    // Process deepest nodes first (reverse level order)
+    const sortedByDepth = [...allNodes].sort((a, b) => b.level - a.level);
+
+    for (const node of sortedByDepth) {
+      // Never touch root nodes, schema nodes, or the root node itself
+      if (!node.parent_id || node.is_schema_node || node.node_id === 'root') continue;
+
+      const chunks = ChunkRepo.getForNodeLimited(node.node_id, 2);
+      if (chunks.length >= 2) continue; // has enough content
+
+      // Check if this node has children — if so, don't merge
+      const children = NodeRepo.findByParent(node.node_id);
+      if (children.length > 0) continue;
+
+      // Node has 0-1 chunks and no children — merge into parent
+      const parent = NodeRepo.findById(node.parent_id);
+      if (!parent) continue;
+
+      if (chunks.length > 0) {
+        // Move chunk(s) to parent, then delete node
+        const { executeMerge } = await import("../nodeMerger.js");
+        executeMerge(node.node_id, node.parent_id);
+      } else {
+        // Empty node — just delete
+        NodeRepo.deleteNode(node.node_id);
+      }
+      cleaned++;
+    }
+
+    if (cleaned > 0) {
+      logger.info(`Orphan cleanup: merged/deleted ${cleaned} sparse node(s)`);
+      ctx.setStep(documentId, "orphan_cleanup", `Cleaned up ${cleaned} sparse node(s).`, 92);
+    }
+  } catch (err) {
+    logger.warn(`Orphan node cleanup failed (non-fatal): ${err.message}`);
+  }
 }
 
 // ── Stage 6: Auto-generate embeddings ────────────────────────────────────────

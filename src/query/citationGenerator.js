@@ -4,7 +4,7 @@
  * Adds source citations to LLM-generated answers
  */
 
-import { callLLM, isLlmConfigured } from "../utils/llm.js";
+import { callLLM, isLlmConfigured, getAnswerModel } from "../utils/llm.js";
 import { detectLanguage, isChineseLang } from "../utils/langDetect.js";
 import { logger } from "../utils/logger.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
@@ -26,6 +26,21 @@ function escapeHtml(str) {
  * @param {object} options - Options
  * @returns {Promise<object>} Answer with citations
  */
+/** Extract specific values (numbers with units, currency, dates) from text. */
+function extractValuesFromText(text) {
+  const vals = [];
+  for (const m of text.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi)) {
+    vals.push(m[0].toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  for (const m of text.matchAll(/[$¥€£]\s?[\d,]+(?:\.\d+)?/g)) {
+    vals.push(m[0].replace(/\s/g, ''));
+  }
+  for (const m of text.matchAll(/\b\d{4}-\d{2}(?:-\d{2})?\b/g)) {
+    vals.push(m[0]);
+  }
+  return vals;
+}
+
 /** Check if sources contain specific quantitative values. */
 function sourcesHaveValues(text) {
   return /\b\d+(?:[.,]\d+)?\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/i.test(text)
@@ -38,6 +53,80 @@ function answerCoversSourceValues(answer, sourceText) {
   if (sourceNums.length === 0) return true;
   const answerText = answer.toLowerCase();
   return sourceNums.some(n => answerText.includes(n));
+}
+
+/**
+ * Pre-summarize source chunks into 1-line query-relevant fact summaries.
+ * Reduces noise so the answer-generation LLM focuses on the right facts.
+ * Only invoked when there are 5+ sources (otherwise raw content is manageable).
+ *
+ * @param {string} query
+ * @param {Array} numberedSources - [{ number, content, title, node_name }]
+ * @param {string} detectedLang
+ * @returns {Promise<string|null>} Summarized source list string, or null on failure / insufficient coverage.
+ */
+async function preSummarizeSources(query, numberedSources, detectedLang) {
+  if (numberedSources.length < 5) return null;
+
+  const sourceTexts = numberedSources.map(s =>
+    `[${s.number}] ${s.content}`
+  ).join('\n\n');
+
+  const prompt = isChineseLang(detectedLang)
+    ? `对于以下每个来源，提取与问题最相关的一个关键事实。保留具体的数字、日期和名称。如果来源与问题无关，写"无关"。
+
+问题: ${query}
+
+来源:
+${sourceTexts}
+
+每个来源的关键事实（格式: [n] 事实）:`
+    : `For each source below, extract the ONE key fact most relevant to the question. Preserve exact numbers, dates, percentages, and names. If a source is irrelevant, write "N/A".
+
+Question: ${query}
+
+Sources:
+${sourceTexts}
+
+Key fact per source (format: [n] fact):`;
+
+  try {
+    const result = await callLLM({
+      prompt,
+      temperature: 0.0,
+      maxOutputTokens: 600,
+      taskName: 'source_pre_summarization',
+      model: getAnswerModel()
+    });
+
+    if (!result) return null;
+
+    // Parse the summarized lines back into a Map<sourceNumber, summary>
+    const summaryMap = new Map();
+    for (const line of result.split('\n')) {
+      const match = line.match(/^\[(\d+)\]\s*(.+)/);
+      if (match) {
+        const text = match[2].trim();
+        // Skip "N/A" / "无关" entries — keep original content for those
+        if (!/^(n\/?a|无关|不相关|irrelevant)$/i.test(text)) {
+          summaryMap.set(parseInt(match[1], 10), text);
+        }
+      }
+    }
+
+    // Only use summaries if we got reasonable coverage (>= 40%)
+    if (summaryMap.size < numberedSources.length * 0.4) return null;
+
+    // Build summarized source list — use summary where available, fall back to truncated original
+    return numberedSources.map(s => {
+      const summary = summaryMap.get(s.number);
+      const content = summary || s.content.slice(0, 200);
+      return `[${s.number}] ${s.title}${s.node_name ? ` (${s.node_name})` : ''}: ${content}`;
+    }).join('\n\n');
+  } catch (err) {
+    logger.debug(`source_pre_summarization failed: ${err.message}`);
+    return null;
+  }
 }
 
 /** Detect false "not in sources" answers that should trigger a retry. */
@@ -86,16 +175,26 @@ export async function generateAnswerWithCitations(query, context, sources, optio
     const contextText = numberedSources.map(s => s.content).join(' ');
     const detectedLang = lang === 'auto' ? detectLanguage(contextText || query) : lang;
 
+    // Pre-summarize sources to reduce noise when there are many (5+).
+    // The answer prompt uses focused summaries; retry/fallback paths keep
+    // the full sourceList so they can still find values the summary omitted.
+    let effectiveSourceList = sourceList;
+    const summarized = await preSummarizeSources(query, numberedSources, detectedLang);
+    if (summarized) {
+      effectiveSourceList = summarized;
+      logger.debug(`citation_generation: using pre-summarized sources (${numberedSources.length} sources)`);
+    }
+
     // Use bilingual prompts based on detected language — check for custom override first
     const answerKey = isChineseLang(detectedLang) ? 'answerGeneration_zh' : 'answerGeneration_en';
-    const prompt = getCustomPrompt(answerKey, { query, sourceList })
+    const prompt = getCustomPrompt(answerKey, { query, sourceList: effectiveSourceList })
       ?? (isChineseLang(detectedLang)
       ? `根据以下来源回答问题。在每个事实性陈述后添加[n]引用。
 
 问题: ${query}
 
 来源:
-${sourceList}
+${effectiveSourceList}
 
 规则:
 - 回答前请阅读所有来源——相关信息可能在任何一个来源中。
@@ -109,7 +208,7 @@ ${sourceList}
 Question: ${query}
 
 Sources:
-${sourceList}
+${effectiveSourceList}
 
 Rules:
 - Read ALL sources before answering — the relevant information may be in any source.
@@ -119,7 +218,8 @@ Rules:
 
 Answer:`);
 
-    let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation' }) || '';
+    const answerModelOverride = getAnswerModel();
+    let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation', model: answerModelOverride }) || '';
 
     // Retry once if the first answer looks like a false "not in sources" response
     if (looksLikeNotFound(answerText)) {
@@ -129,7 +229,7 @@ Answer:`);
         ?? (isChineseLang(detectedLang)
         ? `请仔细重新阅读以下所有来源，然后回答问题。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n重要：请不要说信息不存在，而是从来源中提取任何相关的事实、数字或描述。直接回答：`
         : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`);
-      const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry' });
+      const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry', model: answerModelOverride });
       if (retryText) answerText = retryText;
     }
 
@@ -142,12 +242,47 @@ Answer:`);
         ? `从以下来源中提取与问题相关的所有具体事实。列出每个事实并标注来源编号[n]。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n提取的事实：`
         : `Extract ALL specific facts from the sources that answer the question. List each fact with its source number [n]. Include exact numbers, dates, percentages, and durations.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nExtracted facts:`;
       try {
-        const extractedText = await callLLM({ prompt: extractPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_extraction_fallback' });
+        const extractedText = await callLLM({ prompt: extractPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_extraction_fallback', model: answerModelOverride });
         if (extractedText && !looksLikeNotFound(extractedText) && answerCoversSourceValues(extractedText, sourceList)) {
           answerText = extractedText;
         }
       } catch (extractErr) {
         logger.debug(`citation_extraction_fallback failed: ${extractErr.message}`);
+      }
+    }
+
+    // Answer-source alignment check: extract key claims (values) from the answer
+    // and verify they appear in at least one source. If alignment is very low,
+    // regenerate with a structured prompt that forces source-grounded extraction.
+    const answerValues = extractValuesFromText(answerText);
+    if (answerValues.length >= 2) {
+      let alignedCount = 0;
+      for (const val of answerValues) {
+        if (sourceList.toLowerCase().includes(val.toLowerCase())) alignedCount++;
+      }
+      const alignmentRatio = alignedCount / answerValues.length;
+      if (alignmentRatio < 0.30) {
+        logger.debug(`citation_generation: low answer-source alignment (${(alignmentRatio * 100).toFixed(0)}%), regenerating with structured prompt`);
+        const alignPrompt = isChineseLang(detectedLang)
+          ? `仔细阅读来源，然后仅使用来源中实际存在的信息来回答问题。引用来源中的具体数字、日期和名称。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n回答（引用具体数据）：`
+          : `Read the sources carefully, then answer ONLY using information actually present in the sources. Quote specific numbers, dates, and names from the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer (cite specific data):`;
+        try {
+          const alignedText = await callLLM({ prompt: alignPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_alignment_regen', model: answerModelOverride });
+          if (alignedText && !looksLikeNotFound(alignedText)) {
+            // Check if the regenerated answer has better alignment
+            const regenValues = extractValuesFromText(alignedText);
+            let regenAligned = 0;
+            for (const val of regenValues) {
+              if (sourceList.toLowerCase().includes(val.toLowerCase())) regenAligned++;
+            }
+            const regenRatio = regenValues.length > 0 ? regenAligned / regenValues.length : 0;
+            if (regenRatio > alignmentRatio) {
+              answerText = alignedText;
+            }
+          }
+        } catch (alignErr) {
+          logger.debug(`citation_alignment_regen failed: ${alignErr.message}`);
+        }
       }
     }
 

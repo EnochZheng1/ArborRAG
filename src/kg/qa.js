@@ -1,6 +1,7 @@
 import { classifyQuery, QUERY_TYPES } from "../query/classifier.js";
 import { decomposeQuery } from "../query/decomposer.js";
 import { getSuggestions, recordQuery } from "../query/suggestions.js";
+import { expandFollowUpQuery, recordQuerySession } from "../query/querySession.js";
 import { queryLogger as logger } from "../utils/logger.js";
 
 import { QueryTrace } from "./queryTrace.js";
@@ -24,6 +25,16 @@ export async function ask({ query, queryScope = null, options = {} }) {
     logger.warn("Invalid query received");
     return { error: "Query is required and must be a string" };
   }
+
+  // Follow-up query expansion: detect "tell me more", "what about X", etc.
+  // and expand with context from the previous query in this session.
+  const followUp = expandFollowUpQuery(query);
+  if (followUp.wasFollowUp) {
+    logger.info(`Follow-up detected: "${query}" → expanded to "${followUp.expanded.substring(0, 100)}"`);
+    query = followUp.expanded;
+  }
+  // Record this query in session history for future follow-up detection
+  recordQuerySession(query);
 
   const {
     // Feature toggles
@@ -62,7 +73,8 @@ export async function ask({ query, queryScope = null, options = {} }) {
   const trace = new QueryTrace(enableTrace);
   trace.addStep('Query Received', `Processing query: "${query.substring(0, 50)}${query.length > 50 ? '...' : ''}"`, {
     query_length: query.length,
-    options: { useClassification, useHybridSearch, useDecomposition, useReranking }
+    options: { useClassification, useHybridSearch, useDecomposition, useReranking },
+    ...(followUp.wasFollowUp && { follow_up: { previous: followUp.previousQuery, expanded: followUp.expanded } })
   });
 
   // Record query for suggestions/history

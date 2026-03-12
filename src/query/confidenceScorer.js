@@ -175,7 +175,10 @@ function calculateAuthorityScore(chunks) {
 }
 
 /**
- * Calculate how well the answer is grounded in sources
+ * Calculate how well the answer is grounded in sources.
+ * Combines term-level grounding with value-level alignment (numbers, dates,
+ * percentages). If the answer quotes specific values not present in any source
+ * chunk, confidence drops significantly.
  */
 function calculateAnswerGrounding(answer, chunks) {
   if (!answer || !chunks || chunks.length === 0) return 0.2;
@@ -187,16 +190,44 @@ function calculateAnswerGrounding(answer, chunks) {
     .map(c => (c.content || c.content_clean || '').toLowerCase())
     .join(' ');
 
+  // Factor A: term-level grounding (0–0.5)
   let groundedTerms = 0;
   for (const term of answerTerms) {
     if (allContent.includes(term.toLowerCase())) {
       groundedTerms++;
     }
   }
+  const termGrounding = (groundedTerms / answerTerms.length) * 0.5;
 
-  const grounding = groundedTerms / answerTerms.length;
-  // Apply dampening - common words will match easily
-  return grounding * 0.8;
+  // Factor B: value-level alignment (0–0.5)
+  // Extract specific values (numbers with units, percentages, dates) from answer
+  const answerValues = [];
+  for (const m of answer.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi)) {
+    answerValues.push(m[0].toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  for (const m of answer.matchAll(/[$¥€£]\s?[\d,]+(?:\.\d+)?/g)) {
+    answerValues.push(m[0].replace(/\s/g, ''));
+  }
+  for (const m of answer.matchAll(/\b\d{4}-\d{2}(?:-\d{2})?\b/g)) {
+    answerValues.push(m[0]);
+  }
+
+  let valueGrounding;
+  if (answerValues.length === 0) {
+    // No specific values in answer — neutral (don't penalize qualitative answers)
+    valueGrounding = 0.35;
+  } else {
+    // Check how many answer values appear in source content
+    let foundValues = 0;
+    for (const val of answerValues) {
+      if (allContent.includes(val.toLowerCase())) foundValues++;
+    }
+    const ratio = foundValues / answerValues.length;
+    // If answer quotes values not in sources, that's a hallucination signal
+    valueGrounding = ratio * 0.5;
+  }
+
+  return Math.min(0.85, termGrounding + valueGrounding);
 }
 
 /**

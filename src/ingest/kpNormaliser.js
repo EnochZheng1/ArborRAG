@@ -317,8 +317,16 @@ export async function buildTopicalHierarchy(kps, docTitle, documentId, options =
       for (const [subKey, subKPs] of bySubtopic) {
         let targetNode = domainNode;
         if (subKey !== "__none__") {
-          targetNode = await findOrCreateTopicNode(subKey, domainNode.node_id, { useLLM });
-          if (targetNode._created) newNodes.push(targetNode);
+          // Multi-level depth: subtopic_hint may contain " > " separator
+          // from section headings (e.g., "Benefits > Health Insurance > Enrollment")
+          const subParts = subKey.split(/\s*>\s*/).filter(p => p.trim());
+          let parentNode = domainNode;
+          for (const part of subParts) {
+            const node = await findOrCreateTopicNode(part, parentNode.node_id, { useLLM });
+            if (node._created) newNodes.push(node);
+            parentNode = node;
+          }
+          targetNode = parentNode;
         }
         for (const kp of subKPs) nodeMap.set(kp.index, targetNode.node_id);
       }

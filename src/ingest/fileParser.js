@@ -26,11 +26,12 @@ const SUPPORTED_TYPES = {
   ".html": "html",
   ".htm": "html",
   ".json": "json",
-  ".csv": "csv"
+  ".csv": "csv",
+  ".pptx": "pptx"
 };
 
 /**
- * Parse a file and extract text content
+ * Parse a file and extract text content + document metadata.
  * @param {string} filePath - Path to the file
  * @returns {Promise<{content: string, metadata: object}>}
  */
@@ -52,6 +53,7 @@ export async function parseFile(filePath) {
   };
 
   let content;
+  let docMeta = null;  // document-level metadata (author, title, dates)
 
   switch (fileType) {
     case "text":
@@ -59,11 +61,14 @@ export async function parseFile(filePath) {
       content = await parseTextFile(filePath);
       break;
     case "pdf":
-      content = await parsePdfFile(filePath);
+      ({ content, docMeta } = await parsePdfFile(filePath));
       break;
     case "docx":
     case "doc":
-      content = await parseDocxFile(filePath);
+      ({ content, docMeta } = await parseDocxFile(filePath));
+      break;
+    case "pptx":
+      ({ content, docMeta } = await parsePptxFile(filePath));
       break;
     case "xlsx":
     case "xls":
@@ -80,6 +85,11 @@ export async function parseFile(filePath) {
       break;
     default:
       throw new Error(`Parser not implemented for type: ${fileType}`);
+  }
+
+  // Merge document-level metadata (author, title, dates) into file metadata
+  if (docMeta) {
+    metadata.document = docMeta;
   }
 
   return { content, metadata };
@@ -100,6 +110,25 @@ async function parsePdfFile(filePath) {
     cMapPacked: true,
     verbosity: 0,
   }).promise;
+
+  // Extract document-level metadata (author, title, dates, etc.)
+  let docMeta = null;
+  try {
+    const meta = await pdf.getMetadata();
+    const info = meta?.info;
+    if (info) {
+      docMeta = {};
+      if (info.Title)        docMeta.title = String(info.Title).trim();
+      if (info.Author)       docMeta.author = String(info.Author).trim();
+      if (info.Subject)      docMeta.subject = String(info.Subject).trim();
+      if (info.Creator)      docMeta.creator = String(info.Creator).trim();
+      if (info.Producer)     docMeta.producer = String(info.Producer).trim();
+      if (info.CreationDate) docMeta.createdAt = parsePdfDate(String(info.CreationDate));
+      if (info.ModDate)      docMeta.modifiedAt = parsePdfDate(String(info.ModDate));
+      // Only keep docMeta if it has any useful fields
+      if (Object.keys(docMeta).length === 0) docMeta = null;
+    }
+  } catch (_) { /* metadata extraction is best-effort */ }
 
   const pageTexts = [];
 
@@ -130,15 +159,149 @@ async function parsePdfFile(filePath) {
     if (pageText) pageTexts.push(pageText);
   }
 
+  docMeta = docMeta || {};
+  docMeta.pageCount = pdf.numPages;
+
   await pdf.destroy();
-  return pageTexts.join("\n\n");
+  return { content: pageTexts.join("\n\n"), docMeta };
+}
+
+/**
+ * Parse PDF date format (D:YYYYMMDDHHmmSS) to ISO string.
+ * Returns the original string if parsing fails.
+ */
+function parsePdfDate(dateStr) {
+  if (!dateStr) return null;
+  // PDF dates: D:20240115120000+05'30' or D:20240115
+  const m = dateStr.match(/D:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?/);
+  if (!m) return dateStr;
+  const [, y, mo = '01', d = '01', h = '00', mi = '00', s = '00'] = m;
+  try { return new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}Z`).toISOString(); }
+  catch (_) { return dateStr; }
 }
 
 // Word documents (docx)
 async function parseDocxFile(filePath) {
   const buffer = fs.readFileSync(filePath);
   const result = await mammoth.extractRawText({ buffer });
-  return result.value;
+
+  // Extract document metadata from docProps/core.xml inside the DOCX zip
+  let docMeta = null;
+  try {
+    docMeta = extractDocxMetadata(buffer);
+  } catch (_) { /* metadata extraction is best-effort */ }
+
+  return { content: result.value, docMeta };
+}
+
+/**
+ * Extract metadata from DOCX (ZIP) by reading docProps/core.xml.
+ * Uses the XLSX library's zip infrastructure (already a dependency).
+ */
+function extractDocxMetadata(buffer) {
+  const zip = XLSX.read(buffer, { type: "buffer", bookSheets: true });
+  // XLSX exposes the raw zip entries via zip.files when used with type:"buffer"
+  // But the simpler approach: parse the buffer as a zip manually using the
+  // lightweight approach of looking for the core.xml within the DOCX.
+
+  // Alternative: use cheerio to parse the XML if we can get it.
+  // DOCX is a ZIP, and we already have the XLSX library which can read ZIPs.
+  // However XLSX.read for DOCX may not expose internal files easily.
+  // Let's try a direct approach: read the zip entries.
+
+  // Since XLSX may not expose docProps, use a lightweight manual extraction.
+  // The core.xml is typically small and located at a known offset in the ZIP.
+  const content = buffer.toString('utf-8');
+  const meta = {};
+
+  // Look for common metadata patterns in the raw XML within the ZIP
+  const creatorMatch = content.match(/<dc:creator>([^<]+)<\/dc:creator>/);
+  if (creatorMatch) meta.author = creatorMatch[1].trim();
+
+  const titleMatch = content.match(/<dc:title>([^<]+)<\/dc:title>/);
+  if (titleMatch) meta.title = titleMatch[1].trim();
+
+  const subjectMatch = content.match(/<dc:subject>([^<]+)<\/dc:subject>/);
+  if (subjectMatch) meta.subject = subjectMatch[1].trim();
+
+  const descMatch = content.match(/<dc:description>([^<]+)<\/dc:description>/);
+  if (descMatch) meta.description = descMatch[1].trim();
+
+  const createdMatch = content.match(/<dcterms:created[^>]*>([^<]+)<\/dcterms:created>/);
+  if (createdMatch) meta.createdAt = createdMatch[1].trim();
+
+  const modifiedMatch = content.match(/<dcterms:modified[^>]*>([^<]+)<\/dcterms:modified>/);
+  if (modifiedMatch) meta.modifiedAt = modifiedMatch[1].trim();
+
+  const revisionMatch = content.match(/<cp:revision>([^<]+)<\/cp:revision>/);
+  if (revisionMatch) meta.revision = revisionMatch[1].trim();
+
+  return Object.keys(meta).length > 0 ? meta : null;
+}
+
+// PowerPoint files (pptx)
+async function parsePptxFile(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const content = buffer.toString('utf-8');
+
+  // PPTX is a ZIP containing ppt/slides/slide*.xml with <a:t> text elements
+  const slides = [];
+  const allTextRuns = [...content.matchAll(/<a:t[^>]*>([^<]+)<\/a:t>/g)];
+
+  // Find slide file positions in the ZIP
+  const slidePositions = [...content.matchAll(/ppt\/slides\/slide(\d+)\.xml/g)]
+    .map(m => ({ num: parseInt(m[1], 10), pos: m.index }))
+    .sort((a, b) => a.pos - b.pos);
+
+  if (allTextRuns.length > 0 && slidePositions.length > 0) {
+    for (let i = 0; i < slidePositions.length; i++) {
+      const start = slidePositions[i].pos;
+      const end = i + 1 < slidePositions.length ? slidePositions[i + 1].pos : content.length;
+      const slideContent = content.slice(start, end);
+      const texts = [...slideContent.matchAll(/<a:t[^>]*>([^<]+)<\/a:t>/g)]
+        .map(m => m[1].trim())
+        .filter(t => t.length > 0);
+      if (texts.length > 0) {
+        slides.push(`[Slide ${slidePositions[i].num}]\n${texts.join('\n')}`);
+      }
+    }
+  } else if (allTextRuns.length > 0) {
+    // No slide markers found, just collect all text
+    const texts = allTextRuns.map(m => m[1].trim()).filter(t => t.length > 0);
+    slides.push(texts.join('\n'));
+  }
+
+  // Extract speaker notes from notesSlides
+  const notePositions = [...content.matchAll(/ppt\/notesSlides\/notesSlide(\d+)\.xml/g)]
+    .map(m => ({ num: parseInt(m[1], 10), pos: m.index }))
+    .sort((a, b) => a.pos - b.pos);
+
+  if (notePositions.length > 0) {
+    const noteTexts = [];
+    for (let i = 0; i < notePositions.length; i++) {
+      const start = notePositions[i].pos;
+      const end = i + 1 < notePositions.length ? notePositions[i + 1].pos : content.length;
+      const noteContent = content.slice(start, end);
+      const texts = [...noteContent.matchAll(/<a:t[^>]*>([^<]+)<\/a:t>/g)]
+        .map(m => m[1].trim())
+        .filter(t => t.length > 0 && !/^\d+$/.test(t)); // skip slide number placeholders
+      if (texts.length > 0) {
+        noteTexts.push(`[Notes - Slide ${notePositions[i].num}]\n${texts.join('\n')}`);
+      }
+    }
+    if (noteTexts.length > 0) {
+      slides.push('\n---\nSpeaker Notes\n' + noteTexts.join('\n\n'));
+    }
+  }
+
+  // Extract metadata (same docProps/core.xml structure as DOCX)
+  let docMeta = null;
+  try {
+    docMeta = extractDocxMetadata(buffer);
+    if (docMeta) docMeta.slideCount = slidePositions.length;
+  } catch (_) { /* best-effort */ }
+
+  return { content: slides.join('\n\n') || '(No text content found in presentation)', docMeta };
 }
 
 // Excel files

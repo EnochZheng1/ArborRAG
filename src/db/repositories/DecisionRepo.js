@@ -46,23 +46,22 @@ export const DecisionRepo = {
   },
 
   /**
-   * Paginated list, optionally filtered by status.
-   * @param {{ status?, limit?, offset? }} opts
+   * Paginated list, optionally filtered by status and/or action type.
+   * @param {{ status?, action?, limit?, offset? }} opts
    */
-  getAll({ status = null, limit = 50, offset = 0 } = {}) {
-    if (status) {
-      return db.prepare(`
-        SELECT * FROM pending_decisions
-        WHERE status = ?
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-      `).all(status, Math.max(1, Number(limit)), Math.max(0, Number(offset)));
-    }
+  getAll({ status = null, action = null, limit = 50, offset = 0 } = {}) {
+    const conditions = [];
+    const params = [];
+    if (status) { conditions.push("status = ?"); params.push(status); }
+    if (action) { conditions.push("action = ?"); params.push(action); }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(Math.max(1, Number(limit)), Math.max(0, Number(offset)));
     return db.prepare(`
       SELECT * FROM pending_decisions
+      ${where}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
-    `).all(Math.max(1, Number(limit)), Math.max(0, Number(offset)));
+    `).all(...params);
   },
 
   /** Single decision by id. */
