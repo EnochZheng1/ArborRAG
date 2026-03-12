@@ -1,6 +1,6 @@
 # TreeKB — Tree-Based Knowledge Graph
 
-**v2.5.0** · Node.js · SQLite · OpenAI / Gemini
+**v2.10.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -12,15 +12,20 @@ A local knowledge management system that ingests documents into a hierarchical k
 - **Per-Dataset Prompt Customisation** — override any LLM prompt per dataset via the Prompts settings UI; defaults restored with one click; variables auto-injected at call time
 - **Guided Tree Schema** — pre-define the knowledge tree structure via JSON import; ingested KPs map into your taxonomy instead of inventing arbitrary topic names; soft (extends with child nodes) or hard (clamps to existing schema) strictness; global template library for reuse across datasets
 - **Tree Routing Modes** — keyword (fast, default), LLM (Gemini scores node relevance 0-10), or vector (embedding similarity); configurable per dataset in schema settings
+- **Answer Quality Hardening** — answer-source alignment verification, source pre-summarization for 5+ sources, confidence-answer grounding with value-level checks, model-specific answer generation via `ANSWER_MODEL` env var
+- **Smart Reranking** — cross-encoder weighted reranking (keyword 30% / BM25 20% / embedding 50%), adaptive score-gap cutoff, query-type aware boosts (numeric, entity, negation queries)
+- **Ingestion Quality** — table-aware KP extraction (tab-separated and markdown tables), PPTX support, depth-aware node creation (5 heading levels), node summary generation, orphan node cleanup, topic canonicalization
+- **Follow-up Query Context** — detects follow-up patterns and expands queries with prior context; per-dataset session history with 10-min TTL
 - **Multi-provider LLM** — switch between OpenAI and Google Gemini (including Vertex AI) at runtime via the Settings tab
 - **Knowledge Point (KP) extraction** — LLM decomposes documents into atomic, typed statements (fact, rule, definition, procedure, example, context) and places them into a topical hierarchy
-- **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; borderline cases are queued for human review in the Decisions tab
+- **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; LLM-confirmed value conflicts queued for human review in the Decisions tab with diff view
 - **Multi-dataset support** — separate SQLite databases per dataset, switched via `X-Dataset-ID` header or the Datasets tab
 - **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall
+- **Tree Management** — lazy-rendered tree for 500+ nodes, drag-and-drop reparenting, batch operations (move/delete), content search across chunks, tree health dashboard
 - **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events
 - **Entity & fact extraction** — named entities and relational facts extracted and stored for graph queries
 - **Test case management** — save and replay Q&A pairs to track retrieval quality over time
-- **Dark mode UI** — fully themed web interface
+- **Dark mode UI** — fully themed web interface with embedding coverage indicator, query favorites, WebSocket status
 
 ---
 
@@ -91,7 +96,11 @@ INGEST_CLEANUP_ON_SUCCESS=true
 | `GET` | `/documents` | List documents |
 | `DELETE` | `/documents/:id` | Delete document and its knowledge |
 | `GET` | `/nodes` | Get knowledge tree |
-| `GET` | `/decisions` | List pending KP decisions |
+| `GET` | `/nodes/health` | Tree health report (empty/low-content/missing-embedding nodes) |
+| `GET` | `/nodes/search?q=` | Search chunks by content, grouped by node |
+| `PUT` | `/nodes/:id` | Update node (name, summary, parent, description) |
+| `DELETE` | `/nodes/:id` | Delete node (re-parents children) |
+| `GET` | `/decisions` | List pending KP decisions (filterable by action type) |
 | `GET` | `/schema` | Get schema nodes as hierarchical tree |
 | `POST` | `/schema/import` | Import schema from JSON |
 | `GET` | `/schema/export` | Export schema as JSON |
@@ -132,6 +141,36 @@ public/            Single-page web UI
 ---
 
 ## Changelog
+
+### v2.10.0
+- **Answer Quality Hardening** — answer-source alignment check with regeneration on <30% alignment; source pre-summarization for 5+ sources; confidence-answer grounding combines term-level (50%) and value-level (50%) checks; aggregation queries now return confidence scores; `ANSWER_MODEL` env var for dedicated answer generation model
+- **Smart Reranking** — cross-encoder weighted reranking (keyword 30% / BM25 20% / embedding 50%); adaptive score-gap cutoff (keep within 40% of top score); query-type aware boosts for numeric, entity, and negation queries
+- **Follow-up Query Context** — per-dataset query session (last 3 queries, 10-min TTL); detects follow-up patterns ("tell me more", "what about X", "继续") and expands with prior context
+- **Table-aware KP Extraction** — detects tab-separated and markdown `| col |` table structures; converts rows to structured KPs with column headers as topic hints; deduplicates against LLM-extracted KPs
+- **PPTX Support** — slide text extraction via raw buffer regex; speaker notes; metadata via `docProps/core.xml`
+- **Depth-aware Node Creation** — heading level detection expanded from 3 to 5 levels; subtopic hints with `" > "` separators create intermediate nodes at each level
+- **Node Summary Generation** — LLM generates 1-2 sentence summaries for new nodes using up to 8 chunks as context; runs post-ingestion
+- **Orphan Node Cleanup** — merges nodes with <2 chunks and no children into parent; opt-in via `INGEST_ORPHAN_CLEANUP=true`
+- **Topic Canonicalization** — post-ingest sibling node dedup via `findMergeCandidates()` (name similarity ≥0.60 or content overlap ≥0.50)
+- **Tree Virtualization** — lazy child rendering defers subtrees beyond depth 2; materializes on first expand; force-renders all for search
+- **Drag-and-Drop Reparenting** — tree nodes are draggable; drop on another node reparents with level recalculation
+- **Batch Node Operations** — checkbox selection, bulk move-to and delete via toolbar
+- **Tree Health Dashboard** — per-node stats (chunk count, embedding, summary, children); identifies empty, low-content, and unembedded nodes
+- **Tree Content Search** — BM25 search across chunks grouped by node, alongside existing node name filter
+- **Decision Diff View** — extracts and highlights numeric/currency/date differences between conflicting KPs
+- **Action Type Filter** — filter decisions by type (conflicts/replacements/merges/node merges) alongside status filter
+- **Bulk Reject** — respects current action filter; shows count in button
+- **Embedding Coverage Indicator** — always-visible progress bar with color coding in Settings header
+- **Query Favorites** — localStorage-based star toggle; favorites section above recent queries
+- **WebSocket Status Indicator** — green/amber/red dot in sidebar with connection state
+- **Negative Query Handling** — detects "not", "except", "excluding" patterns; penalizes chunks containing negated terms
+- **Cross-document Disambiguation** — document-scope filter prevents cross-doc chunk bleed when query names a specific document
+
+### v2.6.0
+- Smart conflict detection with LLM-confirmed value conflicts
+- Auto-embedding after ingest and chatbot operations
+- Node deletion with child re-parenting
+- Chatbot improvements
 
 ### v2.5.0
 - **Conversational Knowledge Management** — new Manage mode in the Ask tab lets users add, edit, delete, and query knowledge through natural language; LLM classifies intent and extracts structured data (content, topic, old/new values); fast-path regex skips LLM for confirm/cancel/undo/history; session-based confirmation flow for edits and deletes; full change history with per-entry revert; handles empty datasets; bilingual EN/CJK support
