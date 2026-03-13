@@ -681,6 +681,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   initDatasets();
   initTabs();
+  initTreeNav();
   initLanguage();
   initAsk();
   initTree();
@@ -753,14 +754,34 @@ function initTabs() {
 
       if (needsRefresh) {
         _tabDirty[tabId] = false;
-        if (tabId === 'tree')      { loadTree(); initSchemaPanel(); }
+        if (tabId === 'tree')      { loadTree(); }
         if (tabId === 'ingest')    { loadSchemaSettings(); loadDocuments(); }
         if (tabId === 'decisions') loadDecisions();
         if (tabId === 'tests')     loadTests();
         if (tabId === 'datasets')  loadDatasets();
-        if (tabId === 'settings')  { loadSettings(); loadPrompts(); loadStats(); loadSchemaSettingsInline(); }
+        if (tabId === 'settings')  { loadSettings(); loadPrompts(); loadStats(); }
       }
     });
+  });
+}
+
+// Tree sub-navigation
+function initTreeNav() {
+  document.getElementById('tree-nav')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.settings-nav-btn');
+    if (!btn) return;
+    const sectionId = btn.dataset.section;
+    document.querySelectorAll('#tree-nav .settings-nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('#tab-tree > .settings-section').forEach(s => s.classList.remove('active'));
+    document.getElementById(sectionId)?.classList.add('active');
+
+    // Toggle tree header actions visibility
+    const treeActions = document.getElementById('tree-nodes-actions');
+    if (treeActions) treeActions.style.display = sectionId === 'tree-section-nodes' ? '' : 'none';
+
+    // Load schema data when switching to schema section
+    if (sectionId === 'tree-section-schema') initSchemaPanel();
   });
 }
 
@@ -6477,9 +6498,12 @@ async function loadTests() {
       ...tc,
       id: `custom_${tc.id}`,
       dbId: tc.id,
-      category: 'Custom',
+      category: tc.assertion_type?.startsWith('manage_') ? 'Manage' : 'Custom',
       builtin: false,
       async run(call) {
+        if (tc.assertion_type?.startsWith('manage_')) {
+          return runManageTest(call, tc.query, tc.assertion_type, tc.assertion_value);
+        }
         const d = await call('POST', '/ask', { query: tc.query });
         return evaluateAssertion(d, tc.assertion_type, tc.assertion_value);
       }
@@ -7031,9 +7055,58 @@ function evaluateAssertion(data, type, value) {
       return { passed: Array.isArray(cits) && cits.length > 0,
                detail: `citations: ${cits.length}` };
     }
+    // ── Manage chatbot assertions ─────────────────────────────────────────────
+    case 'manage_intent_is':
+      return { passed: data.intent === value,
+               detail: `intent: ${data.intent ?? '(missing)'}, expected: ${value}` };
+    case 'manage_response_contains': {
+      const resp = String(data.response ?? '');
+      const has = resp.toLowerCase().includes(value.toLowerCase());
+      return { passed: has, detail: `response ${has ? 'contains' : 'missing'} "${value}" | "${resp.slice(0, 100)}"` };
+    }
+    case 'manage_adds_content': {
+      const changes = data.changes ?? [];
+      return { passed: changes.length > 0, detail: `changes: ${changes.length}` };
+    }
+    case 'manage_no_changes': {
+      const ch = data.changes ?? [];
+      return { passed: ch.length === 0, detail: `changes: ${ch.length} | response: "${String(data.response ?? '').slice(0, 80)}"` };
+    }
+    case 'manage_status_ok':
+      return { passed: !data.error && typeof data.response === 'string',
+               detail: data.error ? `error: ${data.error}` : `ok, intent=${data.intent}` };
     default:
       return { passed: false, detail: `Unknown assertion type: ${type}` };
   }
+}
+
+/**
+ * Run a manage chatbot test. If `query` is a JSON array, messages are sent
+ * sequentially sharing one session; the assertion checks the LAST response.
+ */
+async function runManageTest(call, query, assertionType, assertionValue) {
+  let messages;
+  try {
+    if (query.trim().startsWith('[')) {
+      messages = JSON.parse(query);
+      if (!Array.isArray(messages)) throw new Error('not array');
+    } else {
+      messages = [query];
+    }
+  } catch (_) {
+    messages = [query];
+  }
+
+  let sessionId = null;
+  let lastResult = null;
+  for (const msg of messages) {
+    lastResult = await call('POST', '/manage/chat', { message: String(msg), sessionId });
+    sessionId = lastResult.sessionId || sessionId;
+    // Small pause between multi-step messages for LLM rate limits
+    if (messages.length > 1) await new Promise(r => setTimeout(r, 800));
+  }
+
+  return evaluateAssertion(lastResult, assertionType, assertionValue);
 }
 
 // ── Custom test CRUD ──────────────────────────────────────────────────────────
@@ -7042,12 +7115,26 @@ function updateAssertionValueVisibility() {
   const type = document.getElementById('tc-assertion-type')?.value;
   const group = document.getElementById('tc-value-group');
   const label = document.getElementById('tc-value-label');
+  const queryLabel = document.getElementById('tc-query-label');
   if (!group) return;
-  const needsValue = ['answer_contains', 'confidence_gte', 'query_type_is'].includes(type);
+  const needsValue = ['answer_contains', 'confidence_gte', 'query_type_is',
+                      'manage_intent_is', 'manage_response_contains'].includes(type);
   group.style.display = needsValue ? '' : 'none';
   if (label) {
-    const labels = { answer_contains: 'Expected substring', confidence_gte: 'Minimum confidence (0–1)', query_type_is: 'Expected type (simple_lookup / comparison / recommendation / reasoning / aggregation)' };
+    const labels = {
+      answer_contains: 'Expected substring',
+      confidence_gte: 'Minimum confidence (0–1)',
+      query_type_is: 'Expected type (simple_lookup / comparison / recommendation / reasoning / aggregation)',
+      manage_intent_is: 'Expected intent (ADD / EDIT / DELETE / QUERY / UNDO / HISTORY / CANCEL)',
+      manage_response_contains: 'Expected substring in response',
+    };
     label.textContent = labels[type] || 'Value';
+  }
+  // Update query label hint for manage types
+  if (queryLabel) {
+    queryLabel.textContent = type?.startsWith('manage_')
+      ? 'Message (or JSON array for multi-step: ["msg1","__confirm__"])'
+      : 'Query';
   }
 }
 
@@ -7122,29 +7209,6 @@ function initSettings() {
 
   document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
 
-  // Schema settings toggle buttons (moved from schema panel modal)
-  document.getElementById('mapping-mode-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const strictness = document.getElementById('strictness-group');
-    if (strictness) strictness.style.display = btn.dataset.value === 'guided' ? '' : 'none';
-  });
-  document.getElementById('mapping-strictness-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-  document.getElementById('tree-routing-toggle')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-  document.getElementById('save-schema-settings')?.addEventListener('click', saveSchemaSettings);
-
   // Stats section (moved from Stats tab)
   document.getElementById('sync-embeddings-btn')?.addEventListener('click', syncEmbeddings);
   document.getElementById('sync-aliases-btn')?.addEventListener('click', syncAliases);
@@ -7154,9 +7218,9 @@ function initSettings() {
     const btn = e.target.closest('.settings-nav-btn');
     if (!btn) return;
     const sectionId = btn.dataset.section;
-    document.querySelectorAll('.settings-nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#settings-nav .settings-nav-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    document.querySelectorAll('#tab-settings .settings-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('#tab-settings > .settings-section').forEach(s => s.classList.remove('active'));
     document.getElementById(sectionId)?.classList.add('active');
   });
 }
@@ -7323,25 +7387,12 @@ let _schemaPanelInitialized = false;
 function initSchemaPanel() {
   if (_schemaPanelInitialized) {
     // Already wired — just refresh data
-    loadSchemaSettings();
+    loadSchemaSettingsInline();
     loadSchemaTemplates();
     loadSchemaNodes();
     return;
   }
   _schemaPanelInitialized = true;
-
-  // Toggle panel body
-  document.getElementById('schema-panel-toggle')?.addEventListener('click', (e) => {
-    if (e.target.closest('button')) return; // button clicks handled separately
-    const body    = document.getElementById('schema-panel-body');
-    const chevron = document.getElementById('schema-panel-chevron');
-    body.classList.toggle('hidden');
-    chevron.innerHTML = body.classList.contains('hidden') ? '&#9654;' : '&#9660;';
-    if (!body.classList.contains('hidden')) {
-      loadSchemaTemplates();
-      loadSchemaNodes();
-    }
-  });
 
   // Import JSON
   document.getElementById('schema-import-btn')?.addEventListener('click', () => {
@@ -7382,13 +7433,40 @@ function initSchemaPanel() {
     }
   });
 
-  // Schema Settings — navigate to Settings tab
-  document.getElementById('schema-settings-btn')?.addEventListener('click', openSchemaSettings);
+  // Schema settings toggle buttons
+  document.getElementById('mapping-mode-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const strictness = document.getElementById('strictness-group');
+    if (strictness) strictness.style.display = btn.dataset.value === 'guided' ? '' : 'none';
+  });
+  document.getElementById('mapping-strictness-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#mapping-strictness-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+  document.getElementById('tree-routing-toggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+  document.getElementById('save-schema-settings')?.addEventListener('click', saveSchemaSettings);
+
+  // Schema-mode-badge navigates to schema sub-tab
   document.getElementById('schema-mode-badge')?.addEventListener('click', openSchemaSettings);
 
-  loadSchemaSettings();
+  // Back buttons
+  document.getElementById('schema-interview-back-btn')?.addEventListener('click', cancelSchemaInterview);
+  document.getElementById('schema-review-back-btn')?.addEventListener('click', cancelSchemaInterview);
+
+  loadSchemaSettingsInline();
   loadSchemaTemplates();
   loadSchemaNodes();
+  initSchemaInterview();
 }
 
 async function loadSchemaSettings() {
@@ -7573,13 +7651,11 @@ async function deleteSchemaTemplate(id, name) {
   }
 }
 
-async function openSchemaSettings() {
-  // Navigate to Settings tab → Schema section
-  document.querySelector('.nav-btn[data-tab="settings"]').click();
+function openSchemaSettings() {
+  // Navigate to Tree tab → Schema sub-tab
+  document.querySelector('.nav-btn[data-tab="tree"]').click();
   setTimeout(() => {
-    // Activate the Schema & Mapping nav section
-    const schemaBtn = document.querySelector('.settings-nav-btn[data-section="settings-section-schema"]');
-    if (schemaBtn) schemaBtn.click();
+    document.querySelector('#tree-nav .settings-nav-btn[data-section="tree-section-schema"]')?.click();
   }, 100);
 }
 
@@ -7597,6 +7673,309 @@ async function saveSchemaSettings() {
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
   }
+}
+
+// ── Schema Interview (AI Generate) ─────────────────────────────────────────
+
+let _interviewState = {
+  active: false,
+  sessionId: null,
+  phase: 'idle',        // idle | interviewing | generating | reviewing
+  messages: [],
+  questionNumber: 0,
+  generatedSchema: null
+};
+
+function initSchemaInterview() {
+  document.getElementById('schema-interview-btn')?.addEventListener('click', startSchemaInterview);
+  document.getElementById('schema-interview-send-btn')?.addEventListener('click', sendInterviewAnswer);
+  document.getElementById('schema-interview-generate-btn')?.addEventListener('click', () => sendInterviewAnswer(true));
+  document.getElementById('schema-interview-cancel-btn')?.addEventListener('click', cancelSchemaInterview);
+  document.getElementById('schema-review-refine-btn')?.addEventListener('click', toggleRefineInput);
+  document.getElementById('schema-refine-send-btn')?.addEventListener('click', sendRefineRequest);
+  document.getElementById('schema-review-apply-btn')?.addEventListener('click', applyInterviewSchema);
+  document.getElementById('schema-review-save-btn')?.addEventListener('click', saveInterviewAsTemplate);
+  document.getElementById('schema-review-cancel-btn')?.addEventListener('click', cancelSchemaInterview);
+
+  const input = document.getElementById('schema-interview-input');
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendInterviewAnswer();
+      }
+    });
+  }
+  const refineInput = document.getElementById('schema-refine-input');
+  if (refineInput) {
+    refineInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendRefineRequest();
+      }
+    });
+  }
+}
+
+async function startSchemaInterview() {
+  showInterviewUI();
+
+  // Hide "Generate Now" until enough questions answered
+  const genBtn = document.getElementById('schema-interview-generate-btn');
+  if (genBtn) genBtn.style.display = 'none';
+
+  const messagesDiv = document.getElementById('schema-interview-messages');
+  messagesDiv.innerHTML = '';
+  _interviewState = { active: true, sessionId: null, phase: 'interviewing', messages: [], questionNumber: 0, generatedSchema: null };
+
+  // Show loading
+  appendInterviewMessage('ai', 'Starting interview...', true);
+
+  try {
+    const result = await api('/schema/interview/start', { method: 'POST', body: '{}' });
+    _interviewState.sessionId = result.sessionId;
+    _interviewState.questionNumber = result.questionNumber || 1;
+
+    // Remove loading, show first question
+    messagesDiv.innerHTML = '';
+    if (result.existingDataSummary) {
+      appendInterviewMessage('system', `Existing data: ${result.existingDataSummary}`);
+    }
+    appendInterviewMessage('ai', result.question);
+    updateInterviewProgress();
+  } catch (err) {
+    messagesDiv.innerHTML = '';
+    appendInterviewMessage('ai', `Error: ${err.message}`);
+  }
+}
+
+async function sendInterviewAnswer(skipToGenerate = false) {
+  const input = document.getElementById('schema-interview-input');
+  const answer = input.value.trim();
+  if (!answer && !skipToGenerate) return;
+
+  const sendBtn = document.getElementById('schema-interview-send-btn');
+  const genBtn = document.getElementById('schema-interview-generate-btn');
+  sendBtn.disabled = true;
+  genBtn.disabled = true;
+  input.value = '';
+
+  if (answer) appendInterviewMessage('user', answer);
+  appendInterviewMessage('ai', skipToGenerate ? 'Generating schema...' : 'Thinking...', true);
+
+  try {
+    const result = await api('/schema/interview/answer', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: _interviewState.sessionId,
+        answer: answer || undefined,
+        skipToGenerate: skipToGenerate || undefined
+      })
+    });
+
+    // Remove loading indicator
+    removeInterviewLoading();
+
+    if (result.phase === 'reviewing') {
+      // Schema generated — switch to review mode
+      _interviewState.phase = 'reviewing';
+      _interviewState.generatedSchema = result.schema;
+      showReviewUI(result.schema, result.summary);
+      return;
+    }
+
+    // Next question
+    _interviewState.questionNumber = result.questionNumber || (_interviewState.questionNumber + 1);
+    appendInterviewMessage('ai', result.question);
+    updateInterviewProgress();
+  } catch (err) {
+    removeInterviewLoading();
+    appendInterviewMessage('ai', `Error: ${err.message}`);
+  } finally {
+    sendBtn.disabled = false;
+    genBtn.disabled = false;
+    input.focus();
+  }
+}
+
+async function sendRefineRequest() {
+  const input = document.getElementById('schema-refine-input');
+  const instructions = input.value.trim();
+  if (!instructions) return;
+
+  const btn = document.getElementById('schema-refine-send-btn');
+  btn.disabled = true;
+  btn.textContent = 'Refining...';
+  input.value = '';
+
+  try {
+    const result = await api('/schema/interview/refine', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: _interviewState.sessionId,
+        instructions
+      })
+    });
+
+    _interviewState.generatedSchema = result.schema;
+    showReviewUI(result.schema, result.summary);
+    showToast('Schema refined', 'success');
+  } catch (err) {
+    showToast('Refine failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refine';
+  }
+}
+
+async function applyInterviewSchema() {
+  if (!confirm('Apply this schema? It will replace existing schema nodes and switch to Guided mode.')) return;
+
+  const btn = document.getElementById('schema-review-apply-btn');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+
+  try {
+    const result = await api('/schema/interview/apply', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: _interviewState.sessionId })
+    });
+
+    showToast(`Schema applied: ${result.created} created, ${result.updated} updated — Guided mode`, 'success');
+    cancelSchemaInterview();
+    loadSchemaSettings();
+    loadSchemaNodes();
+    loadTree();
+  } catch (err) {
+    showToast('Apply failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply Schema';
+  }
+}
+
+async function saveInterviewAsTemplate() {
+  const name = prompt('Template name:');
+  if (!name?.trim()) return;
+
+  try {
+    const result = await api('/schema/interview/apply', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: _interviewState.sessionId,
+        saveAsTemplate: true,
+        templateName: name.trim()
+      })
+    });
+
+    showToast(`Schema applied & template saved — ${result.created} created`, 'success');
+    cancelSchemaInterview();
+    loadSchemaSettings();
+    loadSchemaNodes();
+    loadSchemaTemplates();
+    loadTree();
+  } catch (err) {
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
+function cancelSchemaInterview() {
+  _interviewState = { active: false, sessionId: null, phase: 'idle', messages: [], questionNumber: 0, generatedSchema: null };
+  showSchemaOverview();
+}
+
+// ── Interview UI helpers ───────────────────────────────────────────────────
+
+function showSchemaOverview() {
+  document.getElementById('schema-overview')?.classList.remove('hidden');
+  document.getElementById('schema-interview-view')?.classList.add('hidden');
+  document.getElementById('schema-review-view')?.classList.add('hidden');
+}
+
+function showInterviewUI() {
+  document.getElementById('schema-overview')?.classList.add('hidden');
+  document.getElementById('schema-interview-view')?.classList.remove('hidden');
+  document.getElementById('schema-review-view')?.classList.add('hidden');
+}
+
+function showReviewUI(schema, summary) {
+  document.getElementById('schema-overview')?.classList.add('hidden');
+  document.getElementById('schema-interview-view')?.classList.add('hidden');
+  document.getElementById('schema-review-view')?.classList.remove('hidden');
+
+  document.getElementById('schema-review-summary').textContent = summary || '';
+  document.getElementById('schema-review-tree').innerHTML = renderInterviewSchemaTree(schema);
+  document.getElementById('schema-review-refine')?.classList.add('hidden');
+}
+
+function toggleRefineInput() {
+  const refineDiv = document.getElementById('schema-review-refine');
+  refineDiv.classList.toggle('hidden');
+  if (!refineDiv.classList.contains('hidden')) {
+    document.getElementById('schema-refine-input')?.focus();
+  }
+}
+
+function appendInterviewMessage(role, content, isLoading = false) {
+  const container = document.getElementById('schema-interview-messages');
+  if (!container) return;
+
+  if (role === 'system') {
+    container.innerHTML += `<div class="interview-system-msg">${escapeHtml(content)}</div>`;
+  } else if (role === 'user') {
+    container.innerHTML += `<div class="user-query-bubble"><div class="bubble">${escapeHtml(content)}</div></div>`;
+  } else {
+    if (isLoading) {
+      container.innerHTML += `
+        <div class="manage-assistant-bubble interview-loading">
+          <div class="typing-indicator">
+            <div class="typing-dots"><span></span><span></span><span></span></div>
+            <span>${escapeHtml(content)}</span>
+          </div>
+        </div>`;
+    } else {
+      container.innerHTML += `<div class="manage-assistant-bubble"><div class="bubble">${escapeHtml(content)}</div></div>`;
+    }
+  }
+
+  container.scrollTop = container.scrollHeight;
+}
+
+function removeInterviewLoading() {
+  const loading = document.querySelector('.interview-loading');
+  if (loading) loading.remove();
+}
+
+function updateInterviewProgress() {
+  const el = document.getElementById('schema-interview-progress');
+  if (el) {
+    el.textContent = `Question ${_interviewState.questionNumber} of ~8`;
+  }
+  // Show Generate Now button after at least 2 answers
+  const genBtn = document.getElementById('schema-interview-generate-btn');
+  if (genBtn) {
+    genBtn.style.display = _interviewState.questionNumber >= 2 ? '' : 'none';
+  }
+}
+
+function renderInterviewSchemaTree(nodes, depth = 0) {
+  if (!Array.isArray(nodes) || !nodes.length) return '<p class="schema-empty">No nodes generated.</p>';
+  return nodes.map(node => {
+    const kws = (node.keywords || []).slice(0, 5);
+    const children = node.children?.length
+      ? `<div class="schema-node-children">${renderInterviewSchemaTree(node.children, depth + 1)}</div>`
+      : '';
+    return `
+      <div class="schema-node-item depth-${Math.min(depth, 3)}">
+        <div class="schema-node-content">
+          <span class="schema-node-name">${escapeHtml(node.name)}</span>
+          ${node.description ? `<span class="schema-node-desc">${escapeHtml(node.description)}</span>` : ''}
+          ${kws.length ? `<div class="keyword-chips">${kws.map(k => `<span class="keyword-chip">${escapeHtml(k)}</span>`).join('')}</div>` : ''}
+        </div>
+        ${children}
+      </div>
+    `;
+  }).join('');
 }
 
 // ── Manage Tab ─────────────────────────────────────────────────────────────

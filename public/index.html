@@ -332,7 +332,7 @@
       <section class="tab-content" id="tab-tree">
         <div class="tab-header">
           <h2 data-i18n="tree_title">Knowledge Tree</h2>
-          <div class="header-actions">
+          <div class="header-actions" id="tree-nodes-actions">
             <span id="schema-mode-badge" class="schema-mode-badge hidden" title="Click to open schema settings" style="cursor:pointer"></span>
             <div class="view-toggle">
               <button class="view-btn active" data-view="list" title="List View">
@@ -358,44 +358,14 @@
           </div>
         </div>
 
-        <!-- Schema Panel -->
-        <div class="schema-panel" id="schema-panel">
-          <div class="schema-panel-header" id="schema-panel-toggle">
-            <span class="schema-panel-title">Schema</span>
-            <div class="schema-panel-actions">
-              <button class="schema-tool-btn" id="schema-import-btn" title="Import schema from JSON">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                Import
-              </button>
-              <button class="schema-tool-btn" id="schema-export-btn" title="Export schema as JSON">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Export
-              </button>
-              <button class="schema-tool-btn" id="schema-save-template-btn" title="Save current schema as a global template">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-                Template
-              </button>
-              <span class="schema-tool-sep"></span>
-              <button class="schema-tool-btn schema-tool-btn--icon" id="schema-settings-btn" title="Mapping settings">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-              </button>
-              <span class="schema-panel-chevron" id="schema-panel-chevron">&#9654;</span>
-            </div>
-          </div>
-          <div class="schema-panel-body hidden" id="schema-panel-body">
-            <div class="schema-body-cols">
-              <div class="schema-col schema-col--templates" id="schema-templates-section">
-                <h4 class="schema-section-title">Templates</h4>
-                <div id="schema-templates-list" class="schema-templates-list"></div>
-              </div>
-              <div class="schema-col schema-col--nodes">
-                <h4 class="schema-section-title">Schema Nodes</h4>
-                <div id="schema-nodes-tree" class="schema-nodes-tree"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <input type="file" id="schema-import-file" accept=".json" hidden>
+        <!-- Tree sub-navigation -->
+        <nav class="settings-nav" id="tree-nav">
+          <button class="settings-nav-btn active" data-section="tree-section-nodes">Nodes</button>
+          <button class="settings-nav-btn" data-section="tree-section-schema">Schema</button>
+        </nav>
+
+        <!-- Section: Nodes (default) -->
+        <div class="settings-section active" id="tree-section-nodes">
 
         <!-- Tree Health Dashboard -->
         <div class="tree-health-panel hidden" id="tree-health-panel">
@@ -462,6 +432,102 @@
             </div>
             <div class="node-detail-content" id="node-detail-content"></div>
           </div>
+        </div>
+        </div>
+
+        <!-- Section: Schema -->
+        <div class="settings-section" id="tree-section-schema">
+          <!-- Schema Overview (default) -->
+          <div id="schema-overview">
+            <div class="schema-action-bar">
+              <button class="btn btn-sm" id="schema-import-btn" title="Import schema from JSON">Import</button>
+              <button class="btn btn-sm" id="schema-export-btn" title="Export schema as JSON">Export</button>
+              <button class="btn btn-sm" id="schema-save-template-btn" title="Save current schema as a global template">Save Template</button>
+              <button class="btn btn-sm btn-primary" id="schema-interview-btn" title="AI-guided schema generation">AI Generate</button>
+            </div>
+            <div class="schema-overview-cols">
+              <div class="schema-col schema-col--templates">
+                <h4 class="schema-section-title">Templates</h4>
+                <div id="schema-templates-list" class="schema-templates-list"></div>
+              </div>
+              <div class="schema-col schema-col--nodes">
+                <h4 class="schema-section-title">Schema Nodes</h4>
+                <div id="schema-nodes-tree" class="schema-nodes-tree"></div>
+              </div>
+            </div>
+            <!-- Inline schema settings (moved from Settings tab) -->
+            <div class="settings-card" style="margin-top: 20px;">
+              <h3>Schema & Mapping Settings</h3>
+              <div id="settings-schema-body">
+                <div class="form-group">
+                  <label>Mapping Mode</label>
+                  <div class="toggle-group" id="mapping-mode-toggle">
+                    <button class="toggle-btn active" data-value="free">Free</button>
+                    <button class="toggle-btn" data-value="guided">Guided</button>
+                  </div>
+                  <p class="option-hint">Free: LLM invents topic names. Guided: KPs map to your schema nodes.</p>
+                </div>
+                <div class="form-group" id="strictness-group">
+                  <label>Strictness (Guided only)</label>
+                  <div class="toggle-group" id="mapping-strictness-toggle">
+                    <button class="toggle-btn active" data-value="soft">Soft</button>
+                    <button class="toggle-btn" data-value="hard">Hard</button>
+                  </div>
+                  <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
+                </div>
+                <div class="form-group">
+                  <label>Tree Routing (Query)</label>
+                  <div class="toggle-group" id="tree-routing-toggle">
+                    <button class="toggle-btn active" data-value="keyword">Keyword</button>
+                    <button class="toggle-btn" data-value="vector">Vector</button>
+                    <button class="toggle-btn" data-value="llm">LLM</button>
+                  </div>
+                  <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
+                  <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" id="save-schema-settings">Save</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- AI Interview view (hidden) -->
+          <div class="schema-interview-view hidden" id="schema-interview-view">
+            <div class="schema-view-header">
+              <button class="btn btn-sm" id="schema-interview-back-btn">← Back to Schema</button>
+              <span class="schema-interview-progress" id="schema-interview-progress"></span>
+            </div>
+            <div class="schema-interview-messages" id="schema-interview-messages"></div>
+            <div class="schema-interview-input" id="schema-interview-input-bar">
+              <textarea id="schema-interview-input" class="ask-input" placeholder="Type your answer..." rows="1"></textarea>
+              <div class="schema-interview-actions">
+                <button class="btn btn-sm" id="schema-interview-generate-btn" title="Skip to generation">Generate Now</button>
+                <button class="btn btn-sm btn-primary" id="schema-interview-send-btn" title="Send answer">Send</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- AI Review view (hidden) -->
+          <div class="schema-review-view hidden" id="schema-review-view">
+            <div class="schema-view-header">
+              <button class="btn btn-sm" id="schema-review-back-btn">← Back to Schema</button>
+            </div>
+            <div class="schema-review-summary" id="schema-review-summary"></div>
+            <div class="schema-review-tree" id="schema-review-tree"></div>
+            <div class="schema-review-refine hidden" id="schema-review-refine">
+              <textarea id="schema-refine-input" class="ask-input" placeholder="Describe changes (e.g., 'add a Safety category', 'merge X and Y')..." rows="1"></textarea>
+              <button class="btn btn-sm btn-primary" id="schema-refine-send-btn">Refine</button>
+            </div>
+            <div class="schema-review-actions">
+              <button class="btn btn-sm" id="schema-review-refine-btn">Refine...</button>
+              <button class="btn btn-sm" id="schema-review-save-btn">Save as Template</button>
+              <button class="btn btn-sm btn-primary" id="schema-review-apply-btn">Apply Schema</button>
+              <button class="btn btn-sm btn-link" id="schema-review-cancel-btn">Cancel</button>
+            </div>
+          </div>
+
+          <input type="file" id="schema-import-file" accept=".json" hidden>
         </div>
 
         <!-- Add Node Modal -->
@@ -752,17 +818,26 @@
               <input type="text" id="tc-name" placeholder="e.g. Verify vacation policy answer">
             </div>
             <div class="form-group">
-              <label for="tc-query">Query</label>
+              <label for="tc-query" id="tc-query-label">Query</label>
               <input type="text" id="tc-query" placeholder="Question to send to the knowledge base">
             </div>
             <div class="form-group">
               <label for="tc-assertion-type">Assertion</label>
               <select id="tc-assertion-type" class="form-select">
-                <option value="answer_not_empty">Answer is not empty</option>
-                <option value="answer_contains">Answer contains text…</option>
-                <option value="confidence_gte">Confidence ≥ threshold…</option>
-                <option value="query_type_is">Query classified as…</option>
-                <option value="has_citations">Has at least one citation</option>
+                <optgroup label="Q&amp;A Tests">
+                  <option value="answer_not_empty">Answer is not empty</option>
+                  <option value="answer_contains">Answer contains text…</option>
+                  <option value="confidence_gte">Confidence ≥ threshold…</option>
+                  <option value="query_type_is">Query classified as…</option>
+                  <option value="has_citations">Has at least one citation</option>
+                </optgroup>
+                <optgroup label="Manage Chatbot Tests">
+                  <option value="manage_intent_is">Manage: intent equals…</option>
+                  <option value="manage_response_contains">Manage: response contains…</option>
+                  <option value="manage_adds_content">Manage: adds content (has changes)</option>
+                  <option value="manage_no_changes">Manage: no changes made</option>
+                  <option value="manage_status_ok">Manage: no error</option>
+                </optgroup>
               </select>
             </div>
             <div class="form-group" id="tc-value-group" style="display:none">
@@ -790,7 +865,6 @@
         <!-- Settings sub-navigation -->
         <nav class="settings-nav" id="settings-nav">
           <button class="settings-nav-btn active" data-section="settings-section-stats">Overview</button>
-          <button class="settings-nav-btn" data-section="settings-section-schema">Schema & Mapping</button>
           <button class="settings-nav-btn" data-section="settings-section-model">Model Provider</button>
           <button class="settings-nav-btn" data-section="settings-section-prompts">LLM Prompts</button>
         </nav>
@@ -835,44 +909,6 @@
                     <div class="skeleton-line w-50"></div>
                   </div>
                 </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Section: Schema & Mapping -->
-        <div class="settings-section" id="settings-section-schema">
-          <div class="settings-card" id="settings-schema-card">
-            <h3>Schema & Mapping</h3>
-            <div id="settings-schema-body">
-              <div class="form-group">
-                <label>Mapping Mode</label>
-                <div class="toggle-group" id="mapping-mode-toggle">
-                  <button class="toggle-btn active" data-value="free">Free</button>
-                  <button class="toggle-btn" data-value="guided">Guided</button>
-                </div>
-                <p class="option-hint">Free: LLM invents topic names. Guided: KPs map to your schema nodes.</p>
-              </div>
-              <div class="form-group" id="strictness-group">
-                <label>Strictness (Guided only)</label>
-                <div class="toggle-group" id="mapping-strictness-toggle">
-                  <button class="toggle-btn active" data-value="soft">Soft</button>
-                  <button class="toggle-btn" data-value="hard">Hard</button>
-                </div>
-                <p class="option-hint">Soft: unmatched topics create child nodes. Hard: all KPs clamped to existing schema nodes.</p>
-              </div>
-              <div class="form-group">
-                <label>Tree Routing (Query)</label>
-                <div class="toggle-group" id="tree-routing-toggle">
-                  <button class="toggle-btn active" data-value="keyword">Keyword</button>
-                  <button class="toggle-btn" data-value="vector">Vector</button>
-                  <button class="toggle-btn" data-value="llm">LLM</button>
-                </div>
-                <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
-                <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
-              </div>
-              <div class="form-actions">
-                <button class="btn btn-primary" id="save-schema-settings">Save</button>
               </div>
             </div>
           </div>
