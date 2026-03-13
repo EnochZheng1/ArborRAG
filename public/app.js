@@ -867,6 +867,11 @@ async function api(endpoint, options = {}) {
       ...options
     });
 
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(`${endpoint} returned non-JSON (${response.status} ${contentType})`);
+    }
+
     const data = await response.json();
 
     if (!response.ok) {
@@ -875,7 +880,7 @@ async function api(endpoint, options = {}) {
 
     return data;
   } catch (error) {
-    console.error('API Error:', error);
+    console.error(`API Error [${endpoint}]:`, error);
     throw error;
   }
 }
@@ -7632,7 +7637,7 @@ async function applySchemaTemplate(id) {
   try {
     const result = await api(`/schema/templates/${id}/apply`, { method: 'POST', body: JSON.stringify({ mode: 'merge' }) });
     showToast(`Template "${result.template_name}" applied — mode set to Guided`, 'success');
-    loadSchemaSettings();
+    loadSchemaSettingsInline();
     loadSchemaNodes();
     loadTree();
   } catch (err) {
@@ -7669,7 +7674,7 @@ async function saveSchemaSettings() {
       body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness, tree_routing_mode: routing })
     });
     showToast('Schema settings saved', 'success');
-    loadSchemaSettings();
+    loadSchemaSettingsInline();
   } catch (err) {
     showToast('Save failed: ' + err.message, 'error');
   }
@@ -7690,7 +7695,6 @@ function initSchemaInterview() {
   document.getElementById('schema-interview-btn')?.addEventListener('click', startSchemaInterview);
   document.getElementById('schema-interview-send-btn')?.addEventListener('click', sendInterviewAnswer);
   document.getElementById('schema-interview-generate-btn')?.addEventListener('click', () => sendInterviewAnswer(true));
-  document.getElementById('schema-interview-cancel-btn')?.addEventListener('click', cancelSchemaInterview);
   document.getElementById('schema-review-refine-btn')?.addEventListener('click', toggleRefineInput);
   document.getElementById('schema-refine-send-btn')?.addEventListener('click', sendRefineRequest);
   document.getElementById('schema-review-apply-btn')?.addEventListener('click', applyInterviewSchema);
@@ -7843,7 +7847,7 @@ async function applyInterviewSchema() {
 
     showToast(`Schema applied: ${result.created} created, ${result.updated} updated — Guided mode`, 'success');
     cancelSchemaInterview();
-    loadSchemaSettings();
+    loadSchemaSettingsInline();
     loadSchemaNodes();
     loadTree();
   } catch (err) {
@@ -7870,7 +7874,7 @@ async function saveInterviewAsTemplate() {
 
     showToast(`Schema applied & template saved — ${result.created} created`, 'success');
     cancelSchemaInterview();
-    loadSchemaSettings();
+    loadSchemaSettingsInline();
     loadSchemaNodes();
     loadSchemaTemplates();
     loadTree();

@@ -174,19 +174,23 @@ ${JSON.stringify(session.context, null, 2)}
 ${session.existingTreeSummary ? `Existing tree structure:\n${session.existingTreeSummary}\n` : ''}${session.existingStats ? `Existing data: ${JSON.stringify(session.existingStats)}\n` : ''}
 Question ${session.questionCount + 1} (asked ${session.questionCount} so far, min ${MIN_QUESTIONS}, max ${MAX_QUESTIONS}).
 
-Generate the next most useful question to understand their knowledge domain better. Focus on areas not yet covered:
-- If domain is unclear: ask about the subject area
-- If categories are unclear: ask about main topics/categories
-- If depth is unclear: ask about how detailed the organization should be
-- If query patterns are unclear: ask what users will search for
-- If language is unclear: ask about content language
-- If entity types are unclear: ask about key concepts/entities
+Generate ONE single follow-up question — the most useful question to deepen your understanding of their knowledge domain. Pick the single most important gap from this priority list:
+1. Domain unclear → ask about the subject area
+2. Categories unclear → ask about main topics/categories
+3. Depth unclear → ask how detailed the organization should be
+4. Query patterns unclear → ask what users will search for
+5. Language unclear → ask about content language
+6. Entity types unclear → ask about key concepts/entities
 
-Also extract structured information from the user's previous answers.
+CRITICAL RULES:
+- Ask exactly ONE question, never combine multiple questions
+- Keep the question short and conversational (1-2 sentences max)
+- Do NOT list options or bullet points inside the question
+- Extract structured info from the user's PREVIOUS answers into contextUpdate
 
 Return JSON only:
 {
-  "nextQuestion": "Your question here?",
+  "nextQuestion": "Your single question here?",
   "contextUpdate": {
     "domain": "extracted domain (or empty to keep current)",
     "subdomains": ["extracted subdomains"],

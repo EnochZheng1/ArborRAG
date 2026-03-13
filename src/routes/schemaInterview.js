@@ -5,7 +5,7 @@
  * Mounted at /schema/interview in server.js.
  */
 import express from "express";
-import { createSession, getSession } from "../schema/interviewSession.js";
+import { createSession, getSession, deleteSession } from "../schema/interviewSession.js";
 import { generateNextQuestion, generateSchema, refineSchema, countSchemaNodes, getSchemaDepth, MAX_QUESTIONS } from "../schema/interviewEngine.js";
 import { importSchemaNodes } from "./schema.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
@@ -261,9 +261,8 @@ router.post('/apply', (req, res) => {
       }
     }
 
-    session.phase = 'applied';
-
     logger.info(`Schema interview applied: session=${session.id}, ${result.created.length} created, ${result.updated.length} updated`);
+    deleteSession(session.id);
 
     res.json({
       ok: true,
