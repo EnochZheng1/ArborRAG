@@ -49,6 +49,7 @@ function importSchemaNodes(rawNodes, mode) {
     const name        = (nodeData.name || '').trim();
     const description = nodeData.description || '';
     const aliases     = Array.isArray(nodeData.aliases) ? nodeData.aliases.filter(a => typeof a === 'string') : [];
+    const keywords    = Array.isArray(nodeData.keywords) ? nodeData.keywords.filter(k => typeof k === 'string') : [];
     if (!name) return;
 
     const nodeId = nodeData.id || generateNodeId(name);
@@ -61,6 +62,7 @@ function importSchemaNodes(rawNodes, mode) {
       NodeRepo.setSchemaNode(existing.node_id, true);
       if (description) NodeRepo.updateDescription(existing.node_id, description);
       if (aliases.length > 0) NodeRepo.update(existing.node_id, { aliases });
+      if (keywords.length > 0) NodeRepo.mergeKeywords(existing.node_id, keywords);
       updated.push(existing.node_id);
 
       for (const child of (nodeData.children || [])) {
@@ -80,9 +82,10 @@ function importSchemaNodes(rawNodes, mode) {
             node_description: description,
             is_schema_node:   1,
             scope_json:       '{}',
-            aliases_json:     aliases.length > 0 ? JSON.stringify(aliases) : '[]'
+            aliases_json:     aliases.length > 0 ? JSON.stringify(aliases) : '[]',
+            keywords_json:    keywords.length > 0 ? JSON.stringify(keywords) : '[]'
           });
-          NodeRepo.insertFtsText(nodeId, `${name} ${description}`);
+          NodeRepo.insertFtsText(nodeId, `${name} ${description} ${keywords.join(' ')}`);
         });
         created.push(nodeId);
       } catch (insertErr) {
@@ -407,4 +410,5 @@ router.delete('/:nodeId', (req, res) => {
   }
 });
 
+export { importSchemaNodes };
 export default router;

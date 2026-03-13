@@ -983,6 +983,98 @@ Return JSON array: [{"node_id":"...","relevance":0-10}]
 Only include nodes with relevance > 0. No explanation needed.`
   },
 
+  // ── Schema Interview ──────────────────────────────────────────────────────
+
+  schemaInterview_question: {
+    label: "Schema Interview — Next Question",
+    category: ROUTING,
+    description: "Generates the next adaptive interview question for AI schema generation",
+    variables: ["interviewContext", "answers", "existingTree", "existingStats", "questionCount", "minQuestions", "maxQuestions"],
+    default: `You are interviewing a user to design a knowledge base schema (tree structure for organizing information).
+
+Interview so far:
+{{answers}}
+
+Current understanding:
+{{interviewContext}}
+
+Existing tree structure:
+{{existingTree}}
+
+Existing data stats: {{existingStats}}
+
+Question number: {{questionCount}} (min {{minQuestions}}, max {{maxQuestions}}).
+
+Generate the next most useful question to understand their knowledge domain better. Focus on areas not yet covered:
+- If domain is unclear: ask about the subject area
+- If categories are unclear: ask about main topics/categories
+- If depth is unclear: ask about how detailed the organization should be
+- If query patterns are unclear: ask what users will search for
+- If language is unclear: ask about content language
+- If entity types are unclear: ask about key concepts/entities
+
+Also extract structured information from the user's previous answers.
+
+Return JSON only:
+{
+  "nextQuestion": "Your question here?",
+  "contextUpdate": {
+    "domain": "extracted domain (or empty to keep current)",
+    "subdomains": ["extracted subdomains"],
+    "queryPatterns": ["how users will search"],
+    "depthPreference": "shallow|medium|deep",
+    "language": "en|zh|auto",
+    "entityTypes": ["types of entities mentioned"],
+    "additionalNotes": "any other relevant info"
+  },
+  "shouldStop": false,
+  "confidence": 0.0-1.0
+}
+
+Set shouldStop=true only when confidence >= 0.85 AND you have enough context to generate a good schema.
+Only include non-empty fields in contextUpdate. JSON only:`
+  },
+
+  schemaInterview_generate: {
+    label: "Schema Interview — Generate Schema",
+    category: ROUTING,
+    description: "Generates a complete schema tree from accumulated interview context",
+    variables: ["interviewContext", "answers", "existingTree", "existingStats"],
+    default: `You are a knowledge base architect. Based on the interview below, design an optimal tree structure for organizing information.
+
+Interview answers:
+{{answers}}
+
+Accumulated context:
+{{interviewContext}}
+
+Existing tree structure:
+{{existingTree}}
+
+Existing data stats: {{existingStats}}
+
+Design a schema tree. Rules:
+1. Top-level nodes = main knowledge categories
+2. Each node needs: name, description (1-sentence purpose), aliases (2-3 search terms), keywords (3-5 indexing terms)
+3. Max 4 levels of depth
+4. Node names MUST match the content language (if Chinese domain → Chinese node names)
+5. Make categories mutually exclusive but collectively exhaustive for the domain
+6. Leaf nodes should be specific enough that documents can be clearly assigned
+
+Return ONLY a JSON array of top-level nodes with nested children:
+[
+  {
+    "name": "Category Name",
+    "description": "What this category covers",
+    "aliases": ["alt name 1", "alt name 2"],
+    "keywords": ["keyword1", "keyword2", "keyword3"],
+    "children": [...]
+  }
+]
+
+JSON array:`
+  },
+
   // ── Manage (Chatbot) ────────────────────────────────────────────────────────
 
   manageIntent: {

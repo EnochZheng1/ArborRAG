@@ -210,16 +210,22 @@ async function handleEdit(session, data) {
     return buildResponse(session, "EDIT", `I couldn't find any content matching "${targetDesc}". Could you describe it differently?`);
   }
 
-  // Determine new content
-  let newContent = data.new_value || data.content || "";
+  // Determine new content — prefer data.content (full updated statement from LLM)
+  // over data.new_value (bare fragment like "600") to avoid collapsing chunk content.
+  let newContent = data.content || data.new_value || "";
   if (data.old_value && data.new_value && matches[0]) {
-    // Replace old_value with new_value in the existing content
     const existing = matches[0].chunk.content_clean || "";
     if (existing.includes(data.old_value)) {
-      newContent = existing.replace(data.old_value, data.new_value);
-    } else {
-      newContent = data.new_value;
+      const replaced = existing.replace(data.old_value, data.new_value);
+      // Guard: if targeted replace collapsed >50% of content, prefer the LLM's
+      // full statement (data.content) which should be a complete sentence.
+      if (replaced.length < existing.length * 0.5 && data.content && data.content.trim().length > replaced.length) {
+        newContent = data.content;
+      } else {
+        newContent = replaced;
+      }
     }
+    // else: keep newContent as data.content (the full updated statement)
   }
 
   if (!newContent.trim()) {

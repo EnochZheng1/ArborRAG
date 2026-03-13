@@ -27,6 +27,7 @@ import testsRouter from "./routes/tests.js";
 import schemaRouter from "./routes/schema.js";
 import promptsRouter from "./routes/prompts.js";
 import manageRouter from "./routes/manage.js";
+import schemaInterviewRouter from "./routes/schemaInterview.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -99,6 +100,7 @@ app.use(statsRouter);
 app.use(entitiesRouter);
 app.use(decisionsRouter);
 app.use(testsRouter);
+app.use("/schema/interview", schemaInterviewRouter);
 app.use("/schema", schemaRouter);
 app.use("/prompts", promptsRouter);
 app.use("/manage", manageRouter);

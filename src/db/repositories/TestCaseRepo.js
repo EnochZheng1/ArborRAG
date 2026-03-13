@@ -5,7 +5,15 @@ const VALID_ASSERTION_TYPES = new Set([
   'answer_not_empty',
   'confidence_gte',
   'query_type_is',
-  'has_citations'
+  'has_citations',
+  // Manage chatbot assertion types — query is sent to /manage/chat.
+  // If query starts with "[", it is parsed as a JSON array of messages
+  // that run sequentially sharing a session; assertion checks the LAST response.
+  'manage_intent_is',          // response.intent === assertion_value
+  'manage_response_contains',  // response.response includes assertion_value
+  'manage_adds_content',       // response.changes has entries (assertion_value ignored)
+  'manage_no_changes',         // response.changes is empty or absent
+  'manage_status_ok',          // response is not an error (assertion_value ignored)
 ]);
 
 export { VALID_ASSERTION_TYPES };

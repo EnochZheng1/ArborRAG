@@ -13,6 +13,7 @@ import { wordDiceSimilarity } from "../../ingest/knowledgeExtractor.js";
 import { createNode } from "../../ingest/nodeMapper.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { logAudit } from "../../db/db.js";
+import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { logger } from "../../utils/logger.js";
 import { embedNewChunk, reembedNode } from "../../embedding/chunkEmbeddings.js";
 import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
@@ -105,6 +106,7 @@ export async function executeAdd(content, topicHint, subtopicHint, session) {
     confidence: 0.95
   };
 
+  let replaceChunkId = null;
   try {
     const decision = await resolveKPAction(kp, targetNodeId, null, { useLLM: false });
 
@@ -123,6 +125,10 @@ export async function executeAdd(content, topicHint, subtopicHint, session) {
         existingChunkId: decision.chunkId || null
       };
     }
+
+    if (decision.action === "REPLACE") {
+      replaceChunkId = decision.chunkId;
+    }
   } catch (err) {
     logger.debug(`[manage:add] Decision engine skipped: ${err.message}`);
     // Proceed with STORE if decision engine fails
@@ -130,6 +136,10 @@ export async function executeAdd(content, topicHint, subtopicHint, session) {
 
   // 5. Insert the chunk (assignKPToNode handles chunk + FTS + audit internally)
   const chunkId = assignKPToNode(kp, targetNodeId, null);
+  // If REPLACE: supersede the old chunk so it no longer shows as active
+  if (replaceChunkId) {
+    ChunkRepo.supersede(replaceChunkId, chunkId);
+  }
 
   // 6. Log chatbot-specific audit entry for tracking/revert
   logAudit("chatbot_add", "chunks", chunkId, null, {
