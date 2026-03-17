@@ -2507,6 +2507,7 @@ async function loadSchemaSettings() {
 
 async function loadSchemaSettingsInline() {
   const s = await loadSchemaSettings();
+  if (!s) return; // api aborted or failed
   // Set toggle state in the inline settings card
   document.querySelectorAll('#mapping-mode-toggle .toggle-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.value === s.mapping_mode);
@@ -2582,7 +2583,7 @@ async function loadSchemaTemplates() {
         <span class="template-name" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</span>
         <div class="template-actions">
           <button class="btn btn-small btn-primary" onclick="applySchemaTemplate('${t.id}')">Apply</button>
-          <button class="btn btn-small btn-danger" onclick="deleteSchemaTemplate('${t.id}', '${escapeHtml(t.name)}')">Delete</button>
+          <button class="btn btn-small btn-danger" onclick="deleteSchemaTemplate('${t.id}', '${escapeHtml(t.name).replace(/'/g, '&#39;')}')">Delete</button>
         </div>
       </div>
     `).join('');
