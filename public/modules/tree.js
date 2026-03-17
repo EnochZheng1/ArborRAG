@@ -50,6 +50,7 @@ async function toggleTreeHealth() {
   issuesDiv.innerHTML = '';
   try {
     const data = await api('/nodes/health');
+    if (!data) return;
     const nodes = data.nodes || [];
     const issues = data.issues || [];
     const embedded = nodes.filter(n => n.has_embedding).length;
@@ -1528,6 +1529,7 @@ async function searchTreeContent(query) {
 export { initTree, loadTree, initGraphView, initMobileSidebar, initTreeSearch, initTreeContentSearch, populateNodeSelects, allNodes };
 registerFn('loadTree', loadTree);
 registerFn('populateNodeSelects', populateNodeSelects);
+registerFn('populateSchemaBranchSelect', populateSchemaBranchSelect);
 
 // ── Window bindings for inline onclick handlers ──────────────────────────────
 window._updateBatchToolbar = _updateBatchToolbar;

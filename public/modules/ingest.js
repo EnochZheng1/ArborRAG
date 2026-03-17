@@ -920,3 +920,5 @@ export { initIngest, loadUnifiedView, loadDocuments, loadStats, syncEmbeddings, 
 registerFn('loadUnifiedView', loadUnifiedView);
 registerFn('loadDocuments', loadUnifiedView);
 registerFn('loadStats', loadStats);
+registerFn('syncEmbeddings', syncEmbeddings);
+registerFn('syncAliases', syncAliases);

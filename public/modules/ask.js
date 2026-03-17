@@ -274,6 +274,7 @@ async function handleAsk() {
       method: 'POST',
       body: JSON.stringify({ query, options })
     });
+    if (!result) return; // request aborted
 
     // Save to history
     addToHistory(query, result.query_type, result.confidence);

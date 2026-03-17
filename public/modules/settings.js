@@ -2200,8 +2200,8 @@ function initSettings() {
   document.getElementById('settings-save-btn')?.addEventListener('click', saveSettings);
 
   // Stats section (moved from Stats tab)
-  document.getElementById('sync-embeddings-btn')?.addEventListener('click', syncEmbeddings);
-  document.getElementById('sync-aliases-btn')?.addEventListener('click', syncAliases);
+  document.getElementById('sync-embeddings-btn')?.addEventListener('click', () => callFn('syncEmbeddings'));
+  document.getElementById('sync-aliases-btn')?.addEventListener('click', () => callFn('syncAliases'));
 
   // Settings sub-navigation
   document.getElementById('settings-nav')?.addEventListener('click', (e) => {
@@ -2288,6 +2288,7 @@ function initPrompts() {
 async function loadPrompts() {
   try {
     const data = await api('/prompts');
+    if (!data) return;
     _promptsData = data.prompts || [];
     renderPromptsList();
   } catch (err) {
@@ -2471,6 +2472,7 @@ function initSchemaPanel() {
 async function loadSchemaSettings() {
   try {
     const s = await api('/schema/settings');
+    if (!s) return;
     state.currentMappingMode = s.mapping_mode || 'free';
 
     const badge = document.getElementById('schema-mode-badge');
@@ -2495,7 +2497,7 @@ async function loadSchemaSettings() {
     if (schemaBranchRow) schemaBranchRow.style.display  = s.mapping_mode === 'guided' ? '' : 'none';
 
     // Populate schema branch select when in guided mode
-    if (s.mapping_mode === 'guided') populateSchemaBranchSelect();
+    if (s.mapping_mode === 'guided') callFn('populateSchemaBranchSelect');
 
     return s;
   } catch (_) {
@@ -2523,6 +2525,7 @@ async function loadSchemaSettingsInline() {
   if (hint) {
     try {
       const cov = await api('/embeddings/coverage');
+      if (!cov) return;
       const pct = cov?.nodes?.total > 0 ? (cov.nodes.embedded / cov.nodes.total) : 0;
       hint.style.display = pct < 0.5 ? '' : 'none';
     } catch (_) { hint.style.display = 'none'; }
@@ -2534,6 +2537,7 @@ async function loadSchemaNodes() {
   if (!container) return;
   try {
     const data = await api('/schema');
+    if (!data) return;
     if (!data.nodes?.length) {
       container.innerHTML = '<p class="schema-empty">No schema nodes defined.<br>Import a JSON schema or flag existing nodes.</p>';
       return;
@@ -2568,6 +2572,7 @@ async function loadSchemaTemplates() {
   if (!container) return;
   try {
     const templates = await api('/schema/templates');
+    if (!templates) return;
     if (!templates.length) {
       container.innerHTML = '<p class="schema-empty">No templates yet.</p>';
       return;
@@ -2631,6 +2636,7 @@ async function applySchemaTemplate(id) {
   if (!ok) return;
   try {
     const result = await api(`/schema/templates/${id}/apply`, { method: 'POST', body: JSON.stringify({ mode: 'merge' }) });
+    if (!result) return;
     showToast(`Template "${result.template_name}" applied — mode set to Guided`, 'success');
     loadSchemaSettingsInline();
     loadSchemaNodes();
@@ -2733,6 +2739,7 @@ async function startSchemaInterview() {
 
   try {
     const result = await api('/schema/interview/start', { method: 'POST', body: '{}' });
+    if (!result) return;
     _interviewState.sessionId = result.sessionId;
     _interviewState.questionNumber = result.questionNumber || 1;
 

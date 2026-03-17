@@ -79,6 +79,7 @@ async function handleManageMessage() {
       body: JSON.stringify({ message, sessionId: window._manageSessionId })
     });
 
+    if (!result) return; // request aborted
     window._manageSessionId = result.sessionId || window._manageSessionId;
 
     const typing = document.getElementById('manage-typing');
@@ -203,6 +204,7 @@ async function loadManageHistory() {
   list.innerHTML = '<div class="loading-text">Loading...</div>';
   try {
     const data = await api('/manage/history?limit=30');
+    if (!data) return;
     const changes = data.changes || [];
     if (!changes.length) {
       list.innerHTML = '<div class="manage-no-history">No chatbot changes yet.</div>';
