@@ -268,7 +268,7 @@ function renderTree(nodes, depth = 0) {
           <input type="checkbox" class="tree-node-cb" data-node-id="${node.node_id}" onclick="event.stopPropagation(); _updateBatchToolbar();">
           <span class="tree-toggle">${toggleSymbol}</span>
           <span class="tree-icon">${hasChildren ? '📁' : '📄'}</span>
-          <span class="tree-name">${node.name}</span>
+          <span class="tree-name">${escapeHtml(node.name)}</span>
         </div>
         ${childHtml}
       </li>
@@ -517,9 +517,9 @@ async function loadNodeDetail(nodeId) {
           <h4>📁 Child Nodes (${node.children.length})</h4>
           <ul class="node-children-list">
             ${node.children.map(child => `
-              <li class="node-child-item" data-node-id="${child.node_id}" title="${child.node_summary || ''}">
+              <li class="node-child-item" data-node-id="${child.node_id}" title="${escapeHtml(child.node_summary || '')}">
                 <span class="node-child-icon">${child.children?.length ? '📁' : '📄'}</span>
-                <span class="node-child-name">${child.name}</span>
+                <span class="node-child-name">${escapeHtml(child.name)}</span>
               </li>
             `).join('')}
           </ul>
@@ -1097,7 +1097,8 @@ function createGraph() {
     .attr('dy', 4)
     .text(d => d.name.length > 12 ? d.name.slice(0, 12) + '...' : d.name);
 
-  // Tooltip
+  // Tooltip — remove any stale tooltip from previous render
+  d3.select('body').selectAll('.graph-tooltip').remove();
   const tooltip = d3.select('body').append('div')
     .attr('class', 'graph-tooltip')
     .style('opacity', 0)

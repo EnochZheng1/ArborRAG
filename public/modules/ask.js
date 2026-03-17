@@ -1288,8 +1288,10 @@ function displayAskResult(result, showTrace = false) {
     }
     traceDiv.querySelectorAll('.trace-step-header').forEach(header => {
       header.addEventListener('click', () => {
-        const details = header.nextElementSibling;
-        if (details && details.classList.contains('trace-step-details')) {
+        // Find the details div — may not be the immediate sibling if a duration bar exists
+        const step = header.closest('.trace-step');
+        const details = step?.querySelector('.trace-step-details');
+        if (details) {
           details.classList.toggle('expanded');
           header.classList.toggle('expanded');
         }

@@ -56,11 +56,22 @@ export async function revertChange(auditId) {
   if (!entry) {
     return { success: false, description: "Change not found." };
   }
-  if (entry.action === "chatbot_revert") {
+  if (entry.action === "chatbot_revert" || entry.action === "tree_revert") {
     return { success: false, description: "Cannot revert a revert. Please re-add the content manually." };
   }
+
+  // Tree operations (move, rename, update)
+  if (entry.action.startsWith("tree_")) {
+    try {
+      return revertTreeOp(entry);
+    } catch (err) {
+      logger.error(`[manage:undo] Tree revert failed for audit ${auditId}: ${err.message}`);
+      return { success: false, description: `Revert failed: ${err.message}` };
+    }
+  }
+
   if (!entry.action.startsWith("chatbot_")) {
-    return { success: false, description: "Only chatbot changes can be reverted." };
+    return { success: false, description: "Only chatbot and tree changes can be reverted." };
   }
 
   try {
@@ -181,4 +192,46 @@ async function revertDelete(entry) {
     success: true,
     description: "Reverted: re-inserted the deleted knowledge point."
   };
+}
+
+/**
+ * Revert a tree operation (move, rename, update).
+ * tree_delete is not revertable (node + chunks are gone).
+ */
+function revertTreeOp(entry) {
+  if (entry.action === "tree_delete") {
+    return { success: false, description: "Cannot undo a node deletion — the node and its chunks have been permanently removed." };
+  }
+
+  const nodeId = entry.record_id;
+  if (!NodeRepo.existsById(nodeId)) {
+    return { success: false, description: "Node no longer exists — cannot revert." };
+  }
+
+  const old = entry.old_value;
+  if (!old) {
+    return { success: false, description: "No previous state snapshot available." };
+  }
+
+  runTransaction(() => {
+    // Restore parent (move)
+    if (old.parent_id !== undefined) {
+      NodeRepo.reparentNode(nodeId, old.parent_id);
+    }
+    // Restore name / summary / description
+    const updates = {};
+    if (old.name !== undefined) updates.name = old.name;
+    if (old.node_summary !== undefined) updates.summary = old.node_summary;
+    if (Object.keys(updates).length > 0) {
+      NodeRepo.update(nodeId, updates);
+    }
+    if (old.node_description !== undefined) {
+      NodeRepo.updateDescription(nodeId, old.node_description);
+    }
+
+    logAudit("tree_revert", "nodes", nodeId, entry.new_value, old);
+  });
+
+  logger.info(`[manage:undo] Reverted ${entry.action} on node ${nodeId}`);
+  return { success: true, description: `Reverted: node restored to previous state.` };
 }
