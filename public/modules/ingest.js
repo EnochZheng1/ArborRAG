@@ -74,7 +74,7 @@ function initIngest() {
 
   const schemaOnlyChk = document.getElementById('schema-nodes-only');
   if (schemaOnlyChk) {
-    schemaOnlyChk.addEventListener('change', populateNodeSelects);
+    schemaOnlyChk.addEventListener('change', () => callFn('populateNodeSelects'));
   }
 
   // Ingest sub-navigation
@@ -278,7 +278,7 @@ function _startUploadJobPoller(jobId, resultIndex, allResults) {
     }
 
     try {
-      const job = await api(`/ingest/jobs/${jobId}`, { dedupe: false });
+      const job = await api(`/ingest/jobs/${jobId}`);
       if (!job) return; // request was aborted
 
       // Update just this card in the result div.
@@ -429,7 +429,7 @@ async function loadUnifiedView() {
   const statusFilter = document.getElementById('doc-status-filter')?.value || '';
 
   try {
-    const data = await api('/documents/unified', { dedupe: false });
+    const data = await api('/documents/unified');
     if (!data) return; // request was aborted
     let rows = data.rows || [];
 
@@ -499,7 +499,7 @@ async function loadUnifiedView() {
 
     // Auto-refresh while jobs are queued or processing
     const hasActive = rows.some(r => r.status === 'queued' || r.status === 'processing');
-    _hasActiveJobs = hasActive;
+    state._hasActiveJobs = hasActive;
     const docsTabActive = document.getElementById('tab-ingest')?.classList.contains('active');
     if (hasActive && docsTabActive) {
       // Adaptive polling: when WebSocket is connected, use long interval (safety net);

@@ -2471,7 +2471,7 @@ function initSchemaPanel() {
 async function loadSchemaSettings() {
   try {
     const s = await api('/schema/settings');
-    currentMappingMode = s.mapping_mode || 'free';
+    state.currentMappingMode = s.mapping_mode || 'free';
 
     const badge = document.getElementById('schema-mode-badge');
     if (badge) {

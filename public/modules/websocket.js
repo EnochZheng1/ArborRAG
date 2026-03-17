@@ -1,8 +1,6 @@
 // ── WebSocket (real-time job progress) ───────────────────────────────────────
-import { state } from './state.js';
-import { markTabsDirty, callFn } from './utils.js';
-import { escapeHtml } from './utils.js';
-import { STEP_TO_STAGE, PIPELINE_STAGES } from './state.js';
+import { state, _tabDirty, STEP_TO_STAGE, PIPELINE_STAGES } from './state.js';
+import { markTabsDirty, callFn, escapeHtml } from './utils.js';
 
 export function _wsSend(msg) {
   const raw = JSON.stringify(msg);
@@ -106,7 +104,7 @@ function _scheduleUnifiedReload() {
     state._reloadDebounce = null;
     const docsTabActive = document.getElementById('tab-ingest')?.classList.contains('active');
     if (docsTabActive) {
-      state._tabDirty_ingest = false; // loading now — clear the dirty flag
+      _tabDirty.ingest = false; // loading now — clear the dirty flag
       callFn('loadUnifiedView')?.catch(console.error);
     }
   }, 150);

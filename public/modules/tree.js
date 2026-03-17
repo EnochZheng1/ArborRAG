@@ -182,7 +182,7 @@ async function loadTree() {
   }
 
   try {
-    const data = await api('/nodes', { dedupe: false });
+    const data = await api('/nodes');
     if (!data) return; // request was aborted
     treeData = data.tree || [];
     allNodes = flattenTree(treeData);
@@ -408,9 +408,9 @@ async function loadNodeDetail(nodeId) {
   try {
     // Fetch node info, chunks, and entities in parallel
     const [node, chunksData, entitiesData] = await Promise.all([
-      api(`/nodes/${encodeURIComponent(nodeId)}?context=true`, { dedupe: false }),
-      api(`/chunks/${encodeURIComponent(nodeId)}`, { dedupe: false }).catch(() => ({ chunks: [] })),
-      api(`/nodes/${encodeURIComponent(nodeId)}/entities?debug=true`, { dedupe: false }).catch(() => ({ entities: [], facts: [], debug: null }))
+      api(`/nodes/${encodeURIComponent(nodeId)}?context=true`),
+      api(`/chunks/${encodeURIComponent(nodeId)}`).catch(() => ({ chunks: [] })),
+      api(`/nodes/${encodeURIComponent(nodeId)}/entities?debug=true`).catch(() => ({ entities: [], facts: [], debug: null }))
     ]);
     if (!node) return; // aborted
 

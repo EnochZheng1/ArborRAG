@@ -150,8 +150,8 @@ function handleQueryInput(e) {
 
 async function fetchSuggestions(prefix) {
   try {
-    const result = await api(`/suggestions?q=${encodeURIComponent(prefix)}&limit=8`);
-    if (result.suggestions?.length > 0) {
+    const result = await api(`/suggestions?q=${encodeURIComponent(prefix)}&limit=8`, { dedupe: true });
+    if (result?.suggestions?.length > 0) {
       showSuggestions(result.suggestions);
     } else {
       hideSuggestions();

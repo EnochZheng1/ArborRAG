@@ -77,8 +77,9 @@ export function showHtmlToast(html, type = 'info') {
 const _activeControllers = new Map();
 
 export async function api(endpoint, options = {}) {
-  // Cancel previous request to same endpoint if still in flight (dedup)
-  const dedupe = options.dedupe !== false;
+  // Cancel previous request to same endpoint if still in flight (opt-in dedup)
+  // Default OFF — only enable for rapid-fire endpoints like autocomplete
+  const dedupe = options.dedupe === true;
   const dedupeKey = dedupe ? (options.method === 'POST' ? `${endpoint}:POST` : endpoint) : null;
 
   if (dedupe && dedupeKey) {
