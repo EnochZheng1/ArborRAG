@@ -60,6 +60,23 @@ export function calculateConfidence(context) {
   // Linear scaling preserves the relative differences between good and bad answers.
   overallScore = overallScore * 0.92;
 
+  // Query specificity adjustment (R8): specific fact queries with corroboration
+  // deserve a slight boost; vague queries with few sources deserve a slight penalty.
+  const isSpecificQuery = /^(?:what|who|when|where|which|how\s+(?:much|many|often|long))\s+(?:is|are|was|were|does|do|did|will)\b/i.test(query);
+  const isVagueQuery = /^(?:tell\s+me\s+about|explain|describe|discuss|summarize|overview)/i.test(query);
+
+  if (isSpecificQuery && chunks.length >= 2) {
+    overallScore = Math.min(1.0, overallScore * 1.08); // Slight boost for fact queries with corroboration
+  }
+  if (isVagueQuery && chunks.length < 4) {
+    overallScore *= 0.92; // Slight penalty for vague queries with few sources
+  }
+
+  // Recency factor (R9): blend source freshness into the score.
+  // Newer sources are more likely to be current and accurate.
+  const recencyFactor = calculateRecencyFactor(chunks);
+  overallScore = overallScore * 0.85 + recencyFactor * 0.15;
+
   // Additional penalties
   // Penalty for few chunks
   if (chunks.length < 3) {
@@ -397,6 +414,21 @@ function generateExplanation(factors, level) {
           ? 'Limited sources found - answer may be incomplete'
           : 'Very few relevant sources - treat answer with caution'
   };
+}
+
+/**
+ * Calculate recency factor based on chunk upload dates.
+ * Newer sources are more likely to be current and accurate.
+ * Decays to 0.75 over 2 years; defaults to 1 year old if no date available.
+ */
+function calculateRecencyFactor(chunks) {
+  const now = Date.now();
+  const avgAge = chunks.reduce((sum, c) => {
+    const uploadedAt = c.uploaded_at ? new Date(c.uploaded_at).getTime() : (now - 365 * 86400000);
+    return sum + (now - uploadedAt);
+  }, 0) / (chunks.length || 1);
+  const daysOld = avgAge / 86400000;
+  return Math.max(0.75, 1 - (daysOld / 730)); // Decay to 0.75 over 2 years
 }
 
 // Helper functions

@@ -72,9 +72,34 @@ function* allBalanced(text, openChar, closeChar) {
 }
 
 /**
+ * Recover a truncated JSON array by collecting all balanced top-level objects
+ * within an unbalanced `[…` prefix. Returns `[obj1, obj2, …]` or null.
+ */
+function recoverTruncatedArray(text) {
+  // Must start with '[' (possibly after whitespace)
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith('[')) return null;
+
+  // Collect all balanced {…} objects inside the truncated array
+  const inner = trimmed.slice(1); // skip the opening '['
+  const items = [];
+  for (const obj of allBalanced(inner, '{', '}')) {
+    try {
+      JSON.parse(obj); // verify each object is valid JSON
+      items.push(obj);
+    } catch (_) {}
+  }
+  if (items.length >= 2) {
+    return `[${items.join(',')}]`;
+  }
+  return null;
+}
+
+/**
  * Return candidate JSON substrings to try, ordered by likelihood:
  *  - All balanced structures of the expected shape, sorted by length desc
  *    (longer = more likely to be the real JSON)
+ *  - Truncated array recovery (for LLM responses cut off mid-array)
  *  - Full stripped text as last resort
  */
 function getCandidates(stripped, hint) {
@@ -95,6 +120,25 @@ function getCandidates(stripped, hint) {
   const result = [];
   for (const c of found) {
     if (!seen.has(c)) { seen.add(c); result.push(c); }
+  }
+
+  // Truncated array recovery: if hint='array' and no large balanced array was
+  // found, the LLM may have hit its output token limit mid-JSON. Collect all
+  // complete top-level objects inside the unbalanced `[…` and synthesize an array.
+  if (hint === 'array' || hint === 'any') {
+    const recovered = recoverTruncatedArray(stripped);
+    if (recovered && !seen.has(recovered)) {
+      // Insert before the full-text fallback but after real balanced candidates.
+      // Only useful when no balanced array was found OR the recovered array is
+      // larger (has more complete objects) than the largest balanced array.
+      const largestBalanced = result[0];
+      if (!largestBalanced || recovered.length > largestBalanced.length) {
+        result.unshift(recovered); // most promising candidate
+      } else {
+        result.push(recovered);
+      }
+      seen.add(recovered);
+    }
   }
 
   // Always include full text as final fallback

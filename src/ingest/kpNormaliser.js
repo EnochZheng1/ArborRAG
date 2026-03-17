@@ -117,15 +117,17 @@ export async function findOrCreateTopicNode(topicName, parentId, options = {}) {
     return { ...ensureRootNode(), _created: false };
   }
 
-  // Scan all direct siblings in the DB — guaranteed to see every existing node
+  // Scan direct siblings in the DB — guaranteed to see every existing node
   // under this parent, unlike BM25 which only returns a capped top-N result set.
+  // Limit scan to 50 siblings to prevent O(n^2) Dice comparisons on large trees.
   try {
     const siblings = NodeRepo.findByParent(parentId);
+    const topSiblings = siblings.slice(0, 50);
 
     let bestMatch = null;
     let bestScore = 0;
 
-    for (const sibling of siblings) {
+    for (const sibling of topSiblings) {
       const score = wordDiceSimilarity(topicName.toLowerCase(), (sibling.name || "").toLowerCase());
       if (score > bestScore) {
         bestScore = score;
@@ -167,9 +169,10 @@ export async function findOrCreateTopicNode(topicName, parentId, options = {}) {
   } catch (err) {
     // Race condition: a parallel job created the same sibling between our scan and insert.
     // Fetch the existing node and reuse it rather than failing the ingestion.
+    // Use fuzzy match (Dice > 0.85) to catch near-identical names from LLM paraphrasing.
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err.message?.includes('UNIQUE constraint failed: nodes'))) {
       const siblings = NodeRepo.findByParent(parentId);
-      const existing = siblings.find(n => n.name === topicName);
+      const existing = siblings.find(n => n.name === topicName || wordDiceSimilarity(n.name.toLowerCase(), topicName.toLowerCase()) > 0.85);
       if (existing) {
         logger.debug(`Topic node race resolved: reusing "${existing.name}" under ${parentId || "root"}`);
         return { ...existing, _created: false };

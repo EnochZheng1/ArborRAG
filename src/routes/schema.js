@@ -11,6 +11,7 @@ import { SchemaTemplateRepo } from "../db/repositories/SchemaTemplateRepo.js";
 import { generateNodeId, ensureRootNode } from "../ingest/nodeHierarchy.js";
 import { runTransaction, safeJson } from "../db/db.js";
 import { apiLogger as logger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
 
 const router = express.Router();
 
@@ -129,8 +130,9 @@ router.get('/', (req, res) => {
     const tree  = buildTree(nodes);
     res.json({ nodes, tree });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /schema error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -140,18 +142,19 @@ router.post('/import', (req, res) => {
   try {
     const { nodes: rawNodes = [], mode = 'merge' } = req.body;
     if (!Array.isArray(rawNodes)) {
-      return res.status(400).json({ error: '`nodes` must be an array' });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`nodes` must be an array' } });
     }
     if (!['merge', 'replace'].includes(mode)) {
-      return res.status(400).json({ error: '`mode` must be "merge" or "replace"' });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`mode` must be "merge" or "replace"' } });
     }
 
     const result = importSchemaNodes(rawNodes, mode);
     logger.info(`Schema import (${mode}): ${result.created.length} created, ${result.updated.length} updated`);
     res.json({ ok: true, created: result.created.length, updated: result.updated.length, ...result });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/import error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -172,8 +175,9 @@ router.get('/export', (req, res) => {
     logger.info(`Schema exported: ${nodes.length} nodes (all=${all})`);
     res.json({ exported_at: new Date().toISOString(), nodes: tree });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /schema/export error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -188,8 +192,9 @@ router.get('/settings', (req, res) => {
       tree_routing_mode:   DatasetConfigRepo.get('tree_routing_mode')   ?? 'keyword'
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /schema/settings error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -201,21 +206,21 @@ router.patch('/settings', (req, res) => {
 
     if (mapping_mode !== undefined) {
       if (!['free', 'guided'].includes(mapping_mode)) {
-        return res.status(400).json({ error: '`mapping_mode` must be "free" or "guided"' });
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`mapping_mode` must be "free" or "guided"' } });
       }
       DatasetConfigRepo.set('mapping_mode', mapping_mode);
     }
 
     if (mapping_strictness !== undefined) {
       if (!['soft', 'hard'].includes(mapping_strictness)) {
-        return res.status(400).json({ error: '`mapping_strictness` must be "soft" or "hard"' });
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`mapping_strictness` must be "soft" or "hard"' } });
       }
       DatasetConfigRepo.set('mapping_strictness', mapping_strictness);
     }
 
     if (tree_routing_mode !== undefined) {
       if (!['keyword', 'vector', 'llm'].includes(tree_routing_mode)) {
-        return res.status(400).json({ error: '`tree_routing_mode` must be "keyword", "vector", or "llm"' });
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`tree_routing_mode` must be "keyword", "vector", or "llm"' } });
       }
       DatasetConfigRepo.set('tree_routing_mode', tree_routing_mode);
     }
@@ -226,8 +231,9 @@ router.patch('/settings', (req, res) => {
     logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting}`);
     res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("PATCH /schema/settings error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -241,8 +247,9 @@ router.get('/templates', (req, res) => {
     }));
     res.json(templates);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /schema/templates error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -251,7 +258,7 @@ router.get('/templates', (req, res) => {
 router.post('/templates', (req, res) => {
   try {
     const { name, description = '' } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: '`name` is required' });
+    if (!name?.trim()) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`name` is required' } });
 
     // Export current schema nodes as the template content
     const nodes   = NodeRepo.findSchemaNodes();
@@ -262,10 +269,11 @@ router.post('/templates', (req, res) => {
     res.status(201).json({ ...template, schema_json: safeJson(template.schema_json, []) });
   } catch (err) {
     if (err.message?.includes('UNIQUE')) {
-      return res.status(409).json({ error: `Template name "${req.body.name}" already exists` });
+      return res.status(409).json({ error: { code: 'CONFLICT', message: `Template name "${req.body.name}" already exists` } });
     }
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/templates error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -274,12 +282,13 @@ router.post('/templates', (req, res) => {
 router.delete('/templates/:id', (req, res) => {
   try {
     const changes = SchemaTemplateRepo.delete(req.params.id);
-    if (!changes) return res.status(404).json({ error: 'Template not found' });
+    if (!changes) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Template not found' } });
     logger.info(`Schema template deleted: ${req.params.id}`);
     res.json({ ok: true });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("DELETE /schema/templates/:id error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -288,7 +297,7 @@ router.delete('/templates/:id', (req, res) => {
 router.post('/templates/:id/apply', (req, res) => {
   try {
     const template = SchemaTemplateRepo.getById(req.params.id);
-    if (!template) return res.status(404).json({ error: 'Template not found' });
+    if (!template) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Template not found' } });
 
     const rawNodes = safeJson(template.schema_json, []);
     const { mode = 'merge' } = req.body;
@@ -308,8 +317,9 @@ router.post('/templates/:id/apply', (req, res) => {
       updated: result.updated.length
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/templates/:id/apply error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -319,11 +329,11 @@ router.post('/templates/:id/apply', (req, res) => {
 router.post('/nodes', (req, res) => {
   try {
     const { name, description = '', parent_id } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: '`name` is required' });
+    if (!name?.trim()) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`name` is required' } });
 
     const rootNode = ensureRootNode();
     const parentId = parent_id ?? rootNode.node_id;
-    if (!NodeRepo.existsById(parentId)) return res.status(404).json({ error: 'Parent node not found' });
+    if (!NodeRepo.existsById(parentId)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Parent node not found' } });
 
     // Reuse existing node if name matches
     const existing = NodeRepo.searchByName(name.trim(), 1).find(
@@ -364,8 +374,9 @@ router.post('/nodes', (req, res) => {
         if (winner) return res.json({ ok: true, node_id: winner.node_id, created: false });
       } catch (_) { /* fall through */ }
     }
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/nodes error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -375,7 +386,7 @@ router.post('/nodes', (req, res) => {
 router.patch('/:nodeId', (req, res) => {
   try {
     const { nodeId } = req.params;
-    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: 'Node not found' });
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Node not found' } });
 
     const { node_description, is_schema_node } = req.body;
 
@@ -389,8 +400,9 @@ router.patch('/:nodeId', (req, res) => {
     logger.info(`Schema node patched: ${nodeId}`);
     res.json({ ok: true, node_id: nodeId });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error(`PATCH /schema/${req.params.nodeId} error:`, err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -400,13 +412,14 @@ router.patch('/:nodeId', (req, res) => {
 router.delete('/:nodeId', (req, res) => {
   try {
     const { nodeId } = req.params;
-    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: 'Node not found' });
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Node not found' } });
     NodeRepo.setSchemaNode(nodeId, false);
     logger.info(`Schema flag removed from node: ${nodeId}`);
     res.json({ ok: true });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error(`DELETE /schema/${req.params.nodeId} error:`, err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

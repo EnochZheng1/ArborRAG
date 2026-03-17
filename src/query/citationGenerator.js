@@ -66,7 +66,10 @@ function answerCoversSourceValues(answer, sourceText) {
  * @returns {Promise<string|null>} Summarized source list string, or null on failure / insufficient coverage.
  */
 async function preSummarizeSources(query, numberedSources, detectedLang) {
-  if (numberedSources.length < 5) return null;
+  // Only summarize when source count is high (> 8). With 8 or fewer sources × 800 chars,
+  // raw source text is ~6.4K — well within modern LLM context. Pre-summarization loses
+  // multi-fact details (e.g., 5-step vascular injury protocol reduced to 1 sentence).
+  if (numberedSources.length <= 8) return null;
 
   const sourceTexts = numberedSources.map(s =>
     `[${s.number}] ${s.content}`
@@ -162,13 +165,15 @@ export async function generateAnswerWithCitations(query, context, sources, optio
     number: i + 1,
     id: s.id || s.chunk?.id,
     title: s.doc_title || s.chunk?.doc_title || 'Unknown',
-    content: (s.content || s.content_clean || s.chunk?.content || '').slice(0, 400),
+    content: (s.content || s.content_clean || s.chunk?.content || '').slice(0, 800),
     node_name: s.node_name || s.node?.name
   }));
 
   const sourceList = numberedSources.map(s =>
     `[${s.number}] ${s.title}${s.node_name ? ` (${s.node_name})` : ''}: ${s.content}`
   ).join('\n\n');
+
+  logger.debug(`[citation_gen] Sources for "${query.slice(0, 60)}": ${numberedSources.map(s => `[${s.number}]=${s.id}`).join(', ')}`);
 
   try {
     // Detect language from context for better understanding
@@ -203,7 +208,7 @@ ${effectiveSourceList}
 - 简洁直接地回答。
 
 回答:`
-      : `Answer the question using the provided sources. Add [n] citations after each factual claim.
+      : `Answer the question using ONLY the provided sources. Add [n] citations after each factual claim.
 
 Question: ${query}
 
@@ -212,77 +217,158 @@ ${effectiveSourceList}
 
 Rules:
 - Read ALL sources before answering — the relevant information may be in any source.
-- Extract and quote specific numbers, dates, and names exactly as written.
+- Extract and quote specific numbers, dates, percentages, dollar amounts, and ranges exactly as written in the sources.
 - Add [1], [2] etc. after each claim to indicate the source.
-- Answer directly and concisely.
+- Be COMPLETE: if the sources contain a table, list, or multi-level structure (e.g. alert levels, approval tiers, salary bands), include ALL rows/levels — do not skip or summarize any.
+- When the sources contain tiered/bracketed ranges (dollar ranges, thresholds, levels), reproduce the applicable tier with its EXACT boundary values. Example: write "$2,000 - $10,000: skip-level manager approval" rather than just "skip-level manager approval".
+- Answer directly and thoroughly.
 
 Answer:`);
 
     const answerModelOverride = getAnswerModel();
-    let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 1000, taskName: 'citation_generation', model: answerModelOverride }) || '';
+    let answerText = await callLLM({ prompt, temperature, maxOutputTokens: 2000, thinkingBudget: 0, taskName: 'citation_generation', model: answerModelOverride }) || '';
 
-    // Retry once if the first answer looks like a false "not in sources" response
-    if (looksLikeNotFound(answerText)) {
-      logger.debug(`citation_generation: "not found" detected, retrying with directive prompt`);
-      const retryKey = isChineseLang(detectedLang) ? 'answerRetry_zh' : 'answerRetry_en';
-      const retryPrompt = getCustomPrompt(retryKey, { query, sourceList })
-        ?? (isChineseLang(detectedLang)
-        ? `请仔细重新阅读以下所有来源，然后回答问题。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n重要：请不要说信息不存在，而是从来源中提取任何相关的事实、数字或描述。直接回答：`
-        : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer directly:`);
-      const retryText = await callLLM({ prompt: retryPrompt, temperature: 0.1, maxOutputTokens: 1000, taskName: 'citation_generation_retry', model: answerModelOverride });
-      if (retryText) answerText = retryText;
-    }
-
-    // Structured extraction fallback: if answer still has no citations and sources contain
-    // specific values the answer ignores, switch to a fact-extraction approach
+    // Unified retry: combine "not found" detection, missing-value detection, and
+    // low alignment into a SINGLE retry call instead of 2-3 sequential LLM calls.
+    // This reduces worst-case from 4 LLM calls to 2 (main + retry).
+    const notFoundInAnswer = looksLikeNotFound(answerText);
     const firstPassCitations = extractCitationsFromAnswer(answerText);
-    if (firstPassCitations.length === 0 && sourcesHaveValues(sourceList) && !answerCoversSourceValues(answerText, sourceList)) {
-      logger.debug(`citation_generation: answer missing source values, trying structured extraction`);
-      const extractPrompt = isChineseLang(detectedLang)
-        ? `从以下来源中提取与问题相关的所有具体事实。列出每个事实并标注来源编号[n]。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n提取的事实：`
-        : `Extract ALL specific facts from the sources that answer the question. List each fact with its source number [n]. Include exact numbers, dates, percentages, and durations.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nExtracted facts:`;
-      try {
-        const extractedText = await callLLM({ prompt: extractPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_extraction_fallback', model: answerModelOverride });
-        if (extractedText && !looksLikeNotFound(extractedText) && answerCoversSourceValues(extractedText, sourceList)) {
-          answerText = extractedText;
-        }
-      } catch (extractErr) {
-        logger.debug(`citation_extraction_fallback failed: ${extractErr.message}`);
-      }
-    }
-
-    // Answer-source alignment check: extract key claims (values) from the answer
-    // and verify they appear in at least one source. If alignment is very low,
-    // regenerate with a structured prompt that forces source-grounded extraction.
     const answerValues = extractValuesFromText(answerText);
+    let alignmentScore = 1.0;
     if (answerValues.length >= 2) {
       let alignedCount = 0;
       for (const val of answerValues) {
         if (sourceList.toLowerCase().includes(val.toLowerCase())) alignedCount++;
       }
-      const alignmentRatio = alignedCount / answerValues.length;
-      if (alignmentRatio < 0.30) {
-        logger.debug(`citation_generation: low answer-source alignment (${(alignmentRatio * 100).toFixed(0)}%), regenerating with structured prompt`);
-        const alignPrompt = isChineseLang(detectedLang)
-          ? `仔细阅读来源，然后仅使用来源中实际存在的信息来回答问题。引用来源中的具体数字、日期和名称。\n\n问题: ${query}\n\n来源:\n${sourceList}\n\n回答（引用具体数据）：`
-          : `Read the sources carefully, then answer ONLY using information actually present in the sources. Quote specific numbers, dates, and names from the sources.\n\nQuestion: ${query}\n\nSources:\n${sourceList}\n\nAnswer (cite specific data):`;
-        try {
-          const alignedText = await callLLM({ prompt: alignPrompt, temperature: 0.0, maxOutputTokens: 1000, taskName: 'citation_alignment_regen', model: answerModelOverride });
-          if (alignedText && !looksLikeNotFound(alignedText)) {
-            // Check if the regenerated answer has better alignment
-            const regenValues = extractValuesFromText(alignedText);
+      alignmentScore = alignedCount / answerValues.length;
+    }
+    const missingSourceValues = firstPassCitations.length === 0
+      && sourcesHaveValues(sourceList)
+      && !answerCoversSourceValues(answerText, sourceList);
+
+    const needsRetry = notFoundInAnswer || alignmentScore < 0.30 || missingSourceValues;
+    if (needsRetry) {
+      const reasons = [];
+      if (notFoundInAnswer) reasons.push('"not found" detected');
+      if (alignmentScore < 0.30) reasons.push(`low alignment (${(alignmentScore * 100).toFixed(0)}%)`);
+      if (missingSourceValues) reasons.push('missing source values');
+      logger.debug(`citation_generation: unified retry — ${reasons.join(', ')}`);
+
+      // Build a unified retry prompt that addresses all failure modes:
+      // - Forces re-reading of sources (handles "not found")
+      // - Demands exact values from sources (handles alignment)
+      // - Requests structured fact extraction with citations (handles missing citations)
+      const retryKey = isChineseLang(detectedLang) ? 'answerRetry_zh' : 'answerRetry_en';
+      const unifiedRetryPrompt = getCustomPrompt(retryKey, { query, sourceList })
+        ?? (isChineseLang(detectedLang)
+        ? `请仔细重新阅读以下所有来源，然后回答问题。不要说信息不存在。
+
+问题: ${query}
+
+来源:
+${sourceList}
+
+规则：
+- 从来源中提取所有相关事实、数字、日期和百分比。
+- 直接引用来源中的具体数据，不要修改数字。
+- 在每个事实后用[n]标注来源编号。
+- 如果来源包含分级/分类信息，列出所有级别。
+
+回答：`
+        : `Re-read ALL sources carefully and answer the question. Do NOT say information is missing.
+
+Question: ${query}
+
+Sources:
+${sourceList}
+
+Rules:
+- Extract ALL relevant facts, numbers, dates, percentages, and durations from the sources.
+- Quote specific values exactly as written in the sources — do not alter numbers.
+- Add [n] citation after each factual claim to indicate the source.
+- If sources contain tiered/categorized information, include ALL tiers with exact boundary values.
+
+Answer:`);
+      try {
+        const retryText = await callLLM({ prompt: unifiedRetryPrompt, temperature: 0.0, maxOutputTokens: 2000, thinkingBudget: 0, taskName: 'citation_generation_unified_retry', model: answerModelOverride });
+        if (retryText && !looksLikeNotFound(retryText)) {
+          // Check if the retry improved alignment (if alignment was the issue)
+          if (alignmentScore < 0.30 && answerValues.length >= 2) {
+            const regenValues = extractValuesFromText(retryText);
             let regenAligned = 0;
             for (const val of regenValues) {
               if (sourceList.toLowerCase().includes(val.toLowerCase())) regenAligned++;
             }
             const regenRatio = regenValues.length > 0 ? regenAligned / regenValues.length : 0;
-            if (regenRatio > alignmentRatio) {
-              answerText = alignedText;
+            // Only use retry if it improved alignment or original was "not found"
+            if (regenRatio > alignmentScore || notFoundInAnswer || missingSourceValues) {
+              answerText = retryText;
             }
+          } else {
+            // For "not found" or missing values, always prefer the retry
+            answerText = retryText;
           }
-        } catch (alignErr) {
-          logger.debug(`citation_alignment_regen failed: ${alignErr.message}`);
         }
+      } catch (retryErr) {
+        logger.debug(`citation_generation_unified_retry failed: ${retryErr.message}`);
+      }
+    }
+
+    // Source→answer value enrichment: check if top cited sources contain tiered
+    // dollar/numeric ranges whose boundary values the answer omits. If so, append
+    // the relevant tier to the answer. This compensates for LLMs that summarize
+    // tiers as just the action (e.g., "skip-level approval") without quoting the
+    // bracket boundaries ("$2,000-$10,000").
+    const citedNums = [...answerText.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1], 10));
+    const topCited = citedNums.slice(0, 3);
+    let enriched = false;
+    for (const num of topCited) {
+      if (enriched) break;
+      const src = numberedSources.find(s => s.number === num);
+      if (!src) continue;
+      const srcContent = src.content || '';
+      // Split source into lines and find tiered lines with dollar ranges
+      const tierLines = srcContent.split('\n').filter(l => /\$[\d,]+/.test(l));
+      if (tierLines.length < 2) continue; // need at least 2 tiers to be a tiered structure
+      const ansLower = answerText.toLowerCase();
+      // Stop words to exclude from tier matching (prevent "the", "with" etc. from inflating scores)
+      const tierStopWords = new Set([
+        'the','and','for','with','from','that','this','into','over','under',
+        'all','any','are','was','has','had','not','but','can','may','will',
+        'must','also','than','each','per','via','plus','least','before',
+        'after','within','through','about','between','during','requires',
+        'required','form','submitted','business','days','upon','its'
+      ]);
+      // Build word frequency across all tiers to identify distinctive words
+      const allTierWords = new Map();
+      const tierDescriptions = tierLines.map(line => {
+        const desc = line.replace(/\$[\d,]+(?:\.\d+)?/g, '').replace(/[-–—:;()\[\]]/g, ' ').trim().toLowerCase();
+        const words = desc.split(/\s+/).filter(w => w.length >= 3 && !tierStopWords.has(w));
+        for (const w of words) allTierWords.set(w, (allTierWords.get(w) || 0) + 1);
+        return { line, words };
+      });
+      // Score: distinctive words (appear in only 1 tier) matching the answer count 3x
+      let bestTier = null;
+      let bestScore = 0;
+      for (const { line, words } of tierDescriptions) {
+        let score = 0;
+        for (const w of words) {
+          if (!ansLower.includes(w)) continue;
+          score += (allTierWords.get(w) === 1) ? 3 : 1; // distinctive words score 3x
+        }
+        if (score <= 0) continue;
+        const ranges = [...line.matchAll(/\$[\d,]+(?:\.\d+)?/g)].map(m => m[0]);
+        const bounds = ranges.map(r => r.replace(/[$]/g, ''));
+        const missing = bounds.filter(b => !ansLower.includes(b));
+        if (missing.length > 0 && bounds.length >= 1 && score > bestScore) {
+          bestScore = score;
+          bestTier = line;
+        }
+      }
+      if (bestTier) {
+        const cleanLine = bestTier.replace(/^[\s\-*]+/, '').trim();
+        answerText += `\n\nThe applicable approval tier is: ${cleanLine} [${num}].`;
+        enriched = true;
       }
     }
 

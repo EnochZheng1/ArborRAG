@@ -19,6 +19,7 @@ import {
 import { JobRepo } from "../db/repositories/JobRepo.js";
 import { runWithDb } from "../db/activeDb.js";
 import { apiLogger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,7 +62,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
   // Re-establish dataset context: multer's async processing breaks AsyncLocalStorage
   await runWithDb(req.datasetConn, async () => {
     try {
-      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      if (!req.file) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "No file uploaded" } });
 
       const { targetNodeId, targetSchemaNodeId, useLLM = true, sync = false } = req.body || {};
       const processOptions = {
@@ -96,8 +97,9 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       });
     } catch (err) {
       if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+      if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
       apiLogger.error("Upload error:", err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
     }
   });
 });
@@ -108,7 +110,7 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
   await runWithDb(req.datasetConn, async () => {
     try {
       if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ error: "No files uploaded" });
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "No files uploaded" } });
       }
 
       const { targetNodeId, targetSchemaNodeId, useLLM = true, sync = false } = req.body || {};
@@ -145,8 +147,9 @@ router.post("/upload/batch", upload.array("files", Number(process.env.INGEST_MAX
       if (Array.isArray(req.files)) {
         for (const f of req.files) { try { fs.unlinkSync(f.path); } catch (_) {} }
       }
+      if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
       apiLogger.error("Batch upload error:", err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
     }
   });
 });
@@ -158,8 +161,9 @@ router.get("/ingest/jobs/active", (req, res) => {
     const jobs = listActiveIngestionJobs();
     res.json({ jobs, count: jobs.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("List active jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -168,8 +172,9 @@ router.post("/ingest/jobs/cancel-all", (req, res) => {
     const cancelled = cancelAllIngestionJobs();
     res.json({ success: true, cancelled });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Cancel all jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -178,8 +183,9 @@ router.post("/ingest/jobs/retry-all", (req, res) => {
     const retried = retryAllIngestionJobs();
     res.json({ success: true, retried });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Retry all jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -188,8 +194,9 @@ router.delete("/ingest/jobs/completed", (req, res) => {
     const deleted = JobRepo.purgeCompleted();
     res.json({ ok: true, deleted });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Purge completed jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -198,8 +205,9 @@ router.delete("/ingest/jobs/failed", (req, res) => {
     const deleted = JobRepo.purgeFailed();
     res.json({ ok: true, deleted });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Purge failed jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -211,19 +219,21 @@ router.get("/ingest/jobs", (req, res) => {
     const jobs = listIngestionJobs({ status, limit, offset });
     res.json({ jobs, count: jobs.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("List ingestion jobs error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 router.get("/ingest/jobs/:id", (req, res) => {
   try {
     const job = getIngestionJob(parseInt(req.params.id));
-    if (!job) return res.status(404).json({ error: "Ingestion job not found" });
+    if (!job) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Ingestion job not found" } });
     res.json(job);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get ingestion job error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -232,8 +242,9 @@ router.post("/ingest/jobs/:id/retry", (req, res) => {
     const job = retryIngestionJob(parseInt(req.params.id));
     res.json({ success: true, job });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Retry ingestion job error:", err.message);
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: err.message } });
   }
 });
 
@@ -242,8 +253,9 @@ router.post("/ingest/jobs/:id/cancel", (req, res) => {
     const job = cancelIngestionJob(parseInt(req.params.id));
     res.json({ success: true, job });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Cancel ingestion job error:", err.message);
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: err.message } });
   }
 });
 
@@ -251,8 +263,9 @@ router.get("/ingest/queue/stats", (req, res) => {
   try {
     res.json(getIngestionQueueStats());
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get ingestion queue stats error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

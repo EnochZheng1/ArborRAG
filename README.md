@@ -1,6 +1,6 @@
 # TreeKB — Tree-Based Knowledge Graph
 
-**v2.10.0** · Node.js · SQLite · OpenAI / Gemini
+**v3.0.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -8,24 +8,30 @@ A local knowledge management system that ingests documents into a hierarchical k
 
 ## Features
 
+- **Modular ES Module Frontend** — 8,200-line monolith split into 10 focused ES modules; thin entry point; shared state via module imports; function registry for cross-module calls
+- **Security Hardening** — helmet security headers (HSTS, X-Frame-Options, CSP); express-rate-limit (120 req/min general, 20 req/min for LLM); file magic byte validation; orphaned upload cleanup; sanitized error messages in production
+- **Structured API Errors** — all endpoints return `{ error: { code, message, details? } }` with typed error codes (VALIDATION_ERROR, NOT_FOUND, CONFLICT, RATE_LIMITED); request ID on every response via `X-Request-ID` header
+- **Retrieval Quality** — result caching (5-min TTL); skip LLM classification on high-confidence patterns; consolidated citation LLM calls (4→2 max); early cross-doc filtering; query-specific confidence scoring; recency signal in confidence; centralized query helpers
+- **Ingestion Quality** — paragraph fallback cap; fuzzy match in node creation recovery; batched keyword merging; sibling scan limit (50); improved CJK heading detection; checkpoint-before-processing; table KP cross-dedup
 - **Conversational Knowledge Management** — add, edit, delete, and query knowledge through natural language chat; LLM intent classification routes messages to the right action; session-based confirmation flow for destructive operations; full change history with per-entry revert
-- **Per-Dataset Prompt Customisation** — override any LLM prompt per dataset via the Prompts settings UI; defaults restored with one click; variables auto-injected at call time
+- **Per-Dataset Prompt Customisation** — override any LLM prompt per dataset via the Prompts settings UI; defaults restored with one click; variables auto-injected at call time; search/filter across 33 prompt templates
 - **Guided Tree Schema** — pre-define the knowledge tree structure via JSON import; ingested KPs map into your taxonomy instead of inventing arbitrary topic names; soft (extends with child nodes) or hard (clamps to existing schema) strictness; global template library for reuse across datasets
 - **Tree Routing Modes** — keyword (fast, default), LLM (Gemini scores node relevance 0-10), or vector (embedding similarity); configurable per dataset in schema settings
-- **Answer Quality Hardening** — answer-source alignment verification, source pre-summarization for 5+ sources, confidence-answer grounding with value-level checks, model-specific answer generation via `ANSWER_MODEL` env var
+- **Answer Quality Hardening** — answer-source alignment verification, source pre-summarization for 8+ sources, confidence-answer grounding with value-level checks, model-specific answer generation via `ANSWER_MODEL` env var
 - **Smart Reranking** — cross-encoder weighted reranking (keyword 30% / BM25 20% / embedding 50%), adaptive score-gap cutoff, query-type aware boosts (numeric, entity, negation queries)
-- **Ingestion Quality** — table-aware KP extraction (tab-separated and markdown tables), PPTX support, depth-aware node creation (5 heading levels), node summary generation, orphan node cleanup, topic canonicalization
-- **Follow-up Query Context** — detects follow-up patterns and expands queries with prior context; per-dataset session history with 10-min TTL
+- **Ingestion Pipeline** — table-aware KP extraction (tab-separated and markdown tables), PPTX support, depth-aware node creation (5 heading levels), node summary generation, orphan node cleanup, topic canonicalization
+- **Follow-up Query Context** — detects follow-up patterns and expands queries with prior context; per-dataset session history with 30-min TTL
 - **Multi-provider LLM** — switch between OpenAI and Google Gemini (including Vertex AI) at runtime via the Settings tab
 - **Knowledge Point (KP) extraction** — LLM decomposes documents into atomic, typed statements (fact, rule, definition, procedure, example, context) and places them into a topical hierarchy
 - **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; LLM-confirmed value conflicts queued for human review in the Decisions tab with diff view
 - **Multi-dataset support** — separate SQLite databases per dataset, switched via `X-Dataset-ID` header or the Datasets tab
 - **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall
-- **Tree Management** — lazy-rendered tree for 500+ nodes, drag-and-drop reparenting, batch operations (move/delete), content search across chunks, tree health dashboard
-- **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events
+- **Tree Management** — lazy-rendered tree for 500+ nodes, drag-and-drop reparenting, batch operations (move/delete), content search across chunks, tree health dashboard; undo for tree mutations
+- **Accessibility** — ARIA roles/labels on all interactive elements, focus-visible outlines, confidence badge text indicators, focus trap in modals, keyboard shortcuts (Ctrl+K search, Ctrl+Enter submit, Escape close)
+- **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events; reconnection banner with manual reconnect
 - **Entity & fact extraction** — named entities and relational facts extracted and stored for graph queries
 - **Test case management** — save and replay Q&A pairs to track retrieval quality over time
-- **Dark mode UI** — fully themed web interface with embedding coverage indicator, query favorites, WebSocket status
+- **Dark mode UI** — fully themed web interface with embedding coverage indicator, query favorites, WebSocket status; mobile-responsive with 480px breakpoint
 
 ---
 
@@ -126,6 +132,7 @@ INGEST_CLEANUP_ON_SUCCESS=true
 uploads/           Uploaded source files
 src/
   server.js        Express + WebSocket entry point
+  middleware/       Request ID, etc.
   db/              SQLite schema, migrations, repositories
   ingest/          Document parsing → KP extraction → node mapping
   embedding/       Vector embedding (OpenAI or Gemini)
@@ -133,14 +140,40 @@ src/
   kg/              Knowledge graph reasoning, Q&A, tree routing
   manage/          Conversational knowledge management (intent → action)
   prompts/         Prompt defaults, per-dataset prompt manager
-  routes/          REST API route handlers
-  utils/           LLM abstraction, logger, rate-limit helpers
-public/            Single-page web UI
+  routes/          REST API route handlers (16 modules)
+  utils/           LLM abstraction, logger, error classes, query helpers, validation
+public/
+  app.js           ES module entry point
+  modules/         10 feature modules (ask, tree, ingest, manage, datasets, settings, ...)
+  index.html       SPA shell
+  styles.css       Full theme (light/dark, mobile-responsive)
+docs/
+  openapi.yaml     OpenAPI 3.0 specification (108 operations)
 ```
 
 ---
 
 ## Changelog
+
+### v3.0.0
+- **Frontend Modularization** — split monolithic 8,200-line `app.js` into 10 ES modules under `public/modules/`; thin entry point with `<script type="module">`; shared state via imports; function registry for cross-module calls without circular dependencies
+- **Security Hardening** — `helmet` middleware (HSTS, X-Frame-Options, X-Content-Type-Options, DNS prefetch control); `express-rate-limit` (120 req/min general, 20 req/min for LLM endpoints); magic byte file validation for PDF/DOCX/XLSX; orphaned upload cleanup (24h TTL, runs at startup + every 6h); sanitized error messages in production mode
+- **Structured API Errors** — new `ApiError` class with typed error codes; all 16 route files return `{ error: { code, message, details? } }` format; `X-Request-ID` header on every response; input validation via `requireBody()`/`requireQuery()` helpers
+- **Retrieval Quality** — query result cache (5-min TTL, 200 entries); skip LLM classification when pattern confidence ≥0.85 (saves 2-3s/query); consolidated citation LLM calls from 4 sequential to 2 max; early cross-doc chunk pre-boost before reranking; query-specific confidence (fact queries boosted, vague penalized); recency signal (15% weight, 2-year decay); centralized `queryHelpers.js` deduplicates numeric/negation/entity patterns across 3 files
+- **Ingestion Quality** — paragraph fallback capped at `min(40, kpCount/3)` to prevent DB bloat; fuzzy match (Dice ≥0.85) in node creation UNIQUE constraint recovery; batched keyword merging (one write per node, not per KP); sibling scan limited to 50 (fixes O(n²) scaling); CJK heading detection for `【一】` bracket and `1)` parenthesis patterns; checkpoint saved before batch processing (not after); table KP cross-dedup against paragraph fallbacks
+- **Accessibility** — ARIA roles/labels on navigation, tabs, modals, toast, inputs; `role="dialog"` + `aria-modal` on all overlays; `aria-live="polite"` for dynamic content; `:focus-visible` outlines; confidence badge text indicators (high/med/low)
+- **Custom Confirm Modals** — replaced all 18 native `confirm()`/`prompt()` calls with styled async modals; danger styling for destructive operations; Escape key dismissal
+- **Keyboard Shortcuts** — Ctrl/Cmd+K focuses search; Ctrl/Cmd+Enter submits forms; Escape closes modals/panels
+- **Mobile Responsiveness** — 480px breakpoint for small phones; 44px minimum tap targets; safe-area padding for soft keyboard; single-column layouts on narrow screens
+- **WebSocket Reconnection Banner** — sticky warning banner when connection lost; shows reconnection state; manual Reconnect button when retries exhausted
+- **Tree Undo** — tree mutations (move, rename, delete) log to audit_log with `audit_id` returned to frontend; undo toast with one-click revert
+- **Progress Improvements** — pipeline stage tooltips explaining each step; elapsed time display; ETA estimation based on progress %
+- **Developer Experience** — `.env.example` with all 28 env vars documented; `npm test` wired to test-runner; `npm run lint` via ESLint 10 (0 errors); GitHub Actions CI pipeline; OpenAPI 3.0 spec (4,540 lines, 108 operations); schema version tracking in each dataset DB
+- **AbortController for API Requests** — duplicate requests to same endpoint auto-cancelled; silent abort handling; opt-out via `dedupe: false` for polling
+- **Prompt Search** — filter 33 prompt templates by name or description in Settings
+- **Copy-to-Clipboard Fallback** — textarea-based fallback for non-HTTPS environments
+- **Error Toast Persistence** — error toasts persist 8 seconds (was 3) with dismiss button
+- **Settings Parallel Loading** — stats, prompts, and config load via `Promise.all` instead of sequential
 
 ### v2.10.0
 - **Answer Quality Hardening** — answer-source alignment check with regeneration on <30% alignment; source pre-summarization for 5+ sources; confidence-answer grounding combines term-level (50%) and value-level (50%) checks; aggregation queries now return confidence scores; `ANSWER_MODEL` env var for dedicated answer generation model

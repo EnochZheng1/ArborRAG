@@ -21,6 +21,7 @@ import {
 import { llmScoreNodes } from "./llmTreeRouter.js";
 import { vectorScoreNodes } from "./vectorTreeRouter.js";
 import { generateQueryEmbedding } from "../embedding/embedder.js";
+import { isNumericQuery } from "../utils/queryHelpers.js";
 
 /**
  * Calculate text similarity score (simple term overlap)
@@ -286,7 +287,7 @@ function getNodeChunks(nodeId, query, limit = 10) {
     // many chunks. Differentiated boost ensures the chunk containing the exact
     // figure the user asked for surfaces above prose-heavy chunks.
     const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
-    const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长/i.test(query);
+    const numericQuery = isNumericQuery(query);
 
     let numericBoost = 0;
     for (const num of queryNumbers) {
@@ -297,7 +298,7 @@ function getNodeChunks(nodeId, query, limit = 10) {
     // Numeric-seeking query ("how many...") with no exact number match:
     // mildly boost any chunk that contains numbers — it's more likely to hold
     // the answer than a pure-prose chunk.
-    if (isNumericQuery && numericBoost === 0 && /\d/.test(contentLower)) {
+    if (numericQuery && numericBoost === 0 && /\d/.test(contentLower)) {
       numericBoost = 0.25;
     }
     relevance += numericBoost;
@@ -549,10 +550,14 @@ function _blendVectorScores(queryEmbedding, nodes, levelItems) {
     return levelItems;
   }
 
+  // Weighted blend instead of Math.max: cosine similarity from embedding models
+  // produces tight score clusters (e.g. all nodes score 0.85-0.95), providing poor
+  // discrimination. Keyword scores differentiate nodes with matching terms (e.g.
+  // "Alert Activation" for an "alert" query). The blend preserves both signals.
   return levelItems.map(item => {
     const vecResult = vecScores.get(item.node.node_id);
     if (vecResult) {
-      return { ...item, score: Math.max(vecResult.score, item.score) };
+      return { ...item, score: 0.55 * vecResult.score + 0.45 * item.score };
     }
     return item;
   });
@@ -565,7 +570,8 @@ export function enrichWithAncestorContext(chunks, options = {}) {
   const {
     maxAncestors = 2,
     ancestorChunksPerLevel = 2,
-    ancestorDecay = 0.82
+    ancestorDecay = 0.82,
+    query = ''    // optional: used for query-aware ancestor chunk selection
   } = options;
 
   const enrichedChunks = [...chunks];
@@ -581,8 +587,12 @@ export function enrichWithAncestorContext(chunks, options = {}) {
     for (let i = 0; i < Math.min(ancestors.length, maxAncestors); i++) {
       const ancestor = ancestors[i];
 
-      // Get ancestor's chunks
-      const ancestorChunks = ChunkRepo.getForNodeFull(ancestor.node_id, ancestorChunksPerLevel);
+      // Query-aware selection: if query is provided, use getNodeChunks (relevance-scored)
+      // so ancestor chunks relevant to the query surface over generic boilerplate.
+      // Falls back to time-ordered getForNodeFull when no query is available.
+      const ancestorChunks = query
+        ? getNodeChunks(ancestor.node_id, query, ancestorChunksPerLevel)
+        : ChunkRepo.getForNodeFull(ancestor.node_id, ancestorChunksPerLevel);
 
       for (const ac of ancestorChunks) {
         if (!seenChunkIds.has(ac.id)) {
@@ -973,8 +983,12 @@ export async function hierarchicalRetrieve(query, options = {}) {
   const seenChunkIds = new Set();
   const nodeChunkStats = [];
 
-  for (const node of relevantNodes.slice(0, 15)) {
-    const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, 8);
+  for (let ni = 0; ni < Math.min(relevantNodes.length, 15); ni++) {
+    const node = relevantNodes[ni];
+    // Top node (primary match) gets a higher chunk limit so multi-part content
+    // (e.g. 4-level alert table with 3 chunks per level = 12 chunks) isn't truncated.
+    const chunkLimit = ni === 0 ? 15 : 8;
+    const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, chunkLimit);
     let added = 0;
 
     for (const chunk of nodeChunks) {
@@ -1013,8 +1027,9 @@ export async function hierarchicalRetrieve(query, options = {}) {
   if (includeAncestors && results.chunks.length > 0) {
     const enriched = enrichWithAncestorContext(results.chunks, {
       maxAncestors: ancestorLevels,
-      ancestorChunksPerLevel: 2,
-      ancestorDecay: 0.82
+      ancestorChunksPerLevel: 4,
+      ancestorDecay: 0.82,
+      query: retrievalQuery
     });
     const newChunks = enriched.filter(c => !seenChunkIds.has(c.id));
 

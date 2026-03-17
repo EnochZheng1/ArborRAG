@@ -24,8 +24,16 @@ export const QUERY_TYPES = {
   AGGREGATION: "aggregation"
 };
 
-// Pattern-based classification rules
+// Pattern-based classification rules (checked in order — first match wins)
 const CLASSIFICATION_PATTERNS = {
+  // simple_lookup checked BEFORE recommendation so "what should I do" action
+  // queries (medical protocols, emergency steps) are not misrouted.
+  simple_lookup: [
+    /what.*should\s+I\s+do/i,
+    /what.*do\s+I\s+do/i,
+    /what.*action|what.*step|what.*procedure/i,
+    /怎么办|该怎么做|应该怎么/,
+  ],
   comparison: [
     /比较|对比|区别|差异|不同|vs|versus|compare|differ|between.*and/i,
     /哪个更|which.*better|which.*prefer/i,
@@ -144,7 +152,7 @@ async function llmClassify(query) {
   const prompt = getPrompt('queryClassification', lang, query);
 
   try {
-    const text = await callLLM({ prompt, taskName: 'query_classification' }) ?? "{}";
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'query_classification' }) ?? "{}";
     const result = await parseLLMJson(text, 'object', { context: 'query_classification', fallback: null });
     if (!result) throw new Error('Failed to parse classification JSON');
     return result;
@@ -178,16 +186,33 @@ export async function classifyQuery(query, options = {}) {
     };
   }
 
-  // If pattern gives a result with high confidence, use it
-  if (patternResult && entities.length > 0) {
-    // For comparison queries with clear entities, trust the pattern
-    if (patternResult === "comparison" && entities.length >= 2) {
+  // If pattern gives a high-confidence result, trust it over the LLM.
+  // simple_lookup patterns catch "what should I do" action queries that the LLM
+  // misclassifies as recommendation; comparison patterns catch "X vs Y" with entities.
+  if (patternResult) {
+    // Assign confidence per pattern type
+    let patternConfidence = 0.7;
+    let patternReasoning = "Pattern-based classification";
+
+    if (patternResult === "simple_lookup") {
+      patternConfidence = 0.85;
+      patternReasoning = "Pattern match: action/protocol lookup";
+    } else if (patternResult === "comparison" && entities.length >= 2) {
+      patternConfidence = 0.9;
+      patternReasoning = "Pattern match with entity extraction";
+    } else if (patternResult === "aggregation") {
+      patternConfidence = 0.85;
+      patternReasoning = "Pattern match: aggregation/listing query";
+    }
+
+    // Skip LLM classification when pattern confidence is high enough
+    if (patternConfidence >= 0.85) {
       return {
         query_type: patternResult,
-        confidence: 0.9,
+        confidence: patternConfidence,
         entities,
         criteria: [],
-        reasoning: "Pattern match with entity extraction",
+        reasoning: patternReasoning,
         method: "pattern"
       };
     }

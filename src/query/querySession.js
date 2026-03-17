@@ -9,7 +9,7 @@
 import { getActiveDatasetId } from "../db/activeDb.js";
 
 const SESSION_SIZE = 3;   // keep last 3 queries per dataset
-const SESSION_TTL  = 10 * 60 * 1000;  // 10-minute idle timeout
+const SESSION_TTL  = 30 * 60 * 1000;  // 30-minute idle timeout
 
 // Map<datasetId, { queries: string[], updatedAt: number }>
 const _sessions = new Map();

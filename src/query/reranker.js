@@ -1,6 +1,7 @@
 import { logger } from "../utils/logger.js";
 import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
+import { isNumericQuery, extractNegatedTerms, hasNumericContent } from "../utils/queryHelpers.js";
 
 /**
  * Heuristic + optional LLM Re-ranking Module
@@ -20,21 +21,24 @@ import { getCustomPrompt } from "../prompts/promptManager.js";
  * per chunk in a single batched prompt, then blends: 0.5 × llm + 0.5 × heuristic.
  */
 
-/**
- * Extract negated terms from query (e.g., "not health insurance", "except annual leave").
- * Returns lowercase terms that should be penalized in ranking.
- */
-function extractNegatedTerms(query) {
-  const terms = [];
-  for (const m of query.matchAll(/\b(?:not|except|excluding|other\s+than|besides|without|除了|不包括|排除)\s+([a-z\u4e00-\u9fa5\s]+?)(?:\s*[,.\?!]|\s+(?:and|or|what|which|how|do|is|are|can|will|does|the)|\s*$)/gi)) {
-    const term = m[1].toLowerCase().trim();
-    if (term.length >= 2) terms.push(term);
-  }
-  return terms;
-}
-
 const LLM_ENABLED = process.env.RERANKER_LLM_ENABLED === 'true';
 const LLM_TOP_N   = Math.min(12, Math.max(3, parseInt(process.env.RERANKER_LLM_TOP_N, 10) || 8));
+
+// Stop words filtered from query terms — prevents "what", "are", "the" from
+// diluting keyword overlap scores. Without this, a 7-term query like "What are the
+// SafeGuard neuromonitoring alert thresholds" has 4 content terms and 3 stop words,
+// reducing overlap from 4/4=1.0 to 4/7=0.57 and causing minScore cutoff to drop
+// relevant chunks.
+const RERANKER_STOP_WORDS = new Set([
+  "the","is","are","was","were","be","been","being","have","has","had",
+  "do","does","did","will","would","could","should","may","might","shall",
+  "can","must","of","in","on","at","to","for","by","with","from","as",
+  "or","an","and","but","not","it","its","this","that","what","who","how",
+  "when","where","which","why","all","any","each","few","more","most",
+  "no","nor","so","than","too","very","just","up","out","if","then",
+  "them","their","they","we","our","us","you","your","he","she","his","her",
+  "my","me","into","about","over","after"
+]);
 
 /**
  * Score top-N chunks with a single LLM call.
@@ -90,12 +94,15 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
   const minScore  = typeof optionsOrMaxChunks === 'object' ? (optionsOrMaxChunks?.minScore ?? 0) : 0;
   if (!chunks || chunks.length === 0) return [];
 
-  const queryTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
+  const rawTerms = (query || "").toLowerCase().match(/[a-z]{2,}|\d+/g) ?? [];
+  const queryTerms = rawTerms.filter(t => !RERANKER_STOP_WORDS.has(t));
+  // Fallback: if ALL terms were stop words, keep the raw set
+  if (queryTerms.length === 0 && rawTerms.length > 0) queryTerms.push(...rawTerms);
   const queryLower = (query || "").toLowerCase();
   const n = chunks.length;
 
   // Detect query type for context-aware boosting
-  const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长|\b\d+\b/i.test(query);
+  const numericQuery = isNumericQuery(query) || /\b\d+\b/i.test(query);
   const isEntityQuery  = /\bwho\b|\bwhich\b|\bwhat.*(?:name|company|person|CEO|manager|director)\b|谁|哪个/i.test(query);
   // Extract named entities (capitalized multi-word phrases) from query
   const queryEntities = (query.match(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g) || []).map(e => e.toLowerCase());
@@ -119,11 +126,11 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
     let score = 0.30 * overlapScore + 0.20 * rankScore + 0.50 * embScore;
 
     // Query-type aware boosting
-    if (isNumericQuery && /\d/.test(content)) {
+    if (numericQuery && /\d/.test(content)) {
       // Boost chunks containing numbers for numeric queries
       score += 0.05;
       // Extra boost if chunk contains percentages or unit-bearing numbers
-      if (/\b\d+(?:\.\d+)?\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/i.test(content)) {
+      if (hasNumericContent(content)) {
         score += 0.05;
       }
     }
@@ -165,17 +172,13 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
 
   scored.sort((a, b) => b.rerank_score - a.rerank_score);
 
-  // Adaptive score-gap cutoff: keep chunks within 40% of the top score.
-  // E.g., if top score is 0.80, cut off below 0.80 × 0.60 = 0.48.
-  // This adapts to the score distribution instead of using a fixed gap threshold.
+  // Adaptive cutoff disabled: the maxChunks cap (from caller) is sufficient.
+  // The previous score-gap cutoff (keep within 40-55% of top) dropped relevant
+  // chunks from multi-part queries (e.g. 4-level alert table: Orange level dropped
+  // because all levels scored similarly but varied by BM25 rank position).
+  // Without embedding similarity (signal 3 is usually 0.0), scores cluster tightly
+  // around keyword overlap — making any percentage cutoff arbitrary.
   let results = scored;
-  if (results.length > 3 && results[0].rerank_score > 0) {
-    const cutoff = results[0].rerank_score * 0.60; // keep within 40% of top
-    const cutIdx = results.findIndex(r => r.rerank_score < cutoff);
-    if (cutIdx > 1) {
-      results = results.slice(0, cutIdx);
-    }
-  }
 
   // Apply minScore filter if provided
   if (minScore > 0) {

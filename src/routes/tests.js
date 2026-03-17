@@ -10,6 +10,8 @@
 import express from "express";
 import { TestCaseRepo } from "../db/repositories/TestCaseRepo.js";
 import { apiLogger as logger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -19,8 +21,9 @@ router.get("/tests", (req, res) => {
   try {
     res.json({ test_cases: TestCaseRepo.getAll() });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /tests error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -28,10 +31,8 @@ router.get("/tests", (req, res) => {
 
 router.post("/tests", (req, res) => {
   try {
-    const { name, description, query, assertion_type, assertion_value } = req.body || {};
-    if (!name?.trim())           return res.status(400).json({ error: "name is required" });
-    if (!query?.trim())          return res.status(400).json({ error: "query is required" });
-    if (!assertion_type?.trim()) return res.status(400).json({ error: "assertion_type is required" });
+    requireBody(req.body, 'name', 'query', 'assertion_type');
+    const { name, description, query, assertion_type, assertion_value } = req.body;
 
     const tc = TestCaseRepo.insert({
       name: name.trim(),
@@ -42,8 +43,9 @@ router.post("/tests", (req, res) => {
     });
     res.status(201).json({ test_case: tc });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /tests error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -53,7 +55,7 @@ router.put("/tests/:id", (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const existing = TestCaseRepo.getById(id);
-    if (!existing) return res.status(404).json({ error: "Test case not found" });
+    if (!existing) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Test case not found" } });
 
     const { name, description, query, assertion_type, assertion_value, enabled } = req.body || {};
     const tc = TestCaseRepo.update(id, {
@@ -66,8 +68,9 @@ router.put("/tests/:id", (req, res) => {
     });
     res.json({ test_case: tc });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("PUT /tests/:id error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -77,12 +80,13 @@ router.delete("/tests/:id", (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const existing = TestCaseRepo.getById(id);
-    if (!existing) return res.status(404).json({ error: "Test case not found" });
+    if (!existing) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Test case not found" } });
     TestCaseRepo.delete(id);
     res.json({ success: true });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("DELETE /tests/:id error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

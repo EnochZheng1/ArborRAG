@@ -127,7 +127,9 @@ export async function stageExtractKPs(ctx) {
   ctx.enrichedChunks = []; // ensure downstream never sees undefined on early throw
   ctx.setStep(documentId, "kp_extraction", "Extracting knowledge points…", 25);
 
-  const kps = await extractKnowledgePoints(content, fileMetadata.filename, {
+  // Use original filename for docTitle (not the temp multer filename)
+  const docTitle = options.originalName || fileMetadata.filename;
+  const kps = await extractKnowledgePoints(content, docTitle, {
     useLLM,
     authorityLevel: detectAuthorityLevel(content, fileMetadata.filename),
     documentId,
@@ -360,6 +362,10 @@ export async function stageOrphanCleanup(ctx) {
 }
 
 // ── Stage 6: Auto-generate embeddings ────────────────────────────────────────
+// NOTE: This stage is NOT in the per-document STAGES array in index.js.
+// Embedding sync runs once after the entire batch completes via
+// runPostIngestEmbeddingSync() in the pipeline runner, avoiding redundant
+// per-document syncs during multi-document batch ingestion.
 
 export async function stageEmbeddingSync(ctx) {
   const { documentId } = ctx;

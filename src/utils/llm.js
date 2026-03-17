@@ -155,6 +155,7 @@ async function _callLLMOnce({
   seed            = null,
   taskName        = 'llm_call',
   model: modelOverride = null,
+  thinkingBudget  = undefined,   // override auto-calculated thinking budget (0 = disable)
 } = {}) {
   if (llmConfig.provider === 'openai') {
     if (!llmConfig.openai.apiKey) throw new Error('OPENAI_API_KEY is not configured');
@@ -236,14 +237,17 @@ async function _callLLMOnce({
           temperature,
           maxOutputTokens,
           // gemini-2.5-flash is a thinking model — thinking tokens count against
-          // maxOutputTokens. For calls with tight caps, set a proportional budget
-          // so actual output isn't starved. Disable thinking entirely for very
-          // small caps (≤300 tokens) where reasoning overhead isn't worthwhile.
-          ...(maxOutputTokens != null && maxOutputTokens <= 300
-            ? { thinkingConfig: { thinkingBudget: 0 } }
-            : maxOutputTokens != null && maxOutputTokens <= 1024
-              ? { thinkingConfig: { thinkingBudget: 256 } }
-              : {}),
+          // maxOutputTokens. Caller can override with explicit thinkingBudget
+          // (e.g. 0 for pure extraction tasks where reasoning wastes tokens).
+          ...(thinkingBudget !== undefined
+            ? { thinkingConfig: { thinkingBudget } }
+            : maxOutputTokens != null && maxOutputTokens <= 300
+              ? { thinkingConfig: { thinkingBudget: 0 } }
+              : maxOutputTokens != null && maxOutputTokens <= 1024
+                ? { thinkingConfig: { thinkingBudget: 256 } }
+                : maxOutputTokens != null
+                  ? { thinkingConfig: { thinkingBudget: Math.min(1024, Math.floor(maxOutputTokens * 0.15)) } }
+                  : {}),
         },
       }),
       new Promise((_, reject) => {

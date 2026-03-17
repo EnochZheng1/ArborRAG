@@ -352,6 +352,9 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
     // Phase 2 — single-transaction batch DB writes
     // better-sqlite3 promotes inner .transaction() calls to SAVEPOINT when an outer
     // transaction is active, so nesting is safe and well-documented.
+    // Collect keywords per node to merge in a single batch call (avoids N per-KP mergeKeywords calls)
+    const _pendingKeywords = new Map(); // nodeId → Set<keyword>
+
     runTransaction(() => {
       for (const outcome of allDecisions) {
         if (outcome.status === 'rejected') {
@@ -377,7 +380,8 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
             const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
             ChunkRepo.supersede(decision.chunkId, newChunkId);
             if (kp.keywords?.length > 0) {
-              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (kwErr) { logger.warn(`Keyword merge failed for ${targetNodeId}: ${kwErr.message}`); }
+              if (!_pendingKeywords.has(targetNodeId)) _pendingKeywords.set(targetNodeId, new Set());
+              for (const kw of kp.keywords) _pendingKeywords.get(targetNodeId).add(kw);
             }
             results.mapped.push({
               chunkIndex: kp.index, chunkId: newChunkId,
@@ -391,7 +395,8 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
           default: {
             const chunkId = assignKPToNode(kp, targetNodeId, documentId);
             if (kp.keywords?.length > 0) {
-              try { NodeRepo.mergeKeywords(targetNodeId, kp.keywords); } catch (kwErr) { logger.warn(`Keyword merge failed for ${targetNodeId}: ${kwErr.message}`); }
+              if (!_pendingKeywords.has(targetNodeId)) _pendingKeywords.set(targetNodeId, new Set());
+              for (const kw of kp.keywords) _pendingKeywords.get(targetNodeId).add(kw);
             }
             // Back-fill incoming_chunk_id on queued decisions so human review can link to the stored KP
             if (decision.queued) {
@@ -410,6 +415,11 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
             break;
           }
         }
+      }
+
+      // Batch keyword merge — one call per node instead of per-KP
+      for (const [nodeId, kws] of _pendingKeywords) {
+        try { NodeRepo.mergeKeywords(nodeId, [...kws]); } catch (_) {}
       }
     });
 

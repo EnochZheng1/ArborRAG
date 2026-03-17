@@ -33,17 +33,17 @@
       <div class="dataset-switcher" id="dataset-switcher">
         <label class="dataset-switcher-label" for="dataset-select" data-i18n="dataset_switcher_label">Dataset</label>
         <div class="dataset-select-wrapper">
-          <select id="dataset-select" class="dataset-select"></select>
+          <select id="dataset-select" class="dataset-select" aria-label="Select dataset"></select>
         </div>
       </div>
 
-      <nav class="nav">
+      <nav class="nav" role="navigation" aria-label="Main navigation">
         <!-- Core -->
-        <button class="nav-btn active" data-tab="ask">
+        <button class="nav-btn active" data-tab="ask" role="tab" aria-selected="true">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span>Ask</span>
         </button>
-        <button class="nav-btn" data-tab="manage">
+        <button class="nav-btn" data-tab="manage" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round">
             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -51,31 +51,31 @@
           </svg>
           <span>Manage</span>
         </button>
-        <button class="nav-btn" data-tab="tree">
+        <button class="nav-btn" data-tab="tree" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <span>Tree</span>
         </button>
         <div class="nav-separator"></div>
         <!-- Data Pipeline -->
-        <button class="nav-btn" data-tab="ingest">
+        <button class="nav-btn" data-tab="ingest" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           <span>Ingest</span>
         </button>
-        <button class="nav-btn" data-tab="decisions">
+        <button class="nav-btn" data-tab="decisions" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <span>Decisions</span>
         </button>
         <div class="nav-separator"></div>
         <!-- Admin -->
-        <button class="nav-btn" data-tab="tests">
+        <button class="nav-btn" data-tab="tests" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
           <span>Tests</span>
         </button>
-        <button class="nav-btn" data-tab="settings">
+        <button class="nav-btn" data-tab="settings" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           <span>Settings</span>
         </button>
-        <button class="nav-btn" data-tab="datasets">
+        <button class="nav-btn" data-tab="datasets" role="tab">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
           <span data-i18n="datasets_title">Datasets</span>
         </button>
@@ -83,7 +83,7 @@
 
       <div class="sidebar-footer">
         <div class="sidebar-footer-row">
-          <button class="theme-btn" id="theme-toggle" title="Toggle theme">
+          <button class="theme-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
             <svg class="theme-icon-svg light-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
             <svg class="theme-icon-svg dark-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
@@ -97,8 +97,13 @@
 
     <!-- Main Content -->
     <main class="main">
+      <div id="ws-banner" class="ws-banner hidden" role="alert">
+        <span id="ws-banner-msg"></span>
+        <button id="ws-banner-reconnect" class="ws-banner-btn hidden">Reconnect</button>
+        <button class="ws-banner-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
+      </div>
       <!-- Ask Tab -->
-      <section class="tab-content active" id="tab-ask">
+      <section class="tab-content active" id="tab-ask" role="tabpanel">
         <div class="chat-layout">
           <!-- Chat messages area -->
           <div class="chat-messages" id="chat-messages">
@@ -124,7 +129,7 @@
                 </div>
               </div>
 
-              <div id="ask-result" class="ask-result hidden">
+              <div id="ask-result" class="ask-result hidden" aria-live="polite">
                 <div class="result-header">
                   <span class="query-type-badge" id="query-type-badge"></span>
                   <span class="confidence-badge" id="confidence-badge"></span>
@@ -154,14 +159,15 @@
               <textarea
                 id="query-input"
                 class="ask-input"
+                aria-label="Ask a question"
                 placeholder="Ask anything... (e.g., 'Compare Product A and B', '&#38144;&#21806;&#27969;&#31243;&#26159;&#20160;&#20040;&#65311;')"
                 rows="1"
               ></textarea>
               <div class="chat-input-actions">
-                <button type="button" class="chat-settings-btn" id="toggle-advanced-options" title="Settings">
+                <button type="button" class="chat-settings-btn" id="toggle-advanced-options" title="Settings" aria-label="Search settings">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 </button>
-                <button id="ask-btn" class="chat-send-btn" title="Send">
+                <button id="ask-btn" class="chat-send-btn" title="Send" aria-label="Send query">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                   <span class="loading-spinner hidden"></span>
                 </button>
@@ -262,7 +268,7 @@
       </section>
 
       <!-- Manage Tab -->
-      <section class="tab-content" id="tab-manage">
+      <section class="tab-content" id="tab-manage" role="tabpanel">
         <div class="chat-layout">
           <!-- Chat messages area -->
           <div class="chat-messages" id="manage-chat-messages">
@@ -329,7 +335,7 @@
       </section>
 
       <!-- Tree Tab -->
-      <section class="tab-content" id="tab-tree">
+      <section class="tab-content" id="tab-tree" role="tabpanel">
         <div class="tab-header">
           <h2 data-i18n="tree_title">Knowledge Tree</h2>
           <div class="header-actions" id="tree-nodes-actions">
@@ -428,7 +434,7 @@
           <div class="node-detail hidden" id="node-detail">
             <div class="node-detail-header">
               <h3 id="node-detail-name"></h3>
-              <button class="close-btn" id="close-node-detail">&times;</button>
+              <button class="close-btn" id="close-node-detail" aria-label="Close node detail">&times;</button>
             </div>
             <div class="node-detail-content" id="node-detail-content"></div>
           </div>
@@ -483,7 +489,7 @@
                     <button class="toggle-btn" data-value="llm">LLM</button>
                   </div>
                   <p class="option-hint">Keyword: fast, exact term matching. Vector: embedding similarity (~0.3s, multilingual). LLM: semantic routing (slowest, uses extra tokens).</p>
-                  <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning-color);">Low embedding coverage — run Sync Embeddings first for best results.</p>
+                  <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning);">Low embedding coverage — run Sync Embeddings first for best results.</p>
                 </div>
                 <div class="form-actions">
                   <button class="btn btn-primary" id="save-schema-settings">Save</button>
@@ -531,11 +537,11 @@
         </div>
 
         <!-- Add Node Modal -->
-        <div class="modal hidden" id="add-node-modal">
+        <div class="modal hidden" id="add-node-modal" role="dialog" aria-modal="true">
           <div class="modal-content">
             <div class="modal-header">
               <h3 data-i18n="add_node">Add New Node</h3>
-              <button class="close-btn" id="close-add-node-modal">&times;</button>
+              <button class="close-btn" id="close-add-node-modal" aria-label="Close modal">&times;</button>
             </div>
             <form id="add-node-form">
               <div class="form-group">
@@ -565,11 +571,11 @@
         </div>
 
         <!-- Save Template Modal -->
-        <div class="modal hidden" id="save-template-modal">
+        <div class="modal hidden" id="save-template-modal" role="dialog" aria-modal="true">
           <div class="modal-content">
             <div class="modal-header">
               <h3>Save Schema as Template</h3>
-              <button class="close-btn" id="close-save-template-modal">&times;</button>
+              <button class="close-btn" id="close-save-template-modal" aria-label="Close modal">&times;</button>
             </div>
             <div class="form-group">
               <label for="template-name">Template Name</label>
@@ -587,11 +593,11 @@
         </div>
 
         <!-- Add Content Modal -->
-        <div class="modal hidden" id="add-chunk-modal">
+        <div class="modal hidden" id="add-chunk-modal" role="dialog" aria-modal="true">
           <div class="modal-content">
             <div class="modal-header">
               <h3>Add Content to Node</h3>
-              <button class="close-btn" id="close-add-chunk-modal">&times;</button>
+              <button class="close-btn" id="close-add-chunk-modal" aria-label="Close modal">&times;</button>
             </div>
             <form id="add-chunk-form">
               <div class="form-group">
@@ -624,7 +630,7 @@
       </section>
 
       <!-- Ingest Tab -->
-      <section class="tab-content" id="tab-ingest">
+      <section class="tab-content" id="tab-ingest" role="tabpanel">
         <div class="tab-header">
           <h2>Ingest</h2>
         </div>
@@ -743,7 +749,7 @@
       </section>
 
       <!-- Decisions Tab -->
-      <section class="tab-content" id="tab-decisions">
+      <section class="tab-content" id="tab-decisions" role="tabpanel">
         <div class="tab-header">
           <h2>Decisions</h2>
           <div class="tab-header-actions">
@@ -783,7 +789,7 @@
       </section>
 
       <!-- Tests Tab -->
-      <section class="tab-content" id="tab-tests">
+      <section class="tab-content" id="tab-tests" role="tabpanel">
         <div class="tab-header">
           <h2>Test Suite</h2>
           <div class="header-actions">
@@ -853,7 +859,7 @@
       </section>
 
       <!-- Settings Tab -->
-      <section class="tab-content" id="tab-settings">
+      <section class="tab-content" id="tab-settings" role="tabpanel">
         <div class="tab-header">
           <h2>Settings</h2>
           <div class="embedding-coverage-bar" id="embedding-coverage-bar" title="Embedding coverage">
@@ -965,6 +971,7 @@
                 <input type="checkbox" id="prompt-custom-only"> Show customized only
               </label>
             </div>
+            <input type="search" id="prompt-search" class="form-input" placeholder="Filter prompts by name or description..." style="margin-bottom: 12px;">
 
             <div id="prompts-list" class="prompts-list">
               <!-- Prompt cards rendered by JS -->
@@ -974,7 +981,7 @@
       </section>
 
       <!-- Datasets Tab -->
-      <section class="tab-content" id="tab-datasets">
+      <section class="tab-content" id="tab-datasets" role="tabpanel">
         <div class="tab-header">
           <h2 data-i18n="datasets_title">Datasets</h2>
           <button class="btn btn-primary" id="new-dataset-btn" data-i18n="new_dataset">+ New Dataset</button>
@@ -1018,11 +1025,26 @@
     </main>
   </div>
 
+  <!-- Confirm Modal (replaces native confirm/prompt dialogs) -->
+  <div id="confirm-modal-overlay" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content confirm-modal">
+      <h3 id="confirm-modal-title">Confirm</h3>
+      <p id="confirm-modal-message"></p>
+      <div id="confirm-modal-input-wrap" class="hidden">
+        <input type="text" id="confirm-modal-input" class="form-input" autocomplete="off">
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-modal-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="confirm-modal-ok" class="btn btn-primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification -->
-  <div class="toast hidden" id="toast">
+  <div class="toast hidden" id="toast" aria-live="polite" role="status">
     <span class="toast-message" id="toast-message"></span>
   </div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

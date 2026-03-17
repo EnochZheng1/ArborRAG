@@ -13,6 +13,8 @@ import { SchemaTemplateRepo } from "../db/repositories/SchemaTemplateRepo.js";
 import { getRootNodes, getChildren } from "../kg/graphTraversal.js";
 import { apiLogger as logger } from "../utils/logger.js";
 import { db } from "../db/db.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -78,8 +80,9 @@ router.post('/start', async (req, res) => {
       existingDataSummary: treeSummary ? `${stats.nodes} nodes, ${stats.documents} documents` : null
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/interview/start error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -88,13 +91,13 @@ router.post('/start', async (req, res) => {
 router.post('/answer', async (req, res) => {
   try {
     const { sessionId, answer, skipToGenerate } = req.body;
-    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
-    if (!answer && !skipToGenerate) return res.status(400).json({ error: 'answer is required' });
+    if (!sessionId) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'sessionId is required' } });
+    if (!answer && !skipToGenerate) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'answer is required' } });
 
     const session = getSession(sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+    if (!session) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Session not found or expired' } });
     if (session.phase !== 'interviewing') {
-      return res.status(400).json({ error: `Session is in '${session.phase}' phase, not interviewing` });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: `Session is in '${session.phase}' phase, not interviewing` } });
     }
 
     // Record the answer paired with the question that was asked
@@ -141,8 +144,9 @@ router.post('/answer', async (req, res) => {
       confidence: result.confidence
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/interview/answer error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -198,14 +202,13 @@ function mergeContext(ctx, update) {
 
 router.post('/refine', async (req, res) => {
   try {
+    requireBody(req.body, 'sessionId', 'instructions');
     const { sessionId, instructions } = req.body;
-    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
-    if (!instructions?.trim()) return res.status(400).json({ error: 'instructions are required' });
 
     const session = getSession(sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+    if (!session) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Session not found or expired' } });
     if (session.phase !== 'reviewing') {
-      return res.status(400).json({ error: `Session must be in 'reviewing' phase` });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: `Session must be in 'reviewing' phase` } });
     }
 
     const schema = await refineSchema(session, instructions.trim());
@@ -223,8 +226,9 @@ router.post('/refine', async (req, res) => {
       summary: `Refined to ${totalNodes} nodes in ${depth} levels`
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/interview/refine error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -232,13 +236,13 @@ router.post('/refine', async (req, res) => {
 
 router.post('/apply', (req, res) => {
   try {
+    requireBody(req.body, 'sessionId');
     const { sessionId, saveAsTemplate, templateName } = req.body;
-    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
 
     const session = getSession(sessionId);
-    if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+    if (!session) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Session not found or expired' } });
     if (!session.generatedSchema?.length) {
-      return res.status(400).json({ error: 'No generated schema to apply' });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No generated schema to apply' } });
     }
 
     // Import schema nodes (replace mode)
@@ -272,8 +276,9 @@ router.post('/apply', (req, res) => {
       templateId
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /schema/interview/apply error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

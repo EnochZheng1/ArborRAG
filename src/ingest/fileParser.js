@@ -14,6 +14,29 @@ GlobalWorkerOptions.workerSrc = pathToFileURL(
 ).href;
 const CMAP_URL = path.join(_root, "node_modules/pdfjs-dist/cmaps/") + "/";
 
+// Magic byte signatures for binary file types
+const MAGIC_BYTES = {
+  '.pdf': [0x25, 0x50, 0x44, 0x46],  // %PDF
+  '.docx': [0x50, 0x4B, 0x03, 0x04], // PK (ZIP archive)
+  '.xlsx': [0x50, 0x4B, 0x03, 0x04], // PK (ZIP archive)
+  '.pptx': [0x50, 0x4B, 0x03, 0x04], // PK (ZIP archive)
+  '.xls': [0xD0, 0xCF, 0x11, 0xE0],  // OLE2 compound document
+};
+
+function validateFileType(filePath, ext) {
+  const expected = MAGIC_BYTES[ext];
+  if (!expected) return true; // No magic bytes check for .txt, .md, etc.
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(expected.length);
+    fs.readSync(fd, buf, 0, expected.length, 0);
+    fs.closeSync(fd);
+    return expected.every((byte, i) => buf[i] === byte);
+  } catch {
+    return false; // Can't read = reject
+  }
+}
+
 // Supported file types
 const SUPPORTED_TYPES = {
   ".txt": "text",
@@ -41,6 +64,10 @@ export async function parseFile(filePath) {
 
   if (!fileType) {
     throw new Error(`Unsupported file type: ${ext}`);
+  }
+
+  if (!validateFileType(filePath, ext)) {
+    throw new Error(`File content does not match expected ${ext} format`);
   }
 
   const stats = fs.statSync(filePath);

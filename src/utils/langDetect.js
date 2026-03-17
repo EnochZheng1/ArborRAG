@@ -532,7 +532,10 @@ ${textSegment}
 2. 粒度要细：一条事实、规则、定义、步骤或示例对应一个知识点。
 3. 保留原文中的数字、条件和限定词。
 4. source_excerpt为原文逐字摘录（最多200字）。
-5. topic_hint和subtopic_hint为简短主题标签（3-8字），代表知识域。
+5. topic_hint和subtopic_hint为简短主题标签（3-8字），代表每个知识点的具体主题领域。
+   - topic_hint应反映具体主题（如"火星地质"、"员工福利"、"网络安全"），不要使用"一般"、"信息"、"内容"、"文档"等通用标签。
+   - 不同主题的知识点必须使用不同的topic_hint。
+   - subtopic_hint应为topic_hint的更细分类别（如topic_hint="火星地质"，subtopic_hint="火山活动"）。
 6. kp_type必须为以下之一：fact | rule | definition | procedure | example | context
 
 仅返回JSON数组（无markdown，无说明）：
@@ -551,7 +554,10 @@ Rules:
 2. Granularity: exactly one fact, rule, definition, procedure step, or example per KP.
 3. Preserve exact numbers, conditions, and qualifiers from the source.
 4. source_excerpt is a verbatim quote from the original text (max 200 chars).
-5. topic_hint and subtopic_hint: short topic labels (2-5 words) representing the knowledge domain.
+5. topic_hint and subtopic_hint: short topic labels (2-5 words) representing the SPECIFIC subject area of each KP.
+   - topic_hint should reflect the actual subject (e.g., "Mars Geology", "Employee Benefits", "Network Security"), NOT generic labels like "General", "Information", "Content", or "Document".
+   - Different KPs covering different subjects MUST use different topic_hints.
+   - subtopic_hint should be a narrower sub-category within the topic_hint (e.g., topic_hint="Mars Geology", subtopic_hint="Volcanic Activity").
 6. kp_type must be one of: fact | rule | definition | procedure | example | context
 
 Return a JSON array only (no markdown, no explanation):

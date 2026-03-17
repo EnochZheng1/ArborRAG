@@ -3,6 +3,7 @@ import { syncEmbeddings, getEmbeddingCoverage } from "../embedding/chunkEmbeddin
 import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
 import { invalidateVectorCache } from "../kg/vectorTreeRouter.js";
 import { apiLogger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
 
 const router = express.Router();
 
@@ -23,8 +24,9 @@ router.post("/embeddings/sync", async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Sync embeddings error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -34,8 +36,9 @@ router.get("/embeddings/coverage", (req, res) => {
     const coverage = getEmbeddingCoverage();
     res.json(coverage);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get coverage error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

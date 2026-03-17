@@ -27,6 +27,7 @@ import { detectLanguage as detectLang, isChineseLang } from "../utils/langDetect
 import { getDatasetLang, getEffectiveLang } from "../utils/datasetLang.js";
 
 import { QueryTrace } from "./queryTrace.js";
+import { isNumericQuery, extractQueryEntities } from "../utils/queryHelpers.js";
 
 // Detect language - wrapper that considers both query and context (for text metadata only)
 function detectLanguage(text) {
@@ -643,16 +644,15 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
   } = enhancedOptions;
 
   // Extract retrieval parameters with defaults.
-  // maxChunks reduced from 20 → 12: with 20 sources the answer-generation LLM gets
-  // overwhelmed by noise and says "not in sources" despite the answer being present.
-  // 12 balances enough context for multi-fact queries against LLM attention limits.
-  // Aggregation queries use a separate path with higher limits.
+  // maxChunks set to 20: ensures multi-part content (4-level alert tables, approval
+  // tiers, promotion ladders) is fully represented. With 800-char sources and the
+  // "be COMPLETE" prompt instruction, the answer LLM handles 20 sources well.
   const {
     topK = 30,
-    maxChunks = 12,
+    maxChunks = 20,
     minConfidence = 0.0,
     hybridAlpha = 0.5,
-    rerankerThreshold = 0.2,
+    rerankerThreshold = 0.05,
     contextWindow = 2,
     temperature = 0.1
   } = retrievalOptions;
@@ -759,9 +759,9 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     // "what percentage") need chunks containing those numbers to rank higher.
     // BM25 IDF down-weights short numbers; this post-hoc pass compensates.
     const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
-    const isNumericQuery = /\bhow many\b|\bhow long\b|\bhow often\b|what percentage|how much|多少|几天|几个|多长/i.test(query);
+    const numericQuery = isNumericQuery(query);
 
-    if (queryNumbers.length > 0 || isNumericQuery) {
+    if (queryNumbers.length > 0 || numericQuery) {
       for (const [, chunk] of directChunkMap) {
         const content = (chunk.content || chunk.content_clean || '').toLowerCase();
         let boost = 0;
@@ -770,7 +770,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
             boost = Math.max(boost, 0.15);
           }
         }
-        if (isNumericQuery && boost === 0 && /\d/.test(content)) {
+        if (numericQuery && boost === 0 && /\d/.test(content)) {
           boost = 0.08;
         }
         if (boost > 0) chunk.relevance_score = (chunk.relevance_score || 0) + boost;
@@ -927,9 +927,10 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         (a, b) => (b.relevance_score || 0) - (a.relevance_score || 0)
       );
 
-      // Only add the very best same-doc BM25 hits (from unvisited nodes).
-      // Cap at 2 to avoid diluting the tree's focused results.
-      const MAX_SAME_DOC = 2;
+      // Add the best same-doc BM25 hits from unvisited nodes.
+      // Cap at 4 so facts in distant nodes (e.g. "promotion requirements" in
+      // a "Review Delivery" node) still surface when tree routing picks the wrong node.
+      const MAX_SAME_DOC = 4;
       const MAX_CROSS_DOC = 4;
       let sameDocAdded = 0;
       let crossDocAdded = 0;
@@ -1029,6 +1030,29 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
   // STEP 4: Apply feedback-based boosting
   chunks = applyFeedbackBoost(chunks);
 
+  // STEP 4b: Pre-boost chunks matching document scope BEFORE reranking.
+  // If the query contains a document/entity name, boost matching chunks and mildly
+  // penalize non-matching ones. The reranker then uses _docBoost as an additional signal.
+  {
+    const queryTerms5 = query.toLowerCase().split(/\s+/).filter(t => t.length >= 5);
+    if (queryTerms5.length > 0) {
+      let boosted = 0;
+      for (const chunk of chunks) {
+        const title = (chunk.doc_title || '').toLowerCase();
+        const hasDocMatch = queryTerms5.some(t => title.includes(t));
+        chunk._docBoost = hasDocMatch ? 0.1 : -0.05;
+        // Apply the boost to relevance / hierarchical score so the reranker sees it
+        const baseScore = chunk.hierarchical_score || chunk.relevance_score || 0;
+        chunk.hierarchical_score = baseScore + chunk._docBoost;
+        chunk.relevance_score = (chunk.relevance_score || 0) + chunk._docBoost;
+        if (hasDocMatch) boosted++;
+      }
+      if (boosted > 0 && boosted < chunks.length) {
+        trace?.addStep('Doc-Scope Pre-Boost', `Boosted ${boosted}/${chunks.length} chunks matching document terms`);
+      }
+    }
+  }
+
   // STEP 5: LLM Re-ranking for better relevance.
   // Threshold lowered from > 5 to > 1: with the merged pool, the reranker must always run
   // to filter wrong-node hierarchical chunks from the correct direct-BM25 chunks.
@@ -1041,6 +1065,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         });
         if (rerankedChunks.length > 0) {
           chunks = rerankedChunks;
+          logger.debug(`[retrieval] After reranking: ${chunks.length} chunks`);
           trace?.addStep('Re-ranking Complete', `Re-ranked to ${chunks.length} most relevant chunks`, {
             top_reranked: chunks.slice(0, 3).map(c => ({ id: c.id, score: c.rerank_score }))
           });

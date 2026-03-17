@@ -1,0 +1,4540 @@
+openapi: 3.0.3
+info:
+  title: TreeKB API
+  version: "2.3.0"
+  description: |
+    TreeKB is an AI-driven, self-evolving knowledge graph system. It ingests documents,
+    extracts knowledge points (KPs), organises them into a hierarchical topic tree, and
+    provides intelligent question-answering with citations.
+
+    **Key concepts**
+    - **Dataset** -- an isolated knowledge base with its own SQLite database.
+    - **Node** -- a topic node in the hierarchical tree.
+    - **Chunk / KP** -- an atomic knowledge point stored under a node.
+    - **Schema node** -- a curated node that guides ingestion mapping.
+    - **Decision** -- a pending human-review item produced by the KP decision engine.
+
+    Most endpoints require the `X-Dataset-ID` header to select the active dataset.
+    Endpoints under `/datasets`, `/health`, `/metrics`, and `/settings` do not.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+tags:
+  - name: System
+    description: Health checks and metrics
+  - name: Datasets
+    description: Multi-dataset lifecycle management
+  - name: Settings
+    description: Runtime LLM configuration
+  - name: Query
+    description: Question-answering, classification, suggestions, and feedback
+  - name: Ingestion
+    description: File upload, batch ingestion, and job management
+  - name: Documents
+    description: Document listing, details, deletion, and entity extraction
+  - name: Nodes
+    description: Knowledge tree nodes and chunks
+  - name: Entities
+    description: Named-entity and fact management
+  - name: Embeddings
+    description: Vector embedding sync and coverage
+  - name: Stats
+    description: System-wide statistics and token usage
+  - name: Decisions
+    description: Pending KP decisions (merge, replace, conflict)
+  - name: Conflicts
+    description: Conflict detection (disabled -- kept for compatibility)
+  - name: Tests
+    description: User-defined test cases
+  - name: Schema
+    description: Guided schema tree, settings, import/export, templates
+  - name: SchemaInterview
+    description: AI-guided schema generation via adaptive interview
+  - name: Prompts
+    description: Per-dataset LLM prompt overrides
+  - name: Manage
+    description: Conversational knowledge management chatbot
+
+# ─── Common Parameters ────────────────────────────────────────────────────────
+
+components:
+  parameters:
+    DatasetIdHeader:
+      name: X-Dataset-ID
+      in: header
+      required: true
+      description: UUID of the target dataset. Resolved by middleware; falls back to default dataset when omitted.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ── Shared error ──────────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    SimpleError:
+      type: object
+      properties:
+        error:
+          type: string
+
+    # ── Dataset ───────────────────────────────────────────────────────────────
+    Dataset:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Node ──────────────────────────────────────────────────────────────────
+    Node:
+      type: object
+      properties:
+        node_id:
+          type: string
+        name:
+          type: string
+        parent_id:
+          type: string
+          nullable: true
+        level:
+          type: integer
+        node_summary:
+          type: string
+          nullable: true
+        node_description:
+          type: string
+          nullable: true
+        is_schema_node:
+          type: integer
+          enum: [0, 1]
+        aliases_json:
+          type: string
+        keywords_json:
+          type: string
+        scope_json:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Chunk ─────────────────────────────────────────────────────────────────
+    Chunk:
+      type: object
+      properties:
+        id:
+          type: integer
+        content:
+          type: string
+        node_id:
+          type: string
+        document_id:
+          type: integer
+          nullable: true
+        doc_title:
+          type: string
+        kp_type:
+          type: string
+          enum: [fact, rule, definition, procedure, example, context, paragraph_context, legacy_chunk]
+        chunk_type:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Document ──────────────────────────────────────────────────────────────
+    Document:
+      type: object
+      properties:
+        id:
+          type: integer
+        filename:
+          type: string
+        original_name:
+          type: string
+        file_type:
+          type: string
+        status:
+          type: string
+        chunk_count:
+          type: integer
+        uploaded_at:
+          type: string
+          format: date-time
+
+    # ── Ingestion Job ─────────────────────────────────────────────────────────
+    IngestionJob:
+      type: object
+      properties:
+        id:
+          type: integer
+        file_path:
+          type: string
+        original_name:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, completed, failed, rate_limited, cancelled]
+        attempt_count:
+          type: integer
+        max_attempts:
+          type: integer
+        error_message:
+          type: string
+          nullable: true
+        document_id:
+          type: integer
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Decision ──────────────────────────────────────────────────────────────
+    Decision:
+      type: object
+      properties:
+        id:
+          type: integer
+        action:
+          type: string
+          enum: [merge_suggestion, replace_suggestion, node_merge_suggestion, value_conflict]
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+        node_id:
+          type: string
+          nullable: true
+        incoming_chunk_id:
+          type: integer
+          nullable: true
+        incoming_preview:
+          type: string
+          nullable: true
+        target_chunk_id:
+          type: integer
+          nullable: true
+        target_preview:
+          type: string
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        resolved_by:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Test case ─────────────────────────────────────────────────────────────
+    TestCase:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        query:
+          type: string
+        assertion_type:
+          type: string
+        assertion_value:
+          type: string
+        enabled:
+          type: integer
+          enum: [0, 1]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Prompt entry ──────────────────────────────────────────────────────────
+    PromptEntry:
+      type: object
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        category:
+          type: string
+          enum: [ingestion, query, routing]
+        description:
+          type: string
+        variables:
+          type: array
+          items:
+            type: string
+        default_text:
+          type: string
+        current_text:
+          type: string
+        is_custom:
+          type: boolean
+
+    # ── Schema template ───────────────────────────────────────────────────────
+    SchemaTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        schema_json:
+          type: array
+          items:
+            type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATHS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+paths:
+
+  # ── System ────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Server health check
+      description: Returns server status, uptime, timestamp, and the number of open dataset connections. Does not require X-Dataset-ID.
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  uptime_seconds:
+                    type: integer
+                  timestamp:
+                    type: string
+                    format: date-time
+                  datasets:
+                    type: integer
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [System]
+      summary: Server metrics
+      description: Returns uptime, memory usage, dataset count, and aggregated ingestion queue stats across all datasets. Does not require X-Dataset-ID.
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uptime_seconds:
+                    type: integer
+                  memory_mb:
+                    type: integer
+                  datasets:
+                    type: integer
+                  queue:
+                    type: object
+                    properties:
+                      queued:
+                        type: integer
+                      processing:
+                        type: integer
+                      completed:
+                        type: integer
+                      failed:
+                        type: integer
+                      rate_limited:
+                        type: integer
+                      cancelled:
+                        type: integer
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  # ── Datasets ──────────────────────────────────────────────────────────────
+
+  /datasets:
+    get:
+      operationId: listDatasets
+      tags: [Datasets]
+      summary: List all datasets
+      description: Returns every registered dataset. Does not require X-Dataset-ID.
+      responses:
+        "200":
+          description: Dataset list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  datasets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Dataset"
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    post:
+      operationId: createDataset
+      tags: [Datasets]
+      summary: Create a new dataset
+      description: Creates a new isolated dataset with its own SQLite database. Optionally locks the dataset language on creation. Does not require X-Dataset-ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Unique dataset name
+                description:
+                  type: string
+                  default: ""
+                language:
+                  type: string
+                  description: Language code to lock (e.g. "en", "zh"). "auto" means no lock.
+                  default: auto
+      responses:
+        "201":
+          description: Dataset created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataset:
+                    $ref: "#/components/schemas/Dataset"
+        "400":
+          description: Missing name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "409":
+          description: Name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /datasets/{id}:
+    put:
+      operationId: updateDataset
+      tags: [Datasets]
+      summary: Rename or update a dataset
+      description: Updates the name and/or description of an existing dataset. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+      responses:
+        "200":
+          description: Dataset updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataset:
+                    $ref: "#/components/schemas/Dataset"
+        "400":
+          description: No fields provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Dataset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "409":
+          description: Name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: deleteDataset
+      tags: [Datasets]
+      summary: Delete a dataset
+      description: Permanently deletes a dataset and its database file. Requires `?confirm=yes` query parameter. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: confirm
+          in: query
+          required: true
+          description: Must be "yes" to confirm deletion
+          schema:
+            type: string
+            enum: ["yes"]
+      responses:
+        "200":
+          description: Dataset deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  deleted_id:
+                    type: string
+        "400":
+          description: Missing confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /datasets/{id}/duplicate:
+    post:
+      operationId: duplicateDataset
+      tags: [Datasets]
+      summary: Duplicate a dataset
+      description: Creates a full copy of the dataset via SQLite online backup. Optionally specify a new name. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Name for the new dataset. Auto-generated if omitted.
+      responses:
+        "201":
+          description: Dataset duplicated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataset:
+                    $ref: "#/components/schemas/Dataset"
+        "409":
+          description: Name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /datasets/{id}/export:
+    get:
+      operationId: exportDataset
+      tags: [Datasets]
+      summary: Export dataset as a .db file
+      description: Downloads the dataset SQLite database as a binary file. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: SQLite database file download
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /datasets/{id}/stats:
+    get:
+      operationId: getDatasetStats
+      tags: [Datasets]
+      summary: Get dataset statistics
+      description: Returns counts for nodes, documents, chunks, etc. for a specific dataset. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Dataset statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: integer
+                  documents:
+                    type: integer
+                  chunks:
+                    type: integer
+                  embeddings:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /datasets/{id}/config/language:
+    get:
+      operationId: getDatasetLanguage
+      tags: [Datasets]
+      summary: Get dataset language setting
+      description: Returns the current language setting and whether it is locked. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Language setting
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  language:
+                    type: string
+                    example: auto
+                  locked:
+                    type: boolean
+
+    post:
+      operationId: setDatasetLanguage
+      tags: [Datasets]
+      summary: Set dataset language
+      description: Sets or locks the language for a dataset. Does not require X-Dataset-ID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [language]
+              properties:
+                language:
+                  type: string
+                  description: Language code (e.g. "en", "zh", "auto")
+      responses:
+        "200":
+          description: Language set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  language:
+                    type: string
+                  locked:
+                    type: boolean
+        "400":
+          description: Missing language
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Settings ──────────────────────────────────────────────────────────────
+
+  /settings/llm:
+    get:
+      operationId: getLlmSettings
+      tags: [Settings]
+      summary: Get LLM configuration
+      description: Returns the current LLM provider, model, embedding model, and provider availability flags. Does not require X-Dataset-ID.
+      responses:
+        "200":
+          description: Current LLM settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider:
+                    type: string
+                    enum: [openai, gemini]
+                  model:
+                    type: string
+                  embeddingModel:
+                    type: string
+                  openaiConfigured:
+                    type: boolean
+                  geminiConfigured:
+                    type: boolean
+                  vertexai:
+                    type: boolean
+
+    post:
+      operationId: updateLlmSettings
+      tags: [Settings]
+      summary: Update LLM configuration
+      description: Changes the active LLM provider and/or model at runtime. Does not require X-Dataset-ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  enum: [openai, gemini]
+                model:
+                  type: string
+                embeddingModel:
+                  type: string
+      responses:
+        "200":
+          description: Updated LLM settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider:
+                    type: string
+                  model:
+                    type: string
+                  embeddingModel:
+                    type: string
+                  openaiConfigured:
+                    type: boolean
+                  geminiConfigured:
+                    type: boolean
+                  vertexai:
+                    type: boolean
+        "400":
+          description: Invalid provider value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Query / Q&A ───────────────────────────────────────────────────────────
+
+  /ask:
+    post:
+      operationId: ask
+      tags: [Query]
+      summary: Ask a question
+      description: |
+        Main question-answering endpoint. Classifies the query (simple lookup, aggregation, comparison, etc.),
+        navigates the knowledge tree, retrieves relevant chunks, reranks them, and generates an LLM answer with citations.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  description: The question to answer
+                queryScope:
+                  type: string
+                  description: Optional document title to scope the answer to a single document
+                options:
+                  type: object
+                  description: Optional overrides (e.g. maxChunks, routing mode)
+      responses:
+        "200":
+          description: Answer with citations and confidence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+                  confidence:
+                    type: number
+                    format: float
+                  confidence_details:
+                    type: object
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                  query_type:
+                    type: string
+                  processing_time_ms:
+                    type: integer
+        "400":
+          description: Missing query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ask/simple:
+    post:
+      operationId: simpleAsk
+      tags: [Query]
+      summary: Simple ask (BM25 only)
+      description: Answers a question using BM25 keyword search only, bypassing classification and LLM tree routing. Faster but less accurate than the main ask endpoint.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                queryScope:
+                  type: string
+      responses:
+        "200":
+          description: Answer result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+                  confidence:
+                    type: number
+                    format: float
+                  sources:
+                    type: array
+                    items:
+                      type: object
+        "400":
+          description: Missing query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /classify:
+    post:
+      operationId: classifyQuery
+      tags: [Query]
+      summary: Classify a query
+      description: Classifies a query into a type (simple_lookup, aggregation, comparison, etc.) without answering it. Useful for debugging routing decisions.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                useLLM:
+                  type: boolean
+                  default: true
+                  description: Whether to use LLM for classification. Set false for rule-based only.
+      responses:
+        "200":
+          description: Classification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query_type:
+                    type: string
+                  confidence:
+                    type: number
+                    format: float
+                  reasoning:
+                    type: string
+        "400":
+          description: Missing query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /suggestions:
+    get:
+      operationId: getSuggestions
+      tags: [Query]
+      summary: Get autocomplete suggestions
+      description: Returns autocomplete suggestions based on a partial query string, using node names and recent queries.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: q
+          in: query
+          description: Partial query text
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of suggestions (1-50)
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+        - name: lang
+          in: query
+          description: Language hint ("auto", "en", "zh", etc.)
+          schema:
+            type: string
+            default: auto
+      responses:
+        "200":
+          description: Suggestion list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /suggestions/trending:
+    get:
+      operationId: getTrendingSuggestions
+      tags: [Query]
+      summary: Get trending queries
+      description: Returns the most frequently asked queries in the recent period.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: limit
+          in: query
+          description: Maximum number of trending queries (1-20)
+          schema:
+            type: integer
+            default: 5
+            minimum: 1
+            maximum: 20
+      responses:
+        "200":
+          description: Trending query list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trending:
+                    type: array
+                    items:
+                      type: object
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /suggestions/examples:
+    get:
+      operationId: getExampleQueries
+      tags: [Query]
+      summary: Get example queries
+      description: Returns example queries for the empty state UI, optionally filtered by language.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: lang
+          in: query
+          description: Language code
+          schema:
+            type: string
+            default: en
+      responses:
+        "200":
+          description: Example query list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  examples:
+                    type: array
+                    items:
+                      type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /feedback:
+    post:
+      operationId: recordFeedback
+      tags: [Query]
+      summary: Record answer feedback
+      description: Records thumbs-up/thumbs-down feedback for a specific answer. Used to track answer quality over time.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                query_type:
+                  type: string
+                rating:
+                  type: integer
+                  description: 1 for positive, -1 for negative
+                  enum: [1, -1]
+                comment:
+                  type: string
+      responses:
+        "200":
+          description: Feedback recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "400":
+          description: Invalid feedback data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  error:
+                    type: string
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /feedback/stats:
+    get:
+      operationId: getFeedbackStats
+      tags: [Query]
+      summary: Get feedback statistics
+      description: Returns aggregated feedback statistics over a rolling window, optionally filtered by query type.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: days
+          in: query
+          description: Number of days to include
+          schema:
+            type: integer
+            default: 30
+        - name: queryType
+          in: query
+          description: Filter by query type
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Feedback statistics
+          content:
+            application/json:
+              schema:
+                type: object
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /feedback/needs-improvement:
+    get:
+      operationId: getPoorlyPerformingQueries
+      tags: [Query]
+      summary: Get poorly performing queries
+      description: Returns queries that consistently receive negative feedback, useful for identifying knowledge gaps.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: limit
+          in: query
+          description: Maximum results (1-200)
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: Poorly performing queries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queries:
+                    type: array
+                    items:
+                      type: object
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Ingestion ─────────────────────────────────────────────────────────────
+
+  /upload:
+    post:
+      operationId: uploadFile
+      tags: [Ingestion]
+      summary: Upload a single file
+      description: |
+        Uploads and ingests a single document. By default the file is queued for asynchronous background processing
+        (returns 202). Set `sync=true` in the body to process synchronously (returns 200 with result).
+        Supported file types include PDF, DOCX, TXT, MD, HTML, CSV, XLSX.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to upload
+                targetNodeId:
+                  type: string
+                  description: Force-assign to a specific tree node
+                targetSchemaNodeId:
+                  type: string
+                  description: Assign to a schema node
+                useLLM:
+                  type: boolean
+                  default: true
+                  description: Whether to use LLM for extraction
+                sync:
+                  type: boolean
+                  default: false
+                  description: Process synchronously (blocks until complete)
+      responses:
+        "200":
+          description: Synchronous processing result (when sync=true)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document_id:
+                    type: integer
+                  chunks_created:
+                    type: integer
+                  nodes_created:
+                    type: integer
+        "202":
+          description: File queued for background processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:
+                    type: boolean
+                  message:
+                    type: string
+                  job:
+                    $ref: "#/components/schemas/IngestionJob"
+        "400":
+          description: No file uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /upload/batch:
+    post:
+      operationId: uploadBatch
+      tags: [Ingestion]
+      summary: Upload multiple files
+      description: |
+        Uploads and ingests multiple documents at once. By default files are queued for asynchronous processing
+        (returns 202). Set `sync=true` to process all files synchronously.
+        Maximum file count controlled by INGEST_MAX_BATCH_FILES env var (default 100).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Array of files to upload
+                targetNodeId:
+                  type: string
+                targetSchemaNodeId:
+                  type: string
+                useLLM:
+                  type: boolean
+                  default: true
+                sync:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: Synchronous processing result (when sync=true)
+          content:
+            application/json:
+              schema:
+                type: object
+        "202":
+          description: Files queued for background processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:
+                    type: boolean
+                  message:
+                    type: string
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/IngestionJob"
+                  count:
+                    type: integer
+        "400":
+          description: No files uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/jobs:
+    get:
+      operationId: listIngestionJobs
+      tags: [Ingestion]
+      summary: List ingestion jobs
+      description: Returns ingestion jobs, optionally filtered by status, with pagination.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: status
+          in: query
+          description: Filter by job status
+          schema:
+            type: string
+            enum: [queued, processing, completed, failed, rate_limited, cancelled]
+        - name: limit
+          in: query
+          description: Maximum results (1-200)
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/IngestionJob"
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/jobs/active:
+    get:
+      operationId: listActiveIngestionJobs
+      tags: [Ingestion]
+      summary: List active ingestion jobs
+      description: Returns only active (queued, processing, rate_limited) ingestion jobs.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Active job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/IngestionJob"
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/jobs/cancel-all:
+    post:
+      operationId: cancelAllIngestionJobs
+      tags: [Ingestion]
+      summary: Cancel all pending jobs
+      description: Cancels all queued and rate-limited ingestion jobs.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Jobs cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  cancelled:
+                    type: integer
+
+  /ingest/jobs/retry-all:
+    post:
+      operationId: retryAllIngestionJobs
+      tags: [Ingestion]
+      summary: Retry all failed jobs
+      description: Resets all failed and rate-limited jobs to queued status for reprocessing.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Jobs retried
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  retried:
+                    type: integer
+
+  /ingest/jobs/completed:
+    delete:
+      operationId: purgeCompletedJobs
+      tags: [Ingestion]
+      summary: Purge completed jobs
+      description: Deletes all completed job records from the ingestion_jobs table.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Completed jobs purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  deleted:
+                    type: integer
+
+  /ingest/jobs/failed:
+    delete:
+      operationId: purgeFailedJobs
+      tags: [Ingestion]
+      summary: Purge failed jobs
+      description: Deletes all failed job records from the ingestion_jobs table.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Failed jobs purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  deleted:
+                    type: integer
+
+  /ingest/jobs/{id}:
+    get:
+      operationId: getIngestionJob
+      tags: [Ingestion]
+      summary: Get a single ingestion job
+      description: Returns details of a specific ingestion job by ID.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestionJob"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/jobs/{id}/retry:
+    post:
+      operationId: retryIngestionJob
+      tags: [Ingestion]
+      summary: Retry a specific job
+      description: Resets a failed or rate-limited job to queued status for reprocessing.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job retried
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  job:
+                    $ref: "#/components/schemas/IngestionJob"
+        "400":
+          description: Job cannot be retried
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/jobs/{id}/cancel:
+    post:
+      operationId: cancelIngestionJob
+      tags: [Ingestion]
+      summary: Cancel a specific job
+      description: Cancels a queued or rate-limited ingestion job.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  job:
+                    $ref: "#/components/schemas/IngestionJob"
+        "400":
+          description: Job cannot be cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /ingest/queue/stats:
+    get:
+      operationId: getIngestionQueueStats
+      tags: [Ingestion]
+      summary: Get ingestion queue statistics
+      description: Returns counts of jobs by status in the ingestion queue.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Queue statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:
+                    type: integer
+                  processing:
+                    type: integer
+                  completed:
+                    type: integer
+                  failed:
+                    type: integer
+                  rate_limited:
+                    type: integer
+                  cancelled:
+                    type: integer
+
+  # ── Documents ─────────────────────────────────────────────────────────────
+
+  /documents:
+    get:
+      operationId: listDocuments
+      tags: [Documents]
+      summary: List documents
+      description: Returns documents with optional status filter and pagination.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: status
+          in: query
+          description: Filter by document status
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Document"
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /documents/unified:
+    get:
+      operationId: listDocumentsUnified
+      tags: [Documents]
+      summary: Unified document + job view
+      description: |
+        Returns a merged list of active ingestion jobs and completed documents in one sorted array.
+        Active jobs come first (newest first), followed by completed/failed documents not represented by a job.
+        Each row has a consistent shape with job and document fields merged.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: limit
+          in: query
+          description: Maximum rows (1-500)
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: Unified rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row_type:
+                          type: string
+                          enum: [job, doc]
+                        job_id:
+                          type: integer
+                          nullable: true
+                        doc_id:
+                          type: integer
+                          nullable: true
+                        name:
+                          type: string
+                        file_type:
+                          type: string
+                          nullable: true
+                        status:
+                          type: string
+                        error_message:
+                          type: string
+                          nullable: true
+                        attempt_count:
+                          type: integer
+                          nullable: true
+                        max_attempts:
+                          type: integer
+                          nullable: true
+                        chunk_count:
+                          type: integer
+                          nullable: true
+                        processing_step:
+                          type: string
+                          nullable: true
+                        processing_message:
+                          type: string
+                          nullable: true
+                        processing_progress:
+                          type: number
+                          nullable: true
+                        time:
+                          type: string
+                          format: date-time
+                        started_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        queue_position:
+                          type: integer
+                          nullable: true
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /documents/{id}:
+    get:
+      operationId: getDocument
+      tags: [Documents]
+      summary: Get document by ID
+      description: Returns a single document with all fields.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Document details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: deleteDocument
+      tags: [Documents]
+      summary: Delete a document
+      description: Deletes a document and all its chunks. Also cancels any queued/rate_limited ingestion job for this document.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Document deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /documents/{id}/extract:
+    post:
+      operationId: extractDocumentEntities
+      tags: [Documents]
+      summary: Extract entities from a document
+      description: Triggers entity-fact extraction for a specific document, optionally using LLM.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                useLLM:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: Extraction result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  entities_found:
+                    type: integer
+                  facts_extracted:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Nodes ─────────────────────────────────────────────────────────────────
+
+  /nodes:
+    get:
+      operationId: getFullTree
+      tags: [Nodes]
+      summary: Get full tree structure
+      description: Returns the complete hierarchical tree of all nodes along with tree statistics.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Full tree
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tree:
+                    type: array
+                    items:
+                      type: object
+                      description: Nested node objects with children arrays
+                  stats:
+                    type: object
+                    properties:
+                      total_nodes:
+                        type: integer
+                      total_chunks:
+                        type: integer
+                      max_depth:
+                        type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    post:
+      operationId: createNode
+      tags: [Nodes]
+      summary: Create a new node
+      description: Creates a new node in the knowledge tree.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, name]
+              properties:
+                node_id:
+                  type: string
+                  description: Unique node identifier
+                name:
+                  type: string
+                parent_id:
+                  type: string
+                  nullable: true
+                summary:
+                  type: string
+                scope:
+                  type: object
+      responses:
+        "201":
+          description: Node created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /nodes/health:
+    get:
+      operationId: getNodesHealth
+      tags: [Nodes]
+      summary: Tree health report
+      description: Returns a health report for all nodes, identifying issues like empty nodes, low chunk counts, or missing embeddings.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Health report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        node_id:
+                          type: string
+                        name:
+                          type: string
+                        issue:
+                          type: string
+                          enum: [empty, low_chunks, no_embedding]
+                  total:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /nodes/search:
+    get:
+      operationId: searchNodes
+      tags: [Nodes]
+      summary: Search chunks by content
+      description: Performs a BM25 full-text search across all chunks and groups results by their parent node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: q
+          in: query
+          required: true
+          description: Search query text
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum chunks to return (1-100)
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: Search results grouped by node
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        node_id:
+                          type: string
+                        node_name:
+                          type: string
+                        chunks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id:
+                                type: integer
+                              preview:
+                                type: string
+                              score:
+                                type: number
+                  total_chunks:
+                    type: integer
+        "400":
+          description: Missing q parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /nodes/{id}:
+    get:
+      operationId: getNode
+      tags: [Nodes]
+      summary: Get node by ID
+      description: Returns a single node. Pass `?context=true` to include parent chain and sibling context.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context
+          in: query
+          description: Include parent chain and sibling context
+          schema:
+            type: string
+            enum: ["true", "false"]
+            default: "false"
+      responses:
+        "200":
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    put:
+      operationId: updateNode
+      tags: [Nodes]
+      summary: Update a node
+      description: Updates one or more fields of a node (name, summary, scope, aliases, description, parent_id for reparenting).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                summary:
+                  type: string
+                scope:
+                  type: object
+                aliases:
+                  type: array
+                  items:
+                    type: string
+                node_description:
+                  type: string
+                parent_id:
+                  type: string
+                  nullable: true
+                  description: Set to a node ID to reparent, or null to make root-level
+      responses:
+        "200":
+          description: Updated node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          description: No updates provided or invalid parent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: deleteNode
+      tags: [Nodes]
+      summary: Delete a node
+      description: |
+        Deletes a node and all its chunks. Children are reparented to the deleted node's parent.
+        The root node cannot be deleted.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Node deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  name:
+                    type: string
+                  chunksDeleted:
+                    type: integer
+                  childrenReparented:
+                    type: integer
+        "400":
+          description: Cannot delete root node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /nodes/{id}/children:
+    get:
+      operationId: getNodeChildren
+      tags: [Nodes]
+      summary: Get node children
+      description: Returns the direct children of a node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Children list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  children:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Node"
+                  count:
+                    type: integer
+
+  /nodes/{id}/entities:
+    get:
+      operationId: getNodeEntities
+      tags: [Nodes]
+      summary: Get entities and facts for a node
+      description: Returns entities and their facts that are associated with chunks under a specific node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum entities (1-500)
+          schema:
+            type: integer
+            default: 50
+        - name: debug
+          in: query
+          description: Include debug information
+          schema:
+            type: string
+            enum: ["true", "false"]
+            default: "false"
+      responses:
+        "200":
+          description: Entities and facts
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /nodes/{id}/aliases:
+    post:
+      operationId: generateNodeAliases
+      tags: [Nodes]
+      summary: Generate aliases for a node
+      description: Uses LLM to generate search aliases for a specific node (e.g. abbreviations, synonyms).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Generated aliases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  nodeId:
+                    type: string
+                  aliases:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /nodes/{id}/chunks:
+    post:
+      operationId: createChunk
+      tags: [Nodes]
+      summary: Create a manual chunk on a node
+      description: Adds a manually-created knowledge point to a specific node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: The knowledge point content
+                kp_type:
+                  type: string
+                  enum: [fact, rule, definition, procedure, example, context]
+                  default: fact
+                doc_title:
+                  type: string
+                  default: Manual Entry
+      responses:
+        "200":
+          description: Chunk created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chunk:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      content:
+                        type: string
+                      kp_type:
+                        type: string
+                      doc_title:
+                        type: string
+        "400":
+          description: Missing content or invalid kp_type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /aliases/sync:
+    post:
+      operationId: syncAliases
+      tags: [Nodes]
+      summary: Generate aliases for all nodes missing them
+      description: Batch generates LLM-based aliases for nodes that do not yet have any.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: integer
+                  default: 50
+                  description: Maximum nodes to process
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  processed:
+                    type: integer
+                  total_aliases:
+                    type: integer
+
+  /chunks/{nodeId}:
+    get:
+      operationId: getChunksForNode
+      tags: [Nodes]
+      summary: Get chunks for a node
+      description: Returns all active chunks assigned to a specific node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: nodeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Chunk list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chunks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Chunk"
+                  count:
+                    type: integer
+
+  /chunks/detail/{id}:
+    get:
+      operationId: getChunkById
+      tags: [Nodes]
+      summary: Get chunk by ID
+      description: Returns a single chunk with all fields.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Chunk details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chunk"
+        "404":
+          description: Chunk not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /chunks/{id}:
+    delete:
+      operationId: deleteChunk
+      tags: [Nodes]
+      summary: Delete a manual chunk
+      description: Deletes a manually-created chunk. File-ingested chunks cannot be deleted via this endpoint (returns 403).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Chunk deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "403":
+          description: Cannot delete file-ingested chunks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Chunk not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Entities ──────────────────────────────────────────────────────────────
+
+  /entities:
+    get:
+      operationId: listEntities
+      tags: [Entities]
+      summary: Get all entities
+      description: Returns entities with their facts, optionally filtered by type or node ID.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: type
+          in: query
+          description: Filter by entity type
+          schema:
+            type: string
+        - name: nodeId
+          in: query
+          description: Filter by node ID
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Entity list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entities:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+
+  /entities/compare:
+    post:
+      operationId: compareEntities
+      tags: [Entities]
+      summary: Compare entities side-by-side
+      description: Compares two or more entities by their facts and attributes.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entities]
+              properties:
+                entities:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 2
+                  description: Array of entity names to compare
+      responses:
+        "200":
+          description: Comparison result
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Less than 2 entity names provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /entities/{name}:
+    get:
+      operationId: getEntity
+      tags: [Entities]
+      summary: Get entity by name
+      description: Returns a single entity with all its associated facts. Name is URL-encoded.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Entity with facts
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Entity not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /entities/{name}/graph:
+    get:
+      operationId: getEntityGraph
+      tags: [Entities]
+      summary: Get entity relationship graph
+      description: Returns a graph of related entities up to a specified depth from the named entity.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: depth
+          in: query
+          description: Maximum traversal depth
+          schema:
+            type: integer
+            default: 2
+      responses:
+        "200":
+          description: Entity graph
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /facts/search:
+    get:
+      operationId: searchFacts
+      tags: [Entities]
+      summary: Search facts by keyword
+      description: Performs a keyword search across all stored facts.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: q
+          in: query
+          required: true
+          description: Search keyword
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Fact search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  facts:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+        "400":
+          description: Missing q parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /facts/retrieve:
+    post:
+      operationId: retrieveFacts
+      tags: [Entities]
+      summary: Retrieve facts for a question
+      description: Returns facts most relevant to a given question, scored and sorted by relevance.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                maxFacts:
+                  type: integer
+                  default: 15
+                maxEvidence:
+                  type: integer
+                  default: 10
+      responses:
+        "200":
+          description: Retrieved facts
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Missing question
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /facts/verify:
+    post:
+      operationId: verifyClaim
+      tags: [Entities]
+      summary: Verify a claim against stored facts
+      description: Checks whether a textual claim is supported, contradicted, or unknown based on stored facts.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claim]
+              properties:
+                claim:
+                  type: string
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verdict:
+                    type: string
+                    enum: [supported, contradicted, unknown]
+                  confidence:
+                    type: number
+                  evidence:
+                    type: array
+                    items:
+                      type: object
+        "400":
+          description: Missing claim
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /extraction/stats:
+    get:
+      operationId: getExtractionStats
+      tags: [Entities]
+      summary: Get entity extraction statistics
+      description: Returns statistics about the entity extraction process (entities, facts, coverage).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Extraction statistics
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /extraction/pending:
+    get:
+      operationId: getPendingExtractions
+      tags: [Entities]
+      summary: Get documents awaiting extraction
+      description: Returns documents that have not yet undergone entity extraction.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Pending documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Document"
+                  count:
+                    type: integer
+
+  /extraction/bulk:
+    post:
+      operationId: bulkExtractEntities
+      tags: [Entities]
+      summary: Bulk extract entities
+      description: Runs entity extraction across all pending documents in batch.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                maxDocuments:
+                  type: integer
+                  default: 10
+                  description: Maximum documents to process
+                useLLM:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: Bulk extraction result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  documents_processed:
+                    type: integer
+                  entities_found:
+                    type: integer
+                  facts_extracted:
+                    type: integer
+
+  # ── Embeddings ────────────────────────────────────────────────────────────
+
+  /embeddings/sync:
+    post:
+      operationId: syncEmbeddings
+      tags: [Embeddings]
+      summary: Sync embeddings
+      description: |
+        Generates embeddings for chunks and nodes that are missing them.
+        Pass `?force=true` to delete all node embeddings first and regenerate them
+        with enriched text (name + summary + description + keywords).
+        Invalidates the vector routing cache after sync.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: force
+          in: query
+          description: Delete and regenerate all node embeddings
+          schema:
+            type: string
+            enum: ["true", "false"]
+            default: "false"
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chunks_embedded:
+                    type: integer
+                  nodes_embedded:
+                    type: integer
+                  total_time_ms:
+                    type: integer
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /embeddings/coverage:
+    get:
+      operationId: getEmbeddingCoverage
+      tags: [Embeddings]
+      summary: Get embedding coverage stats
+      description: Returns the number and percentage of chunks and nodes that have embeddings.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Coverage statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chunks:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      embedded:
+                        type: integer
+                      coverage:
+                        type: number
+                        format: float
+                  nodes:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      embedded:
+                        type: integer
+                      coverage:
+                        type: number
+                        format: float
+
+  # ── Stats ─────────────────────────────────────────────────────────────────
+
+  /stats:
+    get:
+      operationId: getSystemStats
+      tags: [Stats]
+      summary: Get system statistics
+      description: Returns comprehensive statistics including tree, document, chunk, embedding, conflict, entity extraction, and queue stats for the active dataset.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: System statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: object
+                  documents:
+                    type: object
+                  chunks:
+                    type: object
+                    properties:
+                      active:
+                        type: integer
+                  embeddings:
+                    type: object
+                  conflicts:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      unresolved:
+                        type: integer
+                      resolved:
+                        type: integer
+                  extraction:
+                    type: object
+                    properties:
+                      entities:
+                        type: integer
+                      facts:
+                        type: integer
+                      documents_extracted:
+                        type: integer
+                  queue:
+                    type: object
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /stats/tokens:
+    get:
+      operationId: getTokenStats
+      tags: [Stats]
+      summary: Get token usage statistics
+      description: Returns LLM token usage statistics, optionally filtered by date, operation, or model.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: since
+          in: query
+          description: ISO date string to filter from
+          schema:
+            type: string
+            format: date-time
+        - name: operation
+          in: query
+          description: Filter by operation type
+          schema:
+            type: string
+        - name: model
+          in: query
+          description: Filter by model name
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Token usage statistics
+          content:
+            application/json:
+              schema:
+                type: object
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: cleanupTokenHistory
+      tags: [Stats]
+      summary: Clean up old token history
+      description: Deletes token usage records older than the specified number of days.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: daysToKeep
+          in: query
+          description: Number of days of history to retain
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: Cleanup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  deleted_records:
+                    type: integer
+
+  /tree:
+    delete:
+      operationId: emptyTree
+      tags: [Stats]
+      summary: Empty the entire tree
+      description: |
+        **Dangerous operation.** Deletes all nodes, chunks, documents, and embeddings for the active dataset.
+        Requires `?confirm=yes` query parameter. This action cannot be undone.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: confirm
+          in: query
+          required: true
+          description: Must be "yes" to confirm
+          schema:
+            type: string
+            enum: ["yes"]
+      responses:
+        "200":
+          description: Tree emptied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  nodes_deleted:
+                    type: integer
+                  chunks_deleted:
+                    type: integer
+                  documents_deleted:
+                    type: integer
+        "400":
+          description: Missing confirmation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  message:
+                    type: string
+
+  # ── Decisions ─────────────────────────────────────────────────────────────
+
+  /decisions:
+    get:
+      operationId: listDecisions
+      tags: [Decisions]
+      summary: List decisions
+      description: Returns pending decisions with optional status/action filters and pagination.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [pending, accepted, rejected]
+        - name: action
+          in: query
+          description: Filter by action type
+          schema:
+            type: string
+            enum: [merge_suggestion, replace_suggestion, node_merge_suggestion, value_conflict]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Decision list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decisions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Decision"
+
+  /decisions/stats:
+    get:
+      operationId: getDecisionStats
+      tags: [Decisions]
+      summary: Get decision statistics
+      description: Returns counts of decisions by status, with a breakdown of pending decisions by action type.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Decision statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: integer
+                  accepted:
+                    type: integer
+                  rejected:
+                    type: integer
+                  by_action:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        action:
+                          type: string
+                        count:
+                          type: integer
+
+  /decisions/bulk-reject:
+    post:
+      operationId: bulkRejectDecisions
+      tags: [Decisions]
+      summary: Bulk reject by action type
+      description: Rejects all pending decisions of a given action type at once.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  description: Action type to bulk reject
+                  enum: [merge_suggestion, replace_suggestion, node_merge_suggestion, value_conflict]
+      responses:
+        "200":
+          description: Bulk rejection result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  rejected:
+                    type: integer
+        "400":
+          description: Missing action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /decisions/cleanup:
+    post:
+      operationId: runDecisionCleanup
+      tags: [Decisions]
+      summary: Run cleanup job (disabled)
+      description: This endpoint has been removed. Returns 410 Gone.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "410":
+          description: Endpoint removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /decisions/cleanup/dry-run:
+    get:
+      operationId: dryRunDecisionCleanup
+      tags: [Decisions]
+      summary: Cleanup dry-run (disabled)
+      description: This endpoint has been removed. Returns 410 Gone.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "410":
+          description: Endpoint removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /decisions/{id}:
+    get:
+      operationId: getDecision
+      tags: [Decisions]
+      summary: Get a single decision
+      description: Returns a single pending decision by ID.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Decision details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Decision"
+        "404":
+          description: Decision not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /decisions/{id}/accept:
+    post:
+      operationId: acceptDecision
+      tags: [Decisions]
+      summary: Accept a decision
+      description: |
+        Applies a pending decision and marks it as accepted.
+        - **merge_suggestion**: merges source documents from incoming chunk into target chunk, supersedes incoming.
+        - **replace_suggestion**: supersedes the target chunk with the incoming chunk.
+        - **node_merge_suggestion**: moves all chunks from the source node to the target node.
+        - **value_conflict**: requires a `resolution` field in the body (`keep_incoming`, `keep_existing`, or `keep_both`).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        description: Required for value_conflict decisions
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolution:
+                  type: string
+                  enum: [keep_incoming, keep_existing, keep_both]
+                  description: Required for value_conflict action type
+      responses:
+        "200":
+          description: Decision accepted and action applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "400":
+          description: Decision already resolved, or missing resolution for value_conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Decision not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "409":
+          description: Referenced chunks no longer exist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  missing:
+                    type: array
+                    items:
+                      type: integer
+        "422":
+          description: Decision is missing chunk or node references
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /decisions/{id}/reject:
+    post:
+      operationId: rejectDecision
+      tags: [Decisions]
+      summary: Reject a decision
+      description: Marks a pending decision as rejected without applying any data changes.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Decision rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "400":
+          description: Decision already resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Decision not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Conflicts (disabled) ──────────────────────────────────────────────────
+
+  /conflicts:
+    get:
+      operationId: listConflicts
+      tags: [Conflicts]
+      summary: List conflicts (disabled)
+      description: Conflict detection has been disabled. Returns empty data for API compatibility.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Empty conflicts list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conflicts:
+                    type: array
+                    items: {}
+                  stats:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        example: 0
+                      unresolved:
+                        type: integer
+                        example: 0
+                      resolved:
+                        type: integer
+                        example: 0
+
+  /conflicts/{id}/resolve:
+    post:
+      operationId: resolveConflict
+      tags: [Conflicts]
+      summary: Resolve a conflict (disabled)
+      description: Conflict detection has been disabled. Always returns 404.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "404":
+          description: Conflict detection is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Tests ─────────────────────────────────────────────────────────────────
+
+  /tests:
+    get:
+      operationId: listTestCases
+      tags: [Tests]
+      summary: List all test cases
+      description: Returns all test cases for the current dataset.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Test case list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_cases:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TestCase"
+
+    post:
+      operationId: createTestCase
+      tags: [Tests]
+      summary: Create a test case
+      description: Creates a new test case with a query, assertion type, and expected value.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, query, assertion_type]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                query:
+                  type: string
+                assertion_type:
+                  type: string
+                  description: e.g. "contains", "equals", "regex"
+                assertion_value:
+                  type: string
+      responses:
+        "201":
+          description: Test case created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_case:
+                    $ref: "#/components/schemas/TestCase"
+        "400":
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /tests/{id}:
+    put:
+      operationId: updateTestCase
+      tags: [Tests]
+      summary: Update a test case
+      description: Updates one or more fields of an existing test case.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                query:
+                  type: string
+                assertion_type:
+                  type: string
+                assertion_value:
+                  type: string
+                enabled:
+                  type: integer
+                  enum: [0, 1]
+      responses:
+        "200":
+          description: Test case updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test_case:
+                    $ref: "#/components/schemas/TestCase"
+        "404":
+          description: Test case not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: deleteTestCase
+      tags: [Tests]
+      summary: Delete a test case
+      description: Permanently deletes a test case.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Test case deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        "404":
+          description: Test case not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Schema ────────────────────────────────────────────────────────────────
+
+  /schema:
+    get:
+      operationId: getSchema
+      tags: [Schema]
+      summary: Get schema nodes
+      description: Returns all nodes marked as schema nodes, both as a flat list and a hierarchical tree.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Schema nodes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Node"
+                  tree:
+                    type: array
+                    items:
+                      type: object
+                      description: Nested node objects with children arrays
+
+  /schema/import:
+    post:
+      operationId: importSchema
+      tags: [Schema]
+      summary: Import schema nodes
+      description: |
+        Imports schema nodes from a JSON array. Each node can have `name`, `description`, `aliases`, `keywords`, and nested `children`.
+        In "merge" mode, existing nodes are updated; in "replace" mode, all schema flags are cleared first.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                      description:
+                        type: string
+                      aliases:
+                        type: array
+                        items:
+                          type: string
+                      keywords:
+                        type: array
+                        items:
+                          type: string
+                      children:
+                        type: array
+                        items:
+                          type: object
+                mode:
+                  type: string
+                  enum: [merge, replace]
+                  default: merge
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  created:
+                    type: integer
+                  updated:
+                    type: integer
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/export:
+    get:
+      operationId: exportSchema
+      tags: [Schema]
+      summary: Export schema as JSON
+      description: Exports schema nodes as a downloadable JSON file. Pass `?all=true` to export all nodes, not just schema-flagged ones.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: all
+          in: query
+          description: Export all nodes, not just schema nodes
+          schema:
+            type: string
+            enum: ["true", "false"]
+            default: "false"
+      responses:
+        "200":
+          description: Schema export JSON
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exported_at:
+                    type: string
+                    format: date-time
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+
+  /schema/settings:
+    get:
+      operationId: getSchemaSettings
+      tags: [Schema]
+      summary: Get schema settings
+      description: Returns the current mapping mode, strictness, template ID, and tree routing mode for the active dataset.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Schema settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mapping_mode:
+                    type: string
+                    enum: [free, guided]
+                  mapping_strictness:
+                    type: string
+                    enum: [soft, hard]
+                  schema_template_id:
+                    type: string
+                    nullable: true
+                  tree_routing_mode:
+                    type: string
+                    enum: [keyword, vector, llm]
+
+    patch:
+      operationId: updateSchemaSettings
+      tags: [Schema]
+      summary: Update schema settings
+      description: Updates one or more schema settings (mapping_mode, mapping_strictness, tree_routing_mode).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mapping_mode:
+                  type: string
+                  enum: [free, guided]
+                mapping_strictness:
+                  type: string
+                  enum: [soft, hard]
+                tree_routing_mode:
+                  type: string
+                  enum: [keyword, vector, llm]
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  mapping_mode:
+                    type: string
+                  mapping_strictness:
+                    type: string
+                  tree_routing_mode:
+                    type: string
+        "400":
+          description: Invalid setting value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/templates:
+    get:
+      operationId: listSchemaTemplates
+      tags: [Schema]
+      summary: List schema templates
+      description: Returns all saved schema templates from the registry database.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Template list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SchemaTemplate"
+
+    post:
+      operationId: createSchemaTemplate
+      tags: [Schema]
+      summary: Save current schema as a template
+      description: Exports the current schema nodes and saves them as a reusable template.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  default: ""
+      responses:
+        "201":
+          description: Template created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchemaTemplate"
+        "400":
+          description: Missing name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "409":
+          description: Template name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/templates/{id}:
+    delete:
+      operationId: deleteSchemaTemplate
+      tags: [Schema]
+      summary: Delete a schema template
+      description: Permanently deletes a schema template.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Template deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/templates/{id}/apply:
+    post:
+      operationId: applySchemaTemplate
+      tags: [Schema]
+      summary: Apply a schema template
+      description: Imports schema nodes from a template and switches the dataset to guided mapping mode.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [merge, replace]
+                  default: merge
+      responses:
+        "200":
+          description: Template applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  template_name:
+                    type: string
+                  mapping_mode:
+                    type: string
+                  created:
+                    type: integer
+                  updated:
+                    type: integer
+        "404":
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/nodes:
+    post:
+      operationId: createSchemaNode
+      tags: [Schema]
+      summary: Create a schema node
+      description: Creates a new schema-flagged node under the specified parent (or dataset root). If a node with the same name already exists, it is flagged as a schema node instead.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  default: ""
+                parent_id:
+                  type: string
+                  description: Parent node ID. Defaults to dataset root.
+      responses:
+        "201":
+          description: Schema node created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  node_id:
+                    type: string
+                  created:
+                    type: boolean
+        "200":
+          description: Existing node flagged as schema
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  node_id:
+                    type: string
+                  created:
+                    type: boolean
+                    example: false
+        "400":
+          description: Missing name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Parent node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/{nodeId}:
+    patch:
+      operationId: patchSchemaNode
+      tags: [Schema]
+      summary: Update a schema node
+      description: Updates the description and/or schema flag of a node.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: nodeId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_description:
+                  type: string
+                is_schema_node:
+                  type: boolean
+      responses:
+        "200":
+          description: Node patched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  node_id:
+                    type: string
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: removeSchemaFlag
+      tags: [Schema]
+      summary: Remove schema flag from a node
+      description: Removes the schema flag from a node without deleting the node itself.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: nodeId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schema flag removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Schema Interview ─────────────────────────────────────────────────────
+
+  /schema/interview/start:
+    post:
+      operationId: startSchemaInterview
+      tags: [SchemaInterview]
+      summary: Start a schema interview
+      description: Starts a new AI-guided interview session for generating a schema. Returns the first question and a session ID.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Interview started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                  question:
+                    type: string
+                  questionNumber:
+                    type: integer
+                  phase:
+                    type: string
+                    enum: [interviewing]
+                  existingDataSummary:
+                    type: string
+                    nullable: true
+
+  /schema/interview/answer:
+    post:
+      operationId: answerSchemaQuestion
+      tags: [SchemaInterview]
+      summary: Answer an interview question
+      description: |
+        Submits an answer to the current interview question and receives the next question.
+        If the interview is complete (max questions reached or `skipToGenerate` is true), returns
+        the generated schema in "reviewing" phase instead.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                answer:
+                  type: string
+                  description: The user's answer to the current question
+                skipToGenerate:
+                  type: boolean
+                  description: Skip remaining questions and generate schema immediately
+                  default: false
+      responses:
+        "200":
+          description: Next question or generated schema
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: Next question (interviewing phase)
+                    properties:
+                      sessionId:
+                        type: string
+                      question:
+                        type: string
+                      questionNumber:
+                        type: integer
+                      phase:
+                        type: string
+                        enum: [interviewing]
+                      context:
+                        type: object
+                      confidence:
+                        type: number
+                  - type: object
+                    description: Generated schema (reviewing phase)
+                    properties:
+                      sessionId:
+                        type: string
+                      phase:
+                        type: string
+                        enum: [reviewing]
+                      schema:
+                        type: array
+                        items:
+                          type: object
+                      summary:
+                        type: string
+        "400":
+          description: Missing session ID, answer, or session in wrong phase
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Session not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/interview/refine:
+    post:
+      operationId: refineSchema
+      tags: [SchemaInterview]
+      summary: Refine generated schema
+      description: Sends refinement instructions to modify the generated schema before applying it.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId, instructions]
+              properties:
+                sessionId:
+                  type: string
+                instructions:
+                  type: string
+                  description: Natural language instructions for refining the schema
+      responses:
+        "200":
+          description: Refined schema
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                  phase:
+                    type: string
+                    enum: [reviewing]
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                  summary:
+                    type: string
+        "400":
+          description: Missing session ID or instructions, or session not in reviewing phase
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Session not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /schema/interview/apply:
+    post:
+      operationId: applyInterviewSchema
+      tags: [SchemaInterview]
+      summary: Apply generated schema
+      description: Imports the generated schema into the dataset (replace mode), switches to guided mapping mode, and optionally saves as a template. Deletes the interview session.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                saveAsTemplate:
+                  type: boolean
+                  default: false
+                  description: Also save the schema as a reusable template
+                templateName:
+                  type: string
+                  description: Name for the template (required if saveAsTemplate is true)
+      responses:
+        "200":
+          description: Schema applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  created:
+                    type: integer
+                  updated:
+                    type: integer
+                  mapping_mode:
+                    type: string
+                    enum: [guided]
+                  templateId:
+                    type: string
+                    nullable: true
+        "400":
+          description: Missing session ID or no generated schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Session not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Prompts ───────────────────────────────────────────────────────────────
+
+  /prompts:
+    get:
+      operationId: listPrompts
+      tags: [Prompts]
+      summary: List all prompts
+      description: Returns all prompt templates with their defaults and any per-dataset overrides.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: Prompt list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PromptEntry"
+
+  /prompts/reset:
+    post:
+      operationId: resetAllPrompts
+      tags: [Prompts]
+      summary: Reset all prompts to defaults
+      description: Deletes all per-dataset prompt overrides, restoring every prompt to its built-in default.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      responses:
+        "200":
+          description: All prompts reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /prompts/{key}:
+    get:
+      operationId: getPrompt
+      tags: [Prompts]
+      summary: Get a single prompt
+      description: Returns the full details of a prompt template including default text, current text, and override status.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: key
+          in: path
+          required: true
+          description: Prompt key (e.g. "kpExtraction_en", "answerGeneration_en")
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Prompt details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptEntry"
+        "404":
+          description: Unknown prompt key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    put:
+      operationId: savePromptOverride
+      tags: [Prompts]
+      summary: Save a prompt override
+      description: Saves a custom prompt override for the active dataset. The override takes effect immediately for all subsequent LLM calls using this prompt key.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  description: The custom prompt text. Use {{variable}} placeholders for dynamic values.
+      responses:
+        "200":
+          description: Override saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  key:
+                    type: string
+                  is_custom:
+                    type: boolean
+        "400":
+          description: Missing or empty text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "404":
+          description: Unknown prompt key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+    delete:
+      operationId: resetPrompt
+      tags: [Prompts]
+      summary: Reset a prompt to default
+      description: Deletes the per-dataset override for a single prompt, restoring its built-in default.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Override removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  key:
+                    type: string
+                  is_custom:
+                    type: boolean
+                    example: false
+        "404":
+          description: Unknown prompt key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  # ── Manage (chatbot) ─────────────────────────────────────────────────────
+
+  /manage/chat:
+    post:
+      operationId: manageChat
+      tags: [Manage]
+      summary: Send a chatbot message
+      description: |
+        Main conversational endpoint for the knowledge management chatbot.
+        Supports intents: ADD (add new knowledge), EDIT (modify existing), DELETE (remove knowledge), QUERY (search/browse).
+        Uses session-based context for multi-turn conversations with confirmation flows.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  description: User message
+                sessionId:
+                  type: string
+                  nullable: true
+                  description: Session ID for multi-turn conversation. Omit to start a new session.
+      responses:
+        "200":
+          description: Chatbot response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                  reply:
+                    type: string
+                  intent:
+                    type: string
+                    enum: [add, edit, delete, query, confirm, cancel, undo, history]
+                  pending:
+                    type: boolean
+                    description: Whether the chatbot is waiting for user confirmation
+                  data:
+                    type: object
+                    description: Structured data about the action (varies by intent)
+        "400":
+          description: Missing message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+
+  /manage/history:
+    get:
+      operationId: getManageHistory
+      tags: [Manage]
+      summary: Get chatbot change history
+      description: Returns recent changes made through the management chatbot, pulled from the audit log.
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: limit
+          in: query
+          description: Maximum entries (1-100)
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Change history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        action:
+                          type: string
+                        table_name:
+                          type: string
+                        record_id:
+                          type: string
+                        old_value:
+                          type: string
+                          nullable: true
+                        new_value:
+                          type: string
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+
+  /manage/revert/{id}:
+    post:
+      operationId: revertChange
+      tags: [Manage]
+      summary: Revert a chatbot change
+      description: Reverts a specific chatbot change by audit log ID. Uses the stored snapshot to undo the action (add -> delete, edit -> restore, delete -> re-insert).
+      parameters:
+        - $ref: "#/components/parameters/DatasetIdHeader"
+        - name: id
+          in: path
+          required: true
+          description: Audit log entry ID
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Change reverted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+        "400":
+          description: Invalid audit ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"

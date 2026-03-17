@@ -15,6 +15,8 @@ import { DecisionRepo } from "../db/repositories/DecisionRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { executeMerge } from "../ingest/nodeMerger.js";
 import { apiLogger as logger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -31,8 +33,9 @@ router.get("/decisions", (req, res) => {
     });
     res.json({ decisions });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /decisions error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -44,8 +47,9 @@ router.get("/decisions/stats", (req, res) => {
     stats.by_action = DecisionRepo.countPendingByAction();
     res.json(stats);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /decisions/stats error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -53,20 +57,21 @@ router.get("/decisions/stats", (req, res) => {
 
 router.post("/decisions/bulk-reject", (req, res) => {
   try {
-    const { action } = req.body || {};
-    if (!action) return res.status(400).json({ error: "action is required" });
+    requireBody(req.body, 'action');
+    const { action } = req.body;
     const rejected = DecisionRepo.bulkRejectByAction(action);
     res.json({ success: true, rejected });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /decisions/bulk-reject error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // ── Cleanup dry-run (disabled) ────────────────────────────────────────────────
 
 router.get("/decisions/cleanup/dry-run", (_req, res) => {
-  res.status(410).json({ error: "Cleanup job has been removed" });
+  res.status(410).json({ error: { code: 'GONE', message: "Cleanup job has been removed" } });
 });
 
 // ── Single decision ───────────────────────────────────────────────────────────
@@ -75,11 +80,12 @@ router.get("/decisions/:id", (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const decision = DecisionRepo.getById(id);
-    if (!decision) return res.status(404).json({ error: "Decision not found" });
+    if (!decision) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Decision not found" } });
     res.json(decision);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("GET /decisions/:id error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -89,9 +95,9 @@ router.post("/decisions/:id/accept", async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const decision = DecisionRepo.getById(id);
-    if (!decision) return res.status(404).json({ error: "Decision not found" });
+    if (!decision) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Decision not found" } });
     if (decision.status !== "pending") {
-      return res.status(400).json({ error: `Decision is already ${decision.status}` });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: `Decision is already ${decision.status}` } });
     }
 
     let actionResult = {};
@@ -100,14 +106,14 @@ router.post("/decisions/:id/accept", async (req, res) => {
       case "merge_suggestion": {
         // Merge: update source_documents_json of target chunk
         if (!decision.incoming_chunk_id || !decision.target_chunk_id) {
-          return res.status(422).json({ error: "Decision is missing chunk references" });
+          return res.status(422).json({ error: { code: 'UNPROCESSABLE', message: "Decision is missing chunk references" } });
         }
         const incoming = ChunkRepo.getById(decision.incoming_chunk_id);
         const target   = ChunkRepo.getById(decision.target_chunk_id);
         if (!incoming || !target) {
           return res.status(409).json({
-            error: "One or both referenced chunks no longer exist — decision cannot be applied",
-            missing: [!incoming && decision.incoming_chunk_id, !target && decision.target_chunk_id].filter(Boolean)
+            error: { code: 'CONFLICT', message: "One or both referenced chunks no longer exist — decision cannot be applied",
+                     details: { missing: [!incoming && decision.incoming_chunk_id, !target && decision.target_chunk_id].filter(Boolean) } }
           });
         }
         const existingDocs = safeJson(target.source_documents_json, []);
@@ -122,14 +128,14 @@ router.post("/decisions/:id/accept", async (req, res) => {
       case "replace_suggestion": {
         // Replace: supersede target with incoming
         if (!decision.incoming_chunk_id || !decision.target_chunk_id) {
-          return res.status(422).json({ error: "Decision is missing chunk references" });
+          return res.status(422).json({ error: { code: 'UNPROCESSABLE', message: "Decision is missing chunk references" } });
         }
         const incomingChunk = ChunkRepo.getById(decision.incoming_chunk_id);
         const targetChunk   = ChunkRepo.getById(decision.target_chunk_id);
         if (!incomingChunk || !targetChunk) {
           return res.status(409).json({
-            error: "One or both referenced chunks no longer exist — decision cannot be applied",
-            missing: [!incomingChunk && decision.incoming_chunk_id, !targetChunk && decision.target_chunk_id].filter(Boolean)
+            error: { code: 'CONFLICT', message: "One or both referenced chunks no longer exist — decision cannot be applied",
+                     details: { missing: [!incomingChunk && decision.incoming_chunk_id, !targetChunk && decision.target_chunk_id].filter(Boolean) } }
           });
         }
         ChunkRepo.supersede(decision.target_chunk_id, decision.incoming_chunk_id);
@@ -144,7 +150,7 @@ router.post("/decisions/:id/accept", async (req, res) => {
         const sourceNodeId = match?.[1];
         const targetNodeId = decision.node_id;
         if (!sourceNodeId || !targetNodeId) {
-          return res.status(422).json({ error: "Decision is missing node references" });
+          return res.status(422).json({ error: { code: 'UNPROCESSABLE', message: "Decision is missing node references" } });
         }
         const result = executeMerge(sourceNodeId, targetNodeId);
         actionResult = { nodesMerged: true, ...result };
@@ -154,7 +160,7 @@ router.post("/decisions/:id/accept", async (req, res) => {
       case "value_conflict": {
         const { resolution } = req.body || {};
         if (!resolution || !["keep_incoming", "keep_existing", "keep_both"].includes(resolution)) {
-          return res.status(400).json({ error: "resolution must be keep_incoming, keep_existing, or keep_both" });
+          return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "resolution must be keep_incoming, keep_existing, or keep_both" } });
         }
         if (resolution === "keep_both") {
           // Both chunks stay as-is
@@ -181,8 +187,9 @@ router.post("/decisions/:id/accept", async (req, res) => {
     DecisionRepo.updateStatus(id, "accepted", "user");
     res.json({ success: true, ...actionResult });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /decisions/:id/accept error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -192,22 +199,23 @@ router.post("/decisions/:id/reject", (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const decision = DecisionRepo.getById(id);
-    if (!decision) return res.status(404).json({ error: "Decision not found" });
+    if (!decision) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Decision not found" } });
     if (decision.status !== "pending") {
-      return res.status(400).json({ error: `Decision is already ${decision.status}` });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: `Decision is already ${decision.status}` } });
     }
     DecisionRepo.updateStatus(id, "rejected", "user");
     res.json({ success: true });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("POST /decisions/:id/reject error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // ── Run cleanup job (disabled) ────────────────────────────────────────────────
 
 router.post("/decisions/cleanup", (_req, res) => {
-  res.status(410).json({ error: "Cleanup job has been removed" });
+  res.status(410).json({ error: { code: 'GONE', message: "Cleanup job has been removed" } });
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ router.get("/conflicts", (_req, res) => {
 });
 
 router.post("/conflicts/:id/resolve", (_req, res) => {
-  res.status(404).json({ error: "Conflict detection is disabled" });
+  res.status(404).json({ error: { code: 'NOT_FOUND', message: "Conflict detection is disabled" } });
 });
 
 export default router;

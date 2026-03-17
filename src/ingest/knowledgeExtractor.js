@@ -134,6 +134,14 @@ function detectSectionHeadings(text) {
       else if (/^[（(][一二三四五六七八九十]+[）)]\s*\S/.test(trimmed) && trimmed.length <= 60) {
         headings.push({ heading: trimmed.replace(/^[（(][一二三四五六七八九十]+[）)]\s*/, ''), startIndex: charOffset, level: 2 });
       }
+      // CJK bracket enumeration (【一】/【二】) — level 2
+      else if (/^【[一二三四五六七八九十\d]+】\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed.replace(/^【[一二三四五六七八九十\d]+】\s*/, ''), startIndex: charOffset, level: 2 });
+      }
+      // Parenthesis enumeration at line start: 1）, (1), (2) — level 3
+      else if (/^[（(]?\d+[）)]\s*\S/.test(trimmed) && trimmed.length <= 60) {
+        headings.push({ heading: trimmed.replace(/^[（(]?\d+[）)]\s*/, ''), startIndex: charOffset, level: 3 });
+      }
     }
     charOffset += line.length + 1; // +1 for the \n
   }
@@ -249,11 +257,18 @@ function detectTables(text) {
  * Convert detected tables into structured KP objects.
  * Each row becomes a KP with column headers as context.
  */
-function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId = 0 } = {}) {
+function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId = 0, headings = [] } = {}) {
   const kps = [];
   for (const table of tables) {
     if (!table.headers || table.headers.length === 0) continue;
-    const headerStr = table.headers.join(', ');
+
+    // Derive topic_hint from the section heading the table appears under,
+    // falling back to docTitle. Column headers make poor node names.
+    let topicHint = docTitle || "General";
+    if (headings.length > 0 && table.startIndex != null) {
+      const sectionInfo = getSectionAtPosition(headings, table.startIndex);
+      if (sectionInfo.heading) topicHint = sectionInfo.heading;
+    }
 
     for (const row of table.rows) {
       // Build a structured statement from header-value pairs
@@ -277,7 +292,7 @@ function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId =
         kp_type: "fact",
         source_excerpt: content.slice(0, 200),
         source_documents_json: JSON.stringify([{ doc_id: documentId, doc_title: docTitle, excerpt: content.slice(0, 200) }]),
-        topic_hint: headerStr.length <= 80 ? headerStr : headerStr.slice(0, 77) + "...",
+        topic_hint: topicHint,
         subtopic_hint: "",
         confidence: 0.85,  // structured data = high confidence
         _fromTable: true
@@ -294,6 +309,7 @@ function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId =
  * @returns {Array<{text: string, sectionHeading: string|null}>}
  */
 function splitIntoSegments(text, segmentSize, overlap, headings = []) {
+  // Expects pre-normalised text (\r\n → \n done in extractKnowledgePoints)
   if (text.length <= segmentSize) {
     const sectionInfo = headings.length > 0
       ? getSectionAtPosition(headings, 0)
@@ -315,9 +331,12 @@ function splitIntoSegments(text, segmentSize, overlap, headings = []) {
 
     const sectionInfo = getSectionAtPosition(headings, start);
     segments.push({ text: text.slice(start, end), sectionHeading: sectionInfo.heading, sectionPath: sectionInfo.path });
-    start = Math.max(start + 1, end - overlap);
 
-    // Snap back to paragraph boundary in the overlap zone
+    const newStart = end - overlap;
+    // Guard: ensure at least half-segment forward progress to prevent runaway 1-char segments
+    start = Math.max(start + Math.floor(segmentSize / 2), newStart);
+
+    // Snap forward to paragraph boundary in the overlap zone
     if (start < text.length) {
       const nextPara = text.indexOf("\n\n", start);
       if (nextPara !== -1 && nextPara < start + overlap) start = nextPara + 2;
@@ -339,14 +358,19 @@ async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = n
     prompt += `\n\nContext: This text falls under the document section path: ${sectionPath.map(s => `"${s}"`).join(' > ')}. Use "${sectionPath[0]}" as topic_hint and "${sectionPath.slice(1).join(' > ')}" as subtopic_hint for KPs.`;
   } else if (sectionHeading) {
     prompt += `\n\nContext: This text falls under the document section: "${sectionHeading}". Use this section name as the topic_hint for KPs, or a more specific sub-topic derived from it.`;
+  } else if (docTitle && docTitle.trim().length > 0) {
+    prompt += `\n\nContext: This document is titled "${docTitle}". Use specific sub-topics of this domain as topic_hint values. Each topic_hint should name a specific aspect of "${docTitle}", not a generic label.`;
   }
 
   // Temperature 0 + seed for determinism: same document must produce the same KPs
   // across runs. This stabilises tree topology and makes retrieval deterministic.
-  // maxOutputTokens: cap at 3000 tokens (~20 KPs × 150 tokens each) to avoid runaway completions.
-  const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 3000, taskName: 'kp_extraction' });
+  // maxOutputTokens: 8192 allows ~50 KPs per segment (each ~150 tokens in JSON).
+  // thinkingBudget: 0 — KP extraction is pure structured output; thinking wastes
+  // tokens and causes truncation (thinking budget is soft, model can exceed it).
+  const text = await callLLM({ prompt, temperature: 0.0, seed: 42, maxOutputTokens: 8192, thinkingBudget: 0, taskName: 'kp_extraction' });
 
   if (!text) throw new Error("LLM returned empty response");
+  logger.debug(`KP extraction raw LLM response (${text.length} chars total, first 300): ${text.slice(0, 300).replace(/\n/g, '\\n')}...LAST100: ${text.slice(-100).replace(/\n/g, '\\n')}`);
 
   const raw = await parseLLMJson(text, 'array', { context: 'kp_extraction', fallback: null });
   if (!Array.isArray(raw)) {
@@ -356,6 +380,12 @@ async function extractKPsFromSegment(segment, docTitle, lang, sectionHeading = n
   if (raw.length === 0) {
     logger.warn(`KP extraction: LLM returned empty array [] — response was: "${text.slice(0, 300)}"`);
     throw new Error("LLM returned empty KP array");
+  }
+  logger.info(`KP extraction segment: ${raw.length} KPs, topic_hints: ${[...new Set(raw.map(r => r.topic_hint))].join(', ')}`);
+  // Debug: log first item structure to catch array-vs-object issues
+  if (raw.length > 0) {
+    const first = raw[0];
+    logger.debug(`KP first item type: ${Array.isArray(first) ? 'array' : typeof first}, keys: ${Object.keys(first).slice(0, 5).join(',')}, statement: "${String(first.statement || '').slice(0, 60)}"`);
   }
   return raw;
 }
@@ -397,7 +427,10 @@ function scoreKPQuality(content) {
 
 function normaliseKP(raw, index, docTitle, documentId, authorityLevel) {
   const statement = String(raw.statement || "").trim();
-  if (statement.length < 10) return null;
+  if (statement.length < 10) {
+    logger.debug(`normaliseKP: filtered short KP (${statement.length} chars): "${statement}" | raw keys: ${Object.keys(raw).join(',')}`);
+    return null;
+  }
 
   const kpType = VALID_KP_TYPES.has(raw.kp_type) ? raw.kp_type : "fact";
 
@@ -467,7 +500,7 @@ function deduplicateAcrossSegments(kps, threshold = 0.9) {
  * @param {number}  options.documentId
  * @returns {Promise<Array>} Array of EnrichedKP objects
  */
-export async function extractKnowledgePoints(text, docTitle, options = {}) {
+export async function extractKnowledgePoints(rawText, docTitle, options = {}) {
   const {
     useLLM        = true,
     authorityLevel = "sop",
@@ -475,6 +508,10 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
     jobId         = null,
     onProgress    = null   // onProgress(doneSegments, totalSegments)
   } = options;
+
+  // Normalise Windows \r\n to \n once — used consistently by segmentation,
+  // heading detection, table detection, and paragraph extraction.
+  const text = rawText.replace(/\r\n/g, "\n");
 
   if (!useLLM || !isLlmConfigured()) {
     return extractKPsFromParagraphs(text, docTitle, { authorityLevel, documentId });
@@ -505,6 +542,12 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
   }
 
   for (let b = startSegment; b < segments.length; b += SEGMENT_BATCH) {
+    // Save checkpoint BEFORE processing batch — crash recovery won't lose completed work
+    if (jobId) {
+      try { JobRepo.saveCheckpoint(jobId, { extraction: { next_segment: b, raw_kps: allRaw } }); }
+      catch (e) { logger.warn(`Checkpoint save failed: ${e.message}`); }
+    }
+
     const batch = segments.slice(b, b + SEGMENT_BATCH);
     const settled = await Promise.allSettled(
       batch.map(seg => extractKPsFromSegment(seg.text, docTitle, lang, seg.sectionHeading, seg.sectionPath))
@@ -533,7 +576,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
       }
     }
 
-    // Save checkpoint after each batch — ensures resume point is always ahead of last failure
+    // Save checkpoint after batch completes — ensures resume point is ahead of last success
     if (jobId) {
       try { JobRepo.saveCheckpoint(jobId, { extraction: { next_segment: b + SEGMENT_BATCH, raw_kps: allRaw } }); }
       catch (e) { logger.warn(`Checkpoint save failed: ${e.message}`); }
@@ -553,11 +596,14 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
   }
 
   // Normalise and deduplicate
+  logger.info(`KP extraction raw: ${allRaw.length} raw KPs from LLM for "${docTitle}"`);
   const normalised = allRaw
     .map((raw, i) => normaliseKP(raw, i, docTitle, documentId, authorityLevel))
     .filter(Boolean);
+  logger.info(`KP extraction normalised: ${normalised.length} after normalisation (${allRaw.length - normalised.length} filtered)`);
 
   const deduped = deduplicateAcrossSegments(normalised);
+  logger.info(`KP extraction deduped: ${deduped.length} after deduplication (${normalised.length - deduped.length} duplicates)`);
 
   // Table-aware extraction: detect tables in the original text and convert
   // each row into a structured KP. Deduplicate against LLM-extracted KPs.
@@ -565,7 +611,7 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
   let tableKPs = [];
   if (detectedTables.length > 0) {
     logger.info(`Detected ${detectedTables.length} table(s) with ${detectedTables.reduce((s, t) => s + t.rows.length, 0)} total rows`);
-    const rawTableKPs = tableRowsToKPs(detectedTables, docTitle, { authorityLevel, documentId });
+    const rawTableKPs = tableRowsToKPs(detectedTables, docTitle, { authorityLevel, documentId, headings });
     // Only keep table KPs that aren't already covered by LLM extraction
     tableKPs = rawTableKPs.filter(tKP =>
       !deduped.some(kp => wordDiceSimilarity(tKP.content, kp.content) >= 0.75)
@@ -578,7 +624,15 @@ export async function extractKnowledgePoints(text, docTitle, options = {}) {
   // Append paragraph fallbacks as a retrieval safety net.
   // These ensure every substantial paragraph is BM25-searchable even when the
   // LLM misses content, merges facts, or omits specific numbers during KP extraction.
-  const paragraphFallbacks = extractParagraphFallbacks(text, docTitle, { authorityLevel, documentId });
+  const paragraphFallbacks = extractParagraphFallbacks(text, docTitle, { authorityLevel, documentId, headings, kpCount: deduped.length });
+
+  // Cross-dedup table KPs against paragraph fallbacks (prevents table rows from
+  // duplicating paragraph content that covers the same data in prose form)
+  if (tableKPs.length > 0 && paragraphFallbacks.length > 0) {
+    tableKPs = tableKPs.filter(tKP =>
+      !paragraphFallbacks.some(pKP => wordDiceSimilarity(tKP.content, pKP.content) >= 0.75)
+    );
+  }
 
   // Deduplicate paragraphs against existing KPs — only skip a paragraph if it's
   // nearly identical to a KP (≥0.85 Dice). Paragraphs typically contain 2-3 facts
@@ -612,7 +666,7 @@ function paragraphsToKPs(text, docTitle, { authorityLevel = "sop", documentId = 
       kp_type:         "legacy_chunk",
       source_excerpt:  p.slice(0, 200),
       source_documents_json: JSON.stringify([{ doc_id: documentId, doc_title: docTitle, excerpt: p.slice(0, 200) }]),
-      topic_hint:      "General",
+      topic_hint:      docTitle || "General",
       subtopic_hint:   "",
       confidence:      0.5
     }));
@@ -641,46 +695,69 @@ const BOILERPLATE_RE = /^(page\s+\d|chapter\s+\d|\d+\s*\/\s*\d+$|table of conten
  * @param {object} options
  * @returns {Array} paragraph KP objects with kp_type='paragraph_context'
  */
-function extractParagraphFallbacks(text, docTitle, { authorityLevel = "sop", documentId = 0 } = {}) {
-  // Split on double newlines
-  const rawParagraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+function extractParagraphFallbacks(text, docTitle, { authorityLevel = "sop", documentId = 0, headings = [], kpCount = 0 } = {}) {
+  // Split on double newlines, tracking char offsets for section mapping
+  const rawParagraphs = [];
+  let offset = 0;
+  for (const part of text.split(/\n{2,}/)) {
+    const trimmed = part.trim();
+    if (trimmed) rawParagraphs.push({ text: trimmed, offset });
+    offset = text.indexOf(part, offset) + part.length;
+  }
 
   // Merge consecutive short paragraphs (< 100 chars)
   const merged = [];
-  let buffer = '';
+  let buffer = null;
   for (const para of rawParagraphs) {
-    if (buffer && (buffer.length >= 100 || para.length >= 100)) {
-      if (buffer.length >= 80) merged.push(buffer);
+    if (buffer && (buffer.text.length >= 100 || para.text.length >= 100)) {
+      if (buffer.text.length >= 80) merged.push(buffer);
       buffer = para;
     } else {
-      buffer = buffer ? buffer + '\n' + para : para;
+      buffer = buffer
+        ? { text: buffer.text + '\n' + para.text, offset: buffer.offset }
+        : para;
     }
   }
-  if (buffer.length >= 80) merged.push(buffer);
+  if (buffer && buffer.text.length >= 80) merged.push(buffer);
 
-  // Filter and cap — scale cap with document length (longer docs need more fallbacks)
-  const dynamicCap = Math.min(50, Math.max(15, Math.ceil(merged.length / 5)));
-  const paragraphs = merged
-    .filter(p => p.length >= 80 && !BOILERPLATE_RE.test(p))
-    .slice(0, dynamicCap);
+  // Filter — keep substantial, non-boilerplate paragraphs as retrieval safety net.
+  // Cap scales with document size (kpCount / 3) to prevent excessive paragraph
+  // fallbacks while still covering multi-section documents.
+  let paragraphs = merged
+    .filter(p => p.text.length >= 80 && !BOILERPLATE_RE.test(p.text));
 
-  return paragraphs.map((p, i) => ({
-    content:         p,
-    index:           i,  // will be re-indexed by caller
-    doc_title:       docTitle,
-    chunk_type:      "context",
-    keywords:        extractKeywords(p),
-    fields:          {},
-    scope:           {},
-    authority_level: authorityLevel,
-    kp_type:         "paragraph_context",
-    source_excerpt:  p.slice(0, 200),
-    source_documents_json: JSON.stringify([{ doc_id: documentId, doc_title: docTitle, excerpt: p.slice(0, 200) }]),
-    // Always map to root — paragraph fallbacks are a BM25 safety net only.
-    // Mapping them to topical nodes would dilute the tree's precision by mixing
-    // multi-fact paragraphs with focused atomic KPs.
-    topic_hint:      "General",
-    subtopic_hint:   "",
-    confidence:      0.6
-  }));
+  // Cap paragraph fallbacks relative to KP count to prevent excessive storage.
+  // At least 10 to cover small docs, at most 40 for large multi-section docs.
+  if (kpCount > 0) {
+    const maxFallbacks = Math.min(40, Math.max(10, Math.floor(kpCount / 3)));
+    paragraphs = paragraphs.slice(0, maxFallbacks);
+  }
+
+  return paragraphs.map((p, i) => {
+    // Derive topic_hint from section heading if available, otherwise doc title.
+    // This routes paragraph fallbacks to the correct topic nodes instead of
+    // dumping them all under a single doc-title node.
+    let topicHint = docTitle || "General";
+    if (headings.length > 0) {
+      const sectionInfo = getSectionAtPosition(headings, p.offset);
+      if (sectionInfo.heading) topicHint = sectionInfo.heading;
+    }
+
+    return {
+      content:         p.text,
+      index:           i,  // will be re-indexed by caller
+      doc_title:       docTitle,
+      chunk_type:      "context",
+      keywords:        extractKeywords(p.text),
+      fields:          {},
+      scope:           {},
+      authority_level: authorityLevel,
+      kp_type:         "paragraph_context",
+      source_excerpt:  p.text.slice(0, 200),
+      source_documents_json: JSON.stringify([{ doc_id: documentId, doc_title: docTitle, excerpt: p.text.slice(0, 200) }]),
+      topic_hint:      topicHint,
+      subtopic_hint:   "",
+      confidence:      0.6
+    };
+  });
 }

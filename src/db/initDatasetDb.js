@@ -9,6 +9,24 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const SCHEMA_VERSION = 1;
+
+/**
+ * Read the current schema version from the dataset_config table.
+ * Returns 0 if the table does not exist or has no schema_version row.
+ */
+function getSchemaVersion(conn) {
+  try {
+    const row = conn
+      .prepare("SELECT value FROM dataset_config WHERE key = 'schema_version'")
+      .get();
+    return row ? parseInt(row.value, 10) || 0 : 0;
+  } catch {
+    // Table doesn't exist yet — first init
+    return 0;
+  }
+}
+
 function tableExists(conn, tableName) {
   const row = conn
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -335,6 +353,18 @@ export function initDatasetDb(connection) {
   initDecisionTable(connection);
   initDatasetConfigTable(connection);
   initTestCasesTable(connection);
+
+  // ── Schema version tracking ────────────────────────────────────────────────
+  const currentVersion = getSchemaVersion(connection);
+  if (currentVersion < SCHEMA_VERSION) {
+    connection
+      .prepare("INSERT OR REPLACE INTO dataset_config (key, value) VALUES ('schema_version', ?)")
+      .run(String(SCHEMA_VERSION));
+    // Use console.log since logger may not be available at init time
+    console.log(`[initDatasetDb] Schema v${SCHEMA_VERSION} applied (was v${currentVersion})`);
+  } else {
+    console.log(`[initDatasetDb] Schema already at v${currentVersion}`);
+  }
 }
 
 function initTestCasesTable(conn) {

@@ -14,6 +14,8 @@ import {
   verifyClaim
 } from "../extraction/entityFactRetriever.js";
 import { apiLogger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -26,8 +28,9 @@ router.get("/entities", (req, res) => {
     const entities = getEntitiesWithFacts({ type, nodeId, limit: parseInt(limit) });
     res.json({ entities, count: entities.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get entities error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -36,13 +39,14 @@ router.post("/entities/compare", (req, res) => {
   try {
     const { entities } = req.body;
     if (!entities || entities.length < 2) {
-      return res.status(400).json({ error: "At least 2 entity names required" });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "At least 2 entity names required" } });
     }
     const comparison = compareEntities(entities);
     res.json(comparison);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Compare entities error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -50,11 +54,12 @@ router.post("/entities/compare", (req, res) => {
 router.get("/entities/:name", (req, res) => {
   try {
     const entity = getEntityFacts(decodeURIComponent(req.params.name));
-    if (!entity) return res.status(404).json({ error: "Entity not found" });
+    if (!entity) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Entity not found" } });
     res.json(entity);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get entity error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -65,8 +70,9 @@ router.get("/entities/:name/graph", (req, res) => {
     const graph = getEntityGraph(decodeURIComponent(req.params.name), parseInt(depth));
     res.json(graph);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get entity graph error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -76,38 +82,41 @@ router.get("/entities/:name/graph", (req, res) => {
 router.get("/facts/search", (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
-    if (!q) return res.status(400).json({ error: "Query parameter 'q' is required" });
+    if (!q) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "Query parameter 'q' is required" } });
     const facts = searchFacts(q, parseInt(limit));
     res.json({ facts, count: facts.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Search facts error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // Retrieve facts relevant to a question
 router.post("/facts/retrieve", (req, res) => {
   try {
+    requireBody(req.body, 'question');
     const { question, maxFacts = 15, maxEvidence = 10 } = req.body;
-    if (!question) return res.status(400).json({ error: "Question is required" });
     const result = getFactsForQuestion(question, { maxFacts, maxEvidence });
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Retrieve facts error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // Verify a claim against stored facts
 router.post("/facts/verify", (req, res) => {
   try {
+    requireBody(req.body, 'claim');
     const { claim } = req.body;
-    if (!claim) return res.status(400).json({ error: "Claim is required" });
     const result = verifyClaim(claim);
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Verify claim error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -118,8 +127,9 @@ router.get("/extraction/stats", (req, res) => {
   try {
     res.json(getExtractionStats());
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get extraction stats error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -129,8 +139,9 @@ router.get("/extraction/pending", (req, res) => {
     const docs = getDocumentsNeedingExtraction();
     res.json({ documents: docs, count: docs.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get pending extraction error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -142,8 +153,9 @@ router.post("/extraction/bulk", async (req, res) => {
     const result = await bulkExtractEntities({ maxDocuments, useLLM });
     res.json({ success: true, ...result });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Bulk extraction error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

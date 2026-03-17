@@ -3,6 +3,7 @@ import { listDocuments, getDocument, deleteDocument } from "../ingest/index.js";
 import { processDocumentForExtraction } from "../extraction/entityFactExtractor.js";
 import { apiLogger } from "../utils/logger.js";
 import { JobRepo } from "../db/repositories/JobRepo.js";
+import { ApiError } from "../utils/apiError.js";
 
 const router = express.Router();
 
@@ -88,8 +89,9 @@ router.get("/unified", (req, res) => {
 
     res.json({ rows, count: rows.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Unified documents error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -100,8 +102,9 @@ router.get("/", (req, res) => {
     const documents = listDocuments({ status, limit: parseInt(limit, 10), offset: parseInt(offset, 10) });
     res.json({ documents, count: documents.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("List documents error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -109,11 +112,12 @@ router.get("/", (req, res) => {
 router.get("/:id", (req, res) => {
   try {
     const doc = getDocument(parseInt(req.params.id, 10));
-    if (!doc) return res.status(404).json({ error: "Document not found" });
+    if (!doc) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Document not found" } });
     res.json(doc);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get document error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -125,8 +129,9 @@ router.delete("/:id", (req, res) => {
     const result = deleteDocument(docId);
     res.json({ success: true, ...result });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Delete document error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -139,8 +144,9 @@ router.post("/:id/extract", async (req, res) => {
     const result = await processDocumentForExtraction(docId, { useLLM });
     res.json({ success: true, ...result });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Document extraction error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

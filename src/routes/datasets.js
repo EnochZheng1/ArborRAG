@@ -13,6 +13,8 @@ import { getConnection } from "../db/datasetManager.js";
 import { runWithDb } from "../db/activeDb.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { apiLogger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -22,16 +24,17 @@ router.get("/", (req, res) => {
     const datasets = listDatasets().map(({ db_path: _omit, ...rest }) => rest);
     res.json({ datasets, count: datasets.length });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("List datasets error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // Create a new dataset
 router.post("/", (req, res) => {
   try {
-    const { name, description, language } = req.body || {};
-    if (!name?.trim()) return res.status(400).json({ error: "name is required" });
+    requireBody(req.body, 'name');
+    const { name, description, language } = req.body;
     const dataset = createDataset(name.trim(), description || "");
 
     if (language && language !== 'auto') {
@@ -46,9 +49,11 @@ router.post("/", (req, res) => {
     const { db_path: _omit, ...safe } = dataset;
     res.status(201).json({ dataset: safe });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Create dataset error:", err.message);
-    const status = err.status || (err.message.includes("already exists") ? 409 : 500);
-    res.status(status).json({ error: err.message });
+    const status = err.message.includes("already exists") ? 409 : 500;
+    const code = status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+    res.status(status).json({ error: { code, message: err.message } });
   }
 });
 
@@ -57,16 +62,18 @@ router.put("/:id", (req, res) => {
   try {
     const { name, description } = req.body || {};
     if (name === undefined && description === undefined) {
-      return res.status(400).json({ error: "Provide name and/or description to update" });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "Provide name and/or description to update" } });
     }
     const dataset = renameDataset(req.params.id, name, description);
-    if (!dataset) return res.status(404).json({ error: "Dataset not found" });
+    if (!dataset) return res.status(404).json({ error: { code: 'NOT_FOUND', message: "Dataset not found" } });
     const { db_path: _omit, ...safe } = dataset;
     res.json({ dataset: safe });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Rename dataset error:", err.message);
     const status = err.status || (err.message.includes("already exists") ? 409 : 500);
-    res.status(status).json({ error: err.message });
+    const code = status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+    res.status(status).json({ error: { code, message: err.message } });
   }
 });
 
@@ -74,13 +81,14 @@ router.put("/:id", (req, res) => {
 router.delete("/:id", (req, res) => {
   try {
     if (req.query.confirm !== "yes") {
-      return res.status(400).json({ error: "Add ?confirm=yes to confirm deletion" });
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "Add ?confirm=yes to confirm deletion" } });
     }
     deleteDataset(req.params.id);
     res.json({ success: true, deleted_id: req.params.id });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Delete dataset error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -92,9 +100,11 @@ router.post("/:id/duplicate", async (req, res) => {
     const { db_path: _omit, ...safe } = dataset;
     res.status(201).json({ dataset: safe });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Duplicate dataset error:", err.message);
     const status = err.status || (err.message.includes("already exists") ? 409 : 500);
-    res.status(status).json({ error: err.message });
+    const code = status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+    res.status(status).json({ error: { code, message: err.message } });
   }
 });
 
@@ -110,8 +120,9 @@ router.get("/:id/export", async (req, res) => {
       }
     });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Export dataset error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -120,8 +131,9 @@ router.get("/:id/stats", (req, res) => {
   try {
     res.json(getDatasetStats(req.params.id));
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Dataset stats error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -133,16 +145,17 @@ router.get("/:id/config/language", (req, res) => {
     runWithDb(conn, () => { language = DatasetConfigRepo.getLanguage(); });
     res.json({ language, locked: language !== 'auto' });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get dataset language error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // POST /datasets/:id/config/language — one-time lock, 403 if already locked
 router.post("/:id/config/language", (req, res) => {
   try {
-    const { language } = req.body || {};
-    if (!language) return res.status(400).json({ error: "language is required" });
+    requireBody(req.body, 'language');
+    const { language } = req.body;
     const conn = getConnection(req.params.id);
     let result;
     runWithDb(conn, () => {
@@ -151,8 +164,9 @@ router.post("/:id/config/language", (req, res) => {
     });
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Set dataset language error:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 

@@ -4,6 +4,8 @@ import { classifyQuery } from "../query/classifier.js";
 import { getSuggestions, getTrendingQueries, getExampleQueries } from "../query/suggestions.js";
 import { recordFeedback, getFeedbackStats, getPoorlyPerformingQueries } from "../query/feedback.js";
 import { apiLogger } from "../utils/logger.js";
+import { ApiError } from "../utils/apiError.js";
+import { requireBody } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -12,39 +14,42 @@ const router = express.Router();
 // Main ask endpoint with intelligent routing
 router.post("/ask", async (req, res) => {
   try {
-    const { query, queryScope, options } = req.body || {};
-    if (!query) return res.status(400).json({ error: "query required" });
+    requireBody(req.body, 'query');
+    const { query, queryScope, options } = req.body;
     const result = await ask({ query, queryScope, options });
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Ask error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // Simple ask (no classification, BM25 only)
 router.post("/ask/simple", async (req, res) => {
   try {
-    const { query, queryScope } = req.body || {};
-    if (!query) return res.status(400).json({ error: "query required" });
+    requireBody(req.body, 'query');
+    const { query, queryScope } = req.body;
     const result = await simpleAsk({ query, queryScope });
     res.json(result);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Simple ask error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
 // Classify a query without answering
 router.post("/classify", async (req, res) => {
   try {
-    const { query, useLLM = true } = req.body || {};
-    if (!query) return res.status(400).json({ error: "query required" });
+    requireBody(req.body, 'query');
+    const { query, useLLM = true } = req.body;
     const classification = await classifyQuery(query, { useLLM });
     res.json(classification);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Classification error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -58,8 +63,9 @@ router.get("/suggestions", (req, res) => {
     const suggestions = getSuggestions(q, { limit, lang });
     res.json({ suggestions });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get suggestions error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -70,8 +76,9 @@ router.get("/suggestions/trending", (req, res) => {
     const trending = getTrendingQueries(limit);
     res.json({ trending });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get trending error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -82,8 +89,9 @@ router.get("/suggestions/examples", (req, res) => {
     const examples = getExampleQueries(lang);
     res.json({ examples });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get examples error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -99,8 +107,9 @@ router.post("/feedback", (req, res) => {
       res.status(400).json(result);
     }
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Record feedback error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -111,8 +120,9 @@ router.get("/feedback/stats", (req, res) => {
     const stats = getFeedbackStats({ days: parseInt(days), queryType });
     res.json(stats);
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get feedback stats error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
@@ -123,8 +133,9 @@ router.get("/feedback/needs-improvement", (req, res) => {
     const queries = getPoorlyPerformingQueries(limit);
     res.json({ queries });
   } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     apiLogger.error("Get poorly performing queries error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });
 
