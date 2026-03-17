@@ -163,4 +163,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   });
+
+  // Signal that modules loaded successfully (used by fallback diagnostic)
+  window._treekbReady = true;
 });

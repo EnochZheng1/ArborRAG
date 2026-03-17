@@ -1532,6 +1532,13 @@ registerFn('populateNodeSelects', populateNodeSelects);
 // ── Window bindings for inline onclick handlers ──────────────────────────────
 window._updateBatchToolbar = _updateBatchToolbar;
 
+// Expose graph rendering for the fallback inline script
+window._renderGraphView = function(view) {
+  currentGraphView = view;
+  if (view === 'graph') renderGraph();
+  else if (view === 'tree') renderTreeDiagram();
+};
+
 // Undo tree operation via audit log
 window._undoTreeOp = async function(auditId) {
   try {

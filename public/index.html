@@ -1045,6 +1045,39 @@
     <span class="toast-message" id="toast-message"></span>
   </div>
 
-  <script type="module" src="app.js?v=3.0.1"></script>
+  <script type="module" src="app.js?v=3.0.2"></script>
+
+  <!-- Fallback: non-module script guarantees view toggle works even if ES modules fail -->
+  <script>
+  document.addEventListener('DOMContentLoaded', function() {
+    // View toggle (graph / tree diagram / list)
+    var viewBtns = document.querySelectorAll('.view-btn');
+    viewBtns.forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var view = btn.getAttribute('data-view');
+        viewBtns.forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var tv = document.getElementById('tree-view');
+        var gv = document.getElementById('graph-view');
+        var tdv = document.getElementById('tree-diagram-view');
+        if (tv) tv.classList.add('hidden');
+        if (gv) gv.classList.add('hidden');
+        if (tdv) tdv.classList.add('hidden');
+        if (view === 'graph' && gv) gv.classList.remove('hidden');
+        else if (view === 'tree' && tdv) tdv.classList.remove('hidden');
+        else if (tv) tv.classList.remove('hidden');
+        // Trigger module-based rendering if available
+        if (window._renderGraphView) window._renderGraphView(view);
+      });
+    });
+
+    // Diagnostic: check if modules loaded after 5 seconds
+    setTimeout(function() {
+      if (!window._treekbReady) {
+        console.error('[TreeKB] ES modules did not load. Check browser DevTools Network tab for failed requests.');
+      }
+    }, 5000);
+  });
+  </script>
 </body>
 </html>
