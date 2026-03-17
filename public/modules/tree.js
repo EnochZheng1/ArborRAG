@@ -543,15 +543,15 @@ async function loadNodeDetail(nodeId) {
         html += `
           <div class="entity-item">
             <div class="entity-header">
-              <span class="entity-name">${entity.name}</span>
-              <span class="entity-type">${entity.type || 'unknown'}</span>
+              <span class="entity-name">${escapeHtml(entity.name)}</span>
+              <span class="entity-type">${escapeHtml(entity.type || 'unknown')}</span>
               ${entity.mention_count > 1 ? `<span class="entity-mentions">${entity.mention_count} mentions</span>` : ''}
             </div>
-            ${entity.description ? `<p class="entity-description">${entity.description}</p>` : ''}
-            ${entity.aliases?.length ? `<div class="entity-aliases">Also: ${entity.aliases.join(', ')}</div>` : ''}
+            ${entity.description ? `<p class="entity-description">${escapeHtml(entity.description)}</p>` : ''}
+            ${entity.aliases?.length ? `<div class="entity-aliases">Also: ${escapeHtml(entity.aliases.join(', '))}</div>` : ''}
             ${entityFacts.length > 0 ? `
               <div class="entity-facts-mini">
-                ${entityFacts.map(f => `<span class="fact-mini">${f.content}</span>`).join('')}
+                ${entityFacts.map(f => `<span class="fact-mini">${escapeHtml(f.content)}</span>`).join('')}
               </div>
             ` : ''}
           </div>
@@ -595,11 +595,11 @@ async function loadNodeDetail(nodeId) {
         html += `
           <div class="fact-item">
             <div class="fact-header">
-              <span class="fact-type-badge">${fact.fact_type || 'fact'}</span>
+              <span class="fact-type-badge">${escapeHtml(fact.fact_type || 'fact')}</span>
               <span class="fact-confidence confidence-${confidenceClass}">${Math.round(fact.confidence * 100)}%</span>
             </div>
-            <p class="fact-content">${fact.content}</p>
-            ${fact.source_doc ? `<span class="fact-source">From: ${fact.source_doc}</span>` : ''}
+            <p class="fact-content">${escapeHtml(fact.content)}</p>
+            ${fact.source_doc ? `<span class="fact-source">From: ${escapeHtml(fact.source_doc)}</span>` : ''}
           </div>
         `;
       }
@@ -1099,11 +1099,11 @@ function createGraph() {
   node.on('mouseover', (event, d) => {
     tooltip.transition().duration(200).style('opacity', 1);
     tooltip.html(`
-      <div class="tooltip-title">${d.name}</div>
+      <div class="tooltip-title">${escapeHtml(d.name)}</div>
       <div class="tooltip-info">ID: ${d.id}</div>
       <div class="tooltip-info">Level: ${d.level}</div>
       <div class="tooltip-info">Chunks: ${d.chunks}</div>
-      ${d.summary ? `<div class="tooltip-info">${d.summary.slice(0, 100)}...</div>` : ''}
+      ${d.summary ? `<div class="tooltip-info">${escapeHtml(d.summary.slice(0, 100))}...</div>` : ''}
     `)
     .style('left', (event.pageX + 10) + 'px')
     .style('top', (event.pageY - 10) + 'px');
@@ -1317,10 +1317,10 @@ function createTreeDiagram() {
       const chunks  = chunkMap.get(d.data.node_id) || 0;
       const summary = d.data.node_summary || '';
       tooltip.style('display', 'block').html(
-        `<strong>${d.data.name}</strong><br>` +
+        `<strong>${escapeHtml(d.data.name)}</strong><br>` +
         `ID: ${d.data.node_id}<br>` +
         `Level: ${d.data.level ?? d.depth} · Chunks: ${chunks}` +
-        (summary ? `<br><em>${summary.slice(0, 100)}${summary.length > 100 ? '…' : ''}</em>` : '')
+        (summary ? `<br><em>${escapeHtml(summary.slice(0, 100))}${summary.length > 100 ? '…' : ''}</em>` : '')
       );
     })
     .on('mousemove', event => {

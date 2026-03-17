@@ -114,10 +114,11 @@ function displayManageResult(result, container) {
 
   let html = '<div class="manage-assistant-bubble">';
   if (result.intent) {
-    html += `<span class="manage-intent-badge" style="background:${badgeColor}">${result.intent}</span>`;
+    html += `<span class="manage-intent-badge" style="background:${badgeColor}">${escapeHtml(result.intent)}</span>`;
   }
 
-  const formatted = response.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+  const escaped = escapeHtml(response);
+  const formatted = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
   html += `<div class="bubble">${formatted}</div>`;
 
   if (result.pendingAction) {

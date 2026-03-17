@@ -1343,8 +1343,8 @@ function displayAskResult(result, showTrace = false) {
         ${result.citations.citations.map(c => `
           <div class="citation-item" data-chunk-id="${c.chunk_id}">
             <span class="citation-number">[${c.number}]</span>
-            <span class="citation-title">${c.title}</span>
-            ${c.node_name ? `<span class="citation-node">(${c.node_name})</span>` : ''}
+            <span class="citation-title">${escapeHtml(c.title)}</span>
+            ${c.node_name ? `<span class="citation-node">(${escapeHtml(c.node_name)})</span>` : ''}
           </div>
         `).join('')}
       </div>
@@ -1363,9 +1363,9 @@ function displayAskResult(result, showTrace = false) {
         <h4>${t('extracted_facts')}</h4>
         ${facts.map(f => `
           <div class="fact-item">
-            <span class="fact-type">${f.type || 'fact'}</span>
-            <span class="fact-content">${f.content}</span>
-            ${f.entities?.length ? `<span class="fact-entities">${f.entities.join(', ')}</span>` : ''}
+            <span class="fact-type">${escapeHtml(f.type || 'fact')}</span>
+            <span class="fact-content">${escapeHtml(f.content)}</span>
+            ${f.entities?.length ? `<span class="fact-entities">${escapeHtml(f.entities.join(', '))}</span>` : ''}
           </div>
         `).join('')}
       </div>
@@ -1381,8 +1381,8 @@ function displayAskResult(result, showTrace = false) {
         <h4>${t('relevant_excerpts')}</h4>
         ${snippets.map(s => `
           <div class="snippet-item">
-            <div class="snippet-source">${s.source || 'Unknown source'}</div>
-            <div class="snippet-text">${s.html || s.text}</div>
+            <div class="snippet-source">${escapeHtml(s.source || 'Unknown source')}</div>
+            <div class="snippet-text">${s.html || escapeHtml(s.text)}</div>
           </div>
         `).join('')}
       </div>
@@ -1417,7 +1417,7 @@ function displayAskResult(result, showTrace = false) {
     relatedDiv.classList.remove('hidden');
     relatedList.innerHTML = result.related_questions.map(q => `
       <button class="related-question-btn" data-question="${encodeURIComponent(q.question)}">
-        ${q.question}
+        ${escapeHtml(q.question)}
       </button>
     `).join('');
   } else {
