@@ -75,7 +75,14 @@ app.use("/datasets", datasetsRouter);
 app.use(settingsRouter);
 
 // ── Static files ─────────────────────────────────────────────────────────────
-app.use(express.static(path.join(__dirname, "../public")));
+app.use(express.static(path.join(__dirname, "../public"), {
+  // Prevent aggressive browser caching of JS/CSS during development
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  }
+}));
 
 // ── Health & metrics (no DB context required) ────────────────────────────────
 app.get('/health', (req, res) => {

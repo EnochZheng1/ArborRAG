@@ -951,31 +951,36 @@ async function handleAddNode(e) {
 
 function initGraphView() {
   // View toggle buttons
-  document.querySelectorAll('.view-btn').forEach(btn => {
+  const viewBtns = document.querySelectorAll('.view-btn');
+  viewBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      const view = btn.dataset.view;
-      currentGraphView = view;
+      try {
+        const view = btn.dataset.view;
+        currentGraphView = view;
 
-      document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+        viewBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
 
-      const treeView        = document.getElementById('tree-view');
-      const graphView       = document.getElementById('graph-view');
-      const treeDiagramView = document.getElementById('tree-diagram-view');
+        const treeView        = document.getElementById('tree-view');
+        const graphView       = document.getElementById('graph-view');
+        const treeDiagramView = document.getElementById('tree-diagram-view');
 
-      // Hide all panels then show the selected one
-      treeView.classList.add('hidden');
-      graphView.classList.add('hidden');
-      treeDiagramView.classList.add('hidden');
+        // Hide all panels then show the selected one
+        if (treeView)        treeView.classList.add('hidden');
+        if (graphView)       graphView.classList.add('hidden');
+        if (treeDiagramView) treeDiagramView.classList.add('hidden');
 
-      if (view === 'graph') {
-        graphView.classList.remove('hidden');
-        renderGraph();
-      } else if (view === 'tree') {
-        treeDiagramView.classList.remove('hidden');
-        renderTreeDiagram();
-      } else {
-        treeView.classList.remove('hidden');
+        if (view === 'graph') {
+          if (graphView) graphView.classList.remove('hidden');
+          renderGraph();
+        } else if (view === 'tree') {
+          if (treeDiagramView) treeDiagramView.classList.remove('hidden');
+          renderTreeDiagram();
+        } else {
+          if (treeView) treeView.classList.remove('hidden');
+        }
+      } catch (err) {
+        console.error('[TreeKB] View switch error:', err);
       }
     });
   });

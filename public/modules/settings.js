@@ -1728,7 +1728,7 @@ async function runTests(mode, singleId = null, explicitIds = null) {
 
   // 2. Create a fresh isolated dataset for this run
   const savedDatasetId   = state.currentDatasetId;
-  const savedDatasetName = currentDatasetName;
+  const savedDatasetName = state.currentDatasetName;
   let testDatasetId = null;
 
   try {
@@ -1742,7 +1742,7 @@ async function runTests(mode, singleId = null, explicitIds = null) {
     });
     testDatasetId      = ds.dataset.id;
     state.currentDatasetId   = testDatasetId;
-    currentDatasetName = ds.dataset.name;
+    state.currentDatasetName = ds.dataset.name;
     showToast('Isolated test dataset created', 'success');
   } catch (err) {
     // Dataset creation failed — run tests on the current dataset as fallback
@@ -1785,7 +1785,7 @@ async function runTests(mode, singleId = null, explicitIds = null) {
 
     // Restore original dataset first so the UI lands on the right context
     state.currentDatasetId   = savedDatasetId;
-    currentDatasetName = savedDatasetName;
+    state.currentDatasetName = savedDatasetName;
 
     // Delete the isolated test dataset (and everything it contains)
     if (testDatasetId) {
