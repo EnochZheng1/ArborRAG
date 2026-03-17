@@ -858,16 +858,8 @@ async function handleDeleteNode(nodeId) {
   if (!ok) return;
   try {
     const result = await api(`/nodes/${encodeURIComponent(nodeId)}`, { method: 'DELETE' });
-    const auditId = result?.audit_id;
-    if (auditId) {
-      showHtmlToast(
-        escapeHtml(`Deleted "${result.name}" (${result.chunksDeleted} chunks removed, ${result.childrenReparented} children re-parented)`) +
-        ` <button class="toast-undo-btn" onclick="window._undoTreeOp(${auditId})">Undo</button>`,
-        'success'
-      );
-    } else {
-      showToast(`Deleted "${result.name}" (${result.chunksDeleted} chunks removed, ${result.childrenReparented} children re-parented)`, 'success');
-    }
+    // Node deletes are NOT undoable (data permanently removed), so never show Undo button
+    showToast(`Deleted "${result?.name || 'node'}" (${result?.chunksDeleted || 0} chunks removed, ${result?.childrenReparented || 0} children re-parented)`, 'success');
     hideNodeDetail();
     loadTree();
   } catch (err) {
@@ -1545,9 +1537,14 @@ window._renderGraphView = function(view) {
 // Undo tree operation via audit log
 window._undoTreeOp = async function(auditId) {
   try {
-    await api(`/manage/revert/${auditId}`, { method: 'POST' });
-    showToast('Operation undone', 'success');
-    loadTree();
+    const res = await api(`/manage/revert/${auditId}`, { method: 'POST' });
+    if (!res) return;
+    if (res.success) {
+      showToast(res.description || 'Operation undone', 'success');
+      loadTree();
+    } else {
+      showToast(res.description || 'Undo failed', 'error');
+    }
   } catch (err) {
     showToast(err.message || 'Undo failed', 'error');
   }

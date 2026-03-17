@@ -6,7 +6,6 @@ import { _wsSend, _renderStageTracker } from './websocket.js';
 
 // Module-level state
 let selectedFiles = [];
-let _unifiedPollTimer = null;
 let _prevActiveJobs = new Map();
 
 // Use the shared state Map so websocket.js can trigger immediate polls on terminal events
@@ -151,7 +150,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': state.currentDatasetId } });
-      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.error || `Upload failed (${response.status})`); }
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error((err.error?.message || err.error) || `Upload failed (${response.status})`); }
       const result = await response.json();
       if (result.queued) {
         displayUploadResult([{
@@ -169,7 +168,7 @@ async function handleUpload() {
       formData.append('useLLM', useLLM);
 
       const response = await fetch('/upload/batch', { method: 'POST', body: formData, headers: { 'X-Dataset-ID': state.currentDatasetId } });
-      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error(err.error || `Batch upload failed (${response.status})`); }
+      if (!response.ok) { const err = await response.json().catch(() => ({})); throw new Error((err.error?.message || err.error) || `Batch upload failed (${response.status})`); }
       const result = await response.json();
       if (result.queued && Array.isArray(result.jobs)) {
         displayUploadResult(result.jobs.map(j => ({
@@ -416,7 +415,7 @@ async function cancelAllJobs() {
   } catch (err) { showToast(err.message, 'error'); }
 }
 
-// [dup] let _unifiedPollTimer = null;
+// _unifiedPollTimer lives in state so websocket.js visibility handler can cancel it
 // Map of jobId → name for active jobs seen in last poll (to detect completions)
 // [dup] let _prevActiveJobs = new Map();
 
@@ -424,7 +423,7 @@ async function loadUnifiedView() {
   const tbody = document.getElementById('documents-tbody');
   if (!tbody) return;
 
-  if (_unifiedPollTimer) { clearTimeout(_unifiedPollTimer); _unifiedPollTimer = null; }
+  if (state._unifiedPollTimer) { clearTimeout(state._unifiedPollTimer); state._unifiedPollTimer = null; }
 
   const statusFilter = document.getElementById('doc-status-filter')?.value || '';
 
@@ -506,7 +505,7 @@ async function loadUnifiedView() {
       // when disconnected, poll more aggressively to compensate.
       const wsConnected = state._ws && state._ws.readyState === WebSocket.OPEN;
       const pollInterval = wsConnected ? 60000 : 5000;
-      _unifiedPollTimer = setTimeout(() => loadUnifiedView().catch(console.error), pollInterval);
+      state._unifiedPollTimer = setTimeout(() => loadUnifiedView().catch(console.error), pollInterval);
     }
   } catch (error) {
     tbody.innerHTML = `<tr><td colspan="8" class="loading-text error">${escapeHtml(error.message)}</td></tr>`;
@@ -607,7 +606,9 @@ function _renderUnifiedRow(row) {
 
 function _timeAgo(dateStr) {
   if (!dateStr) return '-';
-  const diff = Date.now() - new Date(dateStr).getTime();
+  // SQLite stores UTC via datetime('now') — normalize so JS parses as UTC
+  const normalized = String(dateStr).replace(' ', 'T') + (String(dateStr).includes('Z') ? '' : 'Z');
+  const diff = Date.now() - new Date(normalized).getTime();
   if (diff < 60000)   return `${Math.round(diff / 1000)}s ago`;
   if (diff < 3600000) return `${Math.round(diff / 60000)}m ago`;
   if (diff < 86400000) return `${Math.round(diff / 3600000)}h ago`;
