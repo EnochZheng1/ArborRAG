@@ -198,6 +198,8 @@ export async function retrieveForComparison(entities, aspects = []) {
       node_id: data.node.node_id,
       node_name: data.node.name,
       summary: data.node.node_summary,
+      description: data.node.node_description || '',
+      keywords: safeJson(data.node.keywords_json, []),
       chunks: data.chunks
     };
 

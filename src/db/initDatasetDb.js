@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /**
  * Read the current schema version from the dataset_config table.
@@ -54,6 +54,7 @@ function runMigrations(conn) {
   ensureColumn(conn, "nodes", "node_description", "node_description TEXT DEFAULT ''");
   ensureColumn(conn, "nodes", "is_schema_node",   "is_schema_node INTEGER DEFAULT 0");
   ensureColumn(conn, "nodes", "keywords_json",    "keywords_json TEXT DEFAULT '[]'");
+  ensureColumn(conn, "nodes", "attributes_json",  "attributes_json TEXT DEFAULT '[]'");
 
   // Chunks
   ensureColumn(conn, "chunks", "doc_title", "doc_title TEXT");
@@ -229,6 +230,9 @@ function initEntityFactTables(conn) {
     CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity ON entity_mentions(entity_id);
     CREATE INDEX IF NOT EXISTS idx_entity_mentions_chunk ON entity_mentions(chunk_id);
   `);
+
+  // Migration: add attribute_name to facts for schema-defined attribute extraction
+  ensureColumn(conn, "facts", "attribute_name", "attribute_name TEXT DEFAULT NULL");
 }
 
 function initTokenTrackingTable(conn) {
@@ -353,18 +357,59 @@ export function initDatasetDb(connection) {
   initDecisionTable(connection);
   initDatasetConfigTable(connection);
   initTestCasesTable(connection);
+  initLearningTables(connection);
 
-  // ── Schema version tracking ────────────────────────────────────────────────
+  // ── Schema version tracking + migrations ──────────────────────────────────
   const currentVersion = getSchemaVersion(connection);
+
+  // v2: Clamp unbounded feedback_score values + add confidence_at_answer to feedback
+  if (currentVersion < 2) {
+    connection.exec(`
+      UPDATE chunks SET feedback_score = MAX(-1.0, MIN(1.0, feedback_score))
+      WHERE feedback_score < -1.0 OR feedback_score > 1.0
+    `);
+    ensureColumn(connection, "feedback", "confidence_at_answer", "confidence_at_answer REAL");
+    console.log(`[initDatasetDb] Migration v2: clamped feedback_score, added confidence_at_answer`);
+  }
+
   if (currentVersion < SCHEMA_VERSION) {
     connection
       .prepare("INSERT OR REPLACE INTO dataset_config (key, value) VALUES ('schema_version', ?)")
       .run(String(SCHEMA_VERSION));
-    // Use console.log since logger may not be available at init time
     console.log(`[initDatasetDb] Schema v${SCHEMA_VERSION} applied (was v${currentVersion})`);
   } else {
     console.log(`[initDatasetDb] Schema already at v${currentVersion}`);
   }
+}
+
+function initLearningTables(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS learning_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      parameter_key TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      sample_count INTEGER DEFAULT 0,
+      confidence REAL,
+      reason TEXT,
+      cycle_timestamp TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_history_key ON learning_history(parameter_key);
+    CREATE INDEX IF NOT EXISTS idx_learning_history_ts ON learning_history(cycle_timestamp);
+
+    CREATE TABLE IF NOT EXISTS ingestion_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER,
+      kp_count INTEGER DEFAULT 0,
+      avg_kp_confidence REAL DEFAULT 0,
+      decisions_created INTEGER DEFAULT 0,
+      auto_resolved_count INTEGER DEFAULT 0,
+      new_node_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_ingestion_metrics_doc ON ingestion_metrics(document_id);
+    CREATE INDEX IF NOT EXISTS idx_ingestion_metrics_ts ON ingestion_metrics(created_at);
+  `);
 }
 
 function initTestCasesTable(conn) {

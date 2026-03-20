@@ -20,6 +20,7 @@ import {
   stageMapChunks,
   stageExtractEntities,
   stageNodeSummaries,
+  stageReclassifyGeneral,
   stageTopicCanonicalization,
   stageOrphanCleanup,
   stageEmbeddingSync,
@@ -135,6 +136,7 @@ const STAGES = [
   { name: "map",            fn: stageMapChunks,              skip: ctx => ctx.isDuplicate },
   { name: "entities",       fn: stageExtractEntities,        skip: ctx => ctx.isDuplicate || !ctx.options.extractEntities },
   { name: "nodeSummaries",  fn: stageNodeSummaries,          skip: ctx => ctx.isDuplicate },
+  { name: "reclassify",    fn: stageReclassifyGeneral,      skip: ctx => ctx.isDuplicate },
   { name: "canonicalize",   fn: stageTopicCanonicalization,  skip: ctx => ctx.isDuplicate },
   { name: "orphanCleanup", fn: stageOrphanCleanup,          skip: ctx => ctx.isDuplicate },
   { name: "finalize",       fn: stageFinalize,               skip: ctx => ctx.isDuplicate }

@@ -6,25 +6,88 @@
 import { db } from "../db.js";
 
 export const FeedbackRepo = {
-  insert({ query, queryType, answerPreview, rating, comment, nodeIdsJson, chunkIdsJson, sessionId }) {
+  insert({ query, queryType, answerPreview, rating, comment, nodeIdsJson, chunkIdsJson, sessionId, confidenceAtAnswer }) {
     return db.prepare(`
       INSERT INTO feedback (
         query, query_type, answer_preview, rating, comment,
-        node_ids_json, chunk_ids_json, session_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        node_ids_json, chunk_ids_json, session_id, confidence_at_answer, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
       query, queryType ?? "unknown", answerPreview ?? null, rating,
-      comment ?? null, nodeIdsJson, chunkIdsJson, sessionId ?? null
+      comment ?? null, nodeIdsJson, chunkIdsJson, sessionId ?? null,
+      confidenceAtAnswer ?? null
     );
   },
 
+  /**
+   * Increment feedback_count and update feedback_score (clamped to [-1, 1]).
+   * The score column is a performance cache — the learning cycle periodically
+   * recomputes it from feedback events with time-decay applied.
+   */
   updateChunkScore(chunkId, adjustment) {
     db.prepare(`
       UPDATE chunks
-      SET feedback_score = COALESCE(feedback_score, 0) + ?,
+      SET feedback_score = MAX(-1.0, MIN(1.0, COALESCE(feedback_score, 0) + ?)),
           feedback_count = COALESCE(feedback_count, 0) + 1
       WHERE id = ?
     `).run(adjustment, chunkId);
+  },
+
+  /**
+   * Recompute cached feedback_score for all chunks from feedback events.
+   * Uses exponential decay: weight = 0.5^(days_since / halfLifeDays).
+   * Events older than windowDays are ignored. Result clamped to [-1, 1].
+   * Called by the learning cycle (every 6 hours).
+   */
+  recomputeFeedbackScores({ halfLifeDays = 60, windowDays = 90 } = {}) {
+    // Get all feedback events within the window, grouped by chunk
+    const events = db.prepare(`
+      SELECT f.chunk_ids_json, f.rating, f.created_at
+      FROM feedback
+      WHERE created_at > datetime('now', '-' || ? || ' days')
+      ORDER BY created_at DESC
+    `).all(windowDays);
+
+    // Accumulate decayed scores per chunk
+    const chunkScores = new Map();
+    const now = Date.now();
+
+    for (const event of events) {
+      let chunkIds;
+      try { chunkIds = JSON.parse(event.chunk_ids_json || '[]'); } catch { continue; }
+      if (!Array.isArray(chunkIds) || chunkIds.length === 0) continue;
+
+      const adjustment = (event.rating - 3) * 0.1; // -0.2 to +0.2
+      const eventTime = new Date(event.created_at).getTime();
+      const daysSince = (now - eventTime) / 86400000;
+      const weight = Math.pow(0.5, daysSince / halfLifeDays);
+
+      for (const cid of chunkIds) {
+        const prev = chunkScores.get(cid) || 0;
+        chunkScores.set(cid, prev + adjustment * weight);
+      }
+    }
+
+    // Write clamped scores back
+    const updateStmt = db.prepare(
+      `UPDATE chunks SET feedback_score = ? WHERE id = ?`
+    );
+
+    let updated = 0;
+    for (const [chunkId, raw] of chunkScores) {
+      const clamped = Math.max(-1.0, Math.min(1.0, raw));
+      updateStmt.run(Math.round(clamped * 1000) / 1000, chunkId);
+      updated++;
+    }
+
+    // Zero out scores for chunks with no recent feedback events
+    db.prepare(`
+      UPDATE chunks SET feedback_score = 0
+      WHERE feedback_score != 0
+        AND id NOT IN (${[...chunkScores.keys()].map(() => '?').join(',') || 'NULL'})
+    `).run(...chunkScores.keys());
+
+    return { updated, total: chunkScores.size };
   },
 
   upsertNodeRelevance({ nodeId, queryPattern, isPositive }) {
@@ -97,5 +160,40 @@ export const FeedbackRepo = {
       SELECT positive_count, negative_count FROM node_query_relevance
       WHERE node_id = ? AND query_pattern = ?
     `).get(nodeId, queryPattern);
+  },
+
+  /** All feedback within the given look-back window. */
+  getRecentFeedback(days = 30) {
+    const safeDays = Math.max(1, Math.floor(Number(days)));
+    return db.prepare(`
+      SELECT id, query, query_type, rating, comment,
+             node_ids_json, chunk_ids_json, session_id, created_at
+      FROM feedback
+      WHERE created_at > datetime('now', '-' || ? || ' days')
+      ORDER BY created_at DESC
+    `).all(safeDays);
+  },
+
+  /** Node-query relevance patterns with >= minSamples total feedback. */
+  getNodeRelevanceSummary(minSamples = 3) {
+    return db.prepare(`
+      SELECT node_id, query_pattern, positive_count, negative_count,
+             (positive_count + negative_count) as total,
+             last_feedback
+      FROM node_query_relevance
+      WHERE (positive_count + negative_count) >= ?
+      ORDER BY negative_count DESC
+    `).all(Math.max(1, Number(minSamples)));
+  },
+
+  /** Chunks with feedback_score below maxScore and at least minCount feedback. */
+  getChunksWithNegativeFeedback(minCount = 3, maxScore = -0.2) {
+    return db.prepare(`
+      SELECT id, node_id, feedback_score, feedback_count, doc_title
+      FROM chunks
+      WHERE feedback_count >= ? AND feedback_score < ?
+      ORDER BY feedback_score ASC
+      LIMIT 100
+    `).all(Math.max(1, Number(minCount)), Number(maxScore));
   }
 };

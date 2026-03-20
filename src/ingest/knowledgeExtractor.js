@@ -306,9 +306,23 @@ function tableRowsToKPs(tables, docTitle, { authorityLevel = "sop", documentId =
 
 /**
  * Split text into overlapping segments and tag each with its section heading.
+ * Respects no-break zones (tables, etc.) and heading boundaries.
+ * CJK-heavy text uses wider overlap (600 chars vs 300).
+ *
+ * @param {string} text
+ * @param {number} segmentSize
+ * @param {number} overlap
+ * @param {Array}  headings
+ * @param {Array}  noBreakZones - [{start, end}] ranges that must not be split
  * @returns {Array<{text: string, sectionHeading: string|null}>}
  */
-function splitIntoSegments(text, segmentSize, overlap, headings = []) {
+function splitIntoSegments(text, segmentSize, overlap, headings = [], noBreakZones = []) {
+  // CJK overlap increase: when text is >30% CJK characters, use 600-char overlap
+  const cjkChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const effectiveOverlap = (cjkChars / Math.max(1, text.length)) > 0.3
+    ? Math.max(overlap, 600)
+    : overlap;
+
   // Expects pre-normalised text (\r\n → \n done in extractKnowledgePoints)
   if (text.length <= segmentSize) {
     const sectionInfo = headings.length > 0
@@ -317,29 +331,55 @@ function splitIntoSegments(text, segmentSize, overlap, headings = []) {
     return [{ text, sectionHeading: sectionInfo.heading, sectionPath: sectionInfo.path }];
   }
 
+  // Helper: check if a position falls inside a no-break zone
+  function isInNoBreakZone(pos) {
+    for (const zone of noBreakZones) {
+      if (pos > zone.start && pos < zone.end) return zone;
+    }
+    return null;
+  }
+
   const segments = [];
   let start = 0;
 
   while (start < text.length) {
     let end = Math.min(start + segmentSize, text.length);
 
+    // If end falls inside a no-break zone, push to after the zone
+    const zone = isInNoBreakZone(end);
+    if (zone) {
+      end = Math.min(zone.end + 1, text.length);
+    }
+
     // Try to break at a paragraph boundary
-    if (end < text.length) {
+    if (end < text.length && !zone) {
       const boundary = text.lastIndexOf("\n\n", end);
       if (boundary > start + segmentSize * 0.6) end = boundary + 2;
+    }
+
+    // Heading-boundary awareness: if a heading exists between 50-100% of the
+    // segment window, prefer to break just before it
+    if (end < text.length && headings.length > 0) {
+      const halfWindow = start + segmentSize * 0.5;
+      for (const h of headings) {
+        if (h.startIndex > halfWindow && h.startIndex < end && h.startIndex > start + 100) {
+          end = h.startIndex;
+          break;
+        }
+      }
     }
 
     const sectionInfo = getSectionAtPosition(headings, start);
     segments.push({ text: text.slice(start, end), sectionHeading: sectionInfo.heading, sectionPath: sectionInfo.path });
 
-    const newStart = end - overlap;
+    const newStart = end - effectiveOverlap;
     // Guard: ensure at least half-segment forward progress to prevent runaway 1-char segments
     start = Math.max(start + Math.floor(segmentSize / 2), newStart);
 
     // Snap forward to paragraph boundary in the overlap zone
     if (start < text.length) {
       const nextPara = text.indexOf("\n\n", start);
-      if (nextPara !== -1 && nextPara < start + overlap) start = nextPara + 2;
+      if (nextPara !== -1 && nextPara < start + effectiveOverlap) start = nextPara + 2;
     }
   }
 
@@ -526,7 +566,15 @@ export async function extractKnowledgePoints(rawText, docTitle, options = {}) {
     logger.info(`Detected ${headings.length} section heading(s): ${headings.map(h => h.heading).join(', ')}`);
   }
 
-  const segments = splitIntoSegments(text, SEGMENT_SIZE, SEGMENT_OVERLAP, headings);
+  // Detect tables BEFORE segmentation so we can create no-break zones.
+  // Tables detected here are also used later for structured KP extraction.
+  const detectedTables = detectTables(text);
+  const noBreakZones = detectedTables.map(t => ({ start: t.startIndex, end: t.endIndex }));
+  if (noBreakZones.length > 0) {
+    logger.info(`Table no-break zones: ${noBreakZones.length} table(s) will not be split during segmentation`);
+  }
+
+  const segments = splitIntoSegments(text, SEGMENT_SIZE, SEGMENT_OVERLAP, headings, noBreakZones);
   logger.info(`KP extraction: ${segments.length} segment(s) for "${docTitle}"`);
 
   // Load checkpoint — allows resuming after a rate-limit pause without re-extracting
@@ -605,9 +653,8 @@ export async function extractKnowledgePoints(rawText, docTitle, options = {}) {
   const deduped = deduplicateAcrossSegments(normalised);
   logger.info(`KP extraction deduped: ${deduped.length} after deduplication (${normalised.length - deduped.length} duplicates)`);
 
-  // Table-aware extraction: detect tables in the original text and convert
-  // each row into a structured KP. Deduplicate against LLM-extracted KPs.
-  const detectedTables = detectTables(text);
+  // Table-aware extraction: convert pre-detected table rows into structured KPs.
+  // Tables were detected before segmentation (above) to create no-break zones.
   let tableKPs = [];
   if (detectedTables.length > 0) {
     logger.info(`Detected ${detectedTables.length} table(s) with ${detectedTables.reduce((s, t) => s + t.rows.length, 0)} total rows`);

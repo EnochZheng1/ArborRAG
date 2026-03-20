@@ -2518,6 +2518,9 @@ async function loadSchemaSettingsInline() {
   document.querySelectorAll('#tree-routing-toggle .toggle-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.value === (s.tree_routing_mode || 'keyword'));
   });
+  document.querySelectorAll('#entity-extraction-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === (s.entity_extraction_enabled || 'false'));
+  });
   const strictness = document.getElementById('strictness-group');
   if (strictness) strictness.style.display = s.mapping_mode === 'guided' ? '' : 'none';
 
@@ -2671,10 +2674,11 @@ async function saveSchemaSettings() {
   const mode       = document.querySelector('#mapping-mode-toggle .toggle-btn.active')?.dataset.value || 'free';
   const strictness = document.querySelector('#mapping-strictness-toggle .toggle-btn.active')?.dataset.value || 'soft';
   const routing    = document.querySelector('#tree-routing-toggle .toggle-btn.active')?.dataset.value || 'keyword';
+  const entityExt  = document.querySelector('#entity-extraction-toggle .toggle-btn.active')?.dataset.value || 'false';
   try {
     await api('/schema/settings', {
       method: 'PATCH',
-      body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness, tree_routing_mode: routing })
+      body: JSON.stringify({ mapping_mode: mode, mapping_strictness: strictness, tree_routing_mode: routing, entity_extraction_enabled: entityExt })
     });
     showToast('Schema settings saved', 'success');
     loadSchemaSettingsInline();

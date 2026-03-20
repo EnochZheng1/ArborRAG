@@ -293,3 +293,35 @@ export function isReasoningQuery(query) {
 export function isAggregationQuery(query) {
   return CLASSIFICATION_PATTERNS.aggregation.some(p => p.test(query));
 }
+
+/**
+ * Detect aggregation sub-type: enumeration vs summarization.
+ * Enumeration queries ask "how many", "list all", "what are the" — they want a count/list.
+ * Summarization queries ask "summarize", "overview", "what's in document X" — they want prose.
+ * @param {string} query
+ * @returns {'enumeration' | 'summarization'}
+ */
+export function detectAggregationSubType(query) {
+  const enumerationPatterns = [
+    /how\s+many/i,
+    /多少[种个类项]?/,
+    /有哪些/,
+    /list\s+(all|the|every)/i,
+    /列出[所全]?[有部]/i,
+    /列举/,
+    /\bcount\b/i,
+    /\benumerate\b/i,
+    /what\s+are\s+(?:the|all)\b/i,
+    /都有(?:什么|哪些)/,
+    /types?\s+of\b/i,
+    /kinds?\s+of\b/i,
+    /categories\s+of\b/i,
+    /多少种/,
+    /几[种个类项]/
+  ];
+
+  for (const p of enumerationPatterns) {
+    if (p.test(query)) return 'enumeration';
+  }
+  return 'summarization';
+}

@@ -1,4 +1,5 @@
 import { FeedbackRepo } from "../db/repositories/FeedbackRepo.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -22,7 +23,8 @@ export function recordFeedback(feedbackData) {
     comment,
     nodeIds = [],
     chunkIds = [],
-    sessionId
+    sessionId,
+    confidenceAtAnswer = null  // confidence score shown when user gave feedback
   } = feedbackData;
 
   if (!query || !rating) {
@@ -40,7 +42,8 @@ export function recordFeedback(feedbackData) {
       comment: comment || null,
       nodeIdsJson: JSON.stringify(nodeIds),
       chunkIdsJson: JSON.stringify(chunkIds),
-      sessionId: sessionId || null
+      sessionId: sessionId || null,
+      confidenceAtAnswer: confidenceAtAnswer != null ? Number(confidenceAtAnswer) : null
     });
 
     // Update chunk quality scores based on feedback
@@ -176,18 +179,29 @@ export function getChunksNeedingReview(limit = 20) {
 }
 
 /**
- * Apply feedback-based boosting to retrieval scores
+ * Apply feedback-based boosting to retrieval scores.
+ * Uses learned multiplier from self-learning system.
  * @param {Array} chunks - Retrieved chunks
  * @returns {Array} Chunks with adjusted scores
  */
 export function applyFeedbackBoost(chunks) {
+  // Read learned multiplier (default 1.0, range [0.5, 3.0])
+  let multiplier = 1.0;
+  try {
+    const stored = DatasetConfigRepo.get('learning:feedback_boost_multiplier');
+    if (stored != null) {
+      const v = parseFloat(stored);
+      if (Number.isFinite(v)) multiplier = Math.max(0.5, Math.min(3.0, v));
+    }
+  } catch (_) { /* no dataset context */ }
+
   return chunks.map(chunk => {
     const feedbackScore = chunk.feedback_score || 0;
     const baseScore = chunk.score || 0.5;
 
-    // Apply small adjustment based on historical feedback
-    // Range: -0.1 to +0.1
-    const adjustment = Math.max(-0.1, Math.min(0.1, feedbackScore));
+    // Apply feedback_score × learned multiplier, capped at ±0.3
+    const rawAdj = feedbackScore * multiplier;
+    const adjustment = Math.max(-0.3, Math.min(0.3, rawAdj));
 
     return {
       ...chunk,
@@ -195,6 +209,74 @@ export function applyFeedbackBoost(chunks) {
       feedback_adjusted: adjustment !== 0
     };
   });
+}
+
+/**
+ * Apply learned penalties to chunks: node penalties + chunk penalties + known issues.
+ * Called after applyFeedbackBoost in the retrieval pipeline.
+ * @param {Array} chunks - Retrieved chunks (with scores)
+ * @param {string} query - User query
+ * @returns {Array} Chunks with penalty-adjusted scores
+ */
+export function applyLearnedPenalties(chunks, query) {
+  // Load node penalties from config
+  let nodePenalties = {};
+  try {
+    const json = DatasetConfigRepo.get('learning:node_penalties_json');
+    if (json) nodePenalties = JSON.parse(json);
+  } catch (_) { /* ignore parse errors */ }
+
+  const hasNodePenalties = Object.keys(nodePenalties).length > 0;
+
+  // Cache known-issues lookups per node to avoid redundant DB queries
+  // (many chunks share the same node_id)
+  const knownIssueCache = new Map();
+  const queryPattern = extractQueryPattern(query);
+
+  return chunks.map(chunk => {
+    let penalty = 0;
+
+    // Node penalty
+    if (hasNodePenalties && chunk.node_id && nodePenalties[chunk.node_id]) {
+      penalty += nodePenalties[chunk.node_id]; // negative number
+    }
+
+    // Known issues check — cached per node_id
+    if (chunk.node_id) {
+      if (!knownIssueCache.has(chunk.node_id)) {
+        knownIssueCache.set(chunk.node_id, _checkNodeIssue(queryPattern, chunk.node_id));
+      }
+      if (knownIssueCache.get(chunk.node_id)) {
+        penalty -= 0.1;
+      }
+    }
+
+    if (penalty === 0) return chunk;
+
+    return {
+      ...chunk,
+      score: Math.max(0, (chunk.score || 0) + penalty),
+      learning_penalty: penalty
+    };
+  });
+}
+
+/**
+ * Internal: check a single node for known issues (used by applyLearnedPenalties cache).
+ * @param {string} queryPattern - Pre-extracted query pattern
+ * @param {string} nodeId - Node ID
+ * @returns {boolean}
+ */
+function _checkNodeIssue(queryPattern, nodeId) {
+  try {
+    const relevance = FeedbackRepo.getNodeRelevance(nodeId, queryPattern);
+    if (!relevance) return false;
+    const total = relevance.positive_count + relevance.negative_count;
+    const negRate = relevance.negative_count / total;
+    return total >= 3 && (negRate > 0.4 || relevance.negative_count >= 5);
+  } catch (_) {
+    return false;
+  }
 }
 
 /**
@@ -215,10 +297,11 @@ export function checkKnownIssues(query, nodeId) {
 
     const negativeRate = relevance.negative_count / total;
 
-    if (negativeRate > 0.6) {
+    if (negativeRate > 0.4 || relevance.negative_count >= 5) {
       return {
         has_issues: true,
         negative_rate: Math.round(negativeRate * 100),
+        negative_count: relevance.negative_count,
         message: 'This node has received negative feedback for similar queries'
       };
     }

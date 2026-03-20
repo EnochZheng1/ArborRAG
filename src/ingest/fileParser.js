@@ -159,30 +159,106 @@ async function parsePdfFile(filePath) {
 
   const pageTexts = [];
 
+  // INTERIM multi-column layout detection.
+  // Limitations: scanned/image-based PDFs, complex tables, sidebars,
+  // and 3+ column layouts remain unsolved.
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent({ includeMarkedContent: false });
 
-    // Reconstruct lines by grouping items with the same Y coordinate.
-    // Items are emitted top-to-bottom by pdfjs, so we compare rounded Y values.
-    const lines = [];
-    let lastY = null;
-    let lineItems = [];
-
+    // Collect text items with positional data
+    const items = [];
     for (const item of content.items) {
-      const str = item.str;
-      if (!str) continue;
-      const y = Math.round(item.transform[5]);
-      if (lastY !== null && Math.abs(y - lastY) > 3) {
-        if (lineItems.length) lines.push(lineItems.join(""));
-        lineItems = [];
-      }
-      lineItems.push(str);
-      lastY = y;
+      if (!item.str || !item.str.trim()) continue;
+      items.push({
+        str: item.str,
+        x: item.transform[4],
+        y: item.transform[5],
+        width: item.width || item.str.length * 5 // fallback char width estimate
+      });
     }
-    if (lineItems.length) lines.push(lineItems.join(""));
 
-    const pageText = lines.join("\n").trim();
+    if (items.length === 0) continue;
+
+    // Sort by Y descending (top-to-bottom), then X ascending (left-to-right)
+    items.sort((a, b) => b.y - a.y || a.x - b.x);
+
+    // Group into lines by Y-tolerance (±3px)
+    const lines = [];
+    let currentLine = [items[0]];
+    for (let j = 1; j < items.length; j++) {
+      if (Math.abs(items[j].y - currentLine[0].y) <= 3) {
+        currentLine.push(items[j]);
+      } else {
+        // Sort line items by X position (left-to-right)
+        currentLine.sort((a, b) => a.x - b.x);
+        lines.push(currentLine);
+        currentLine = [items[j]];
+      }
+    }
+    if (currentLine.length > 0) {
+      currentLine.sort((a, b) => a.x - b.x);
+      lines.push(currentLine);
+    }
+
+    // Estimate median character width for column gap detection
+    const charWidths = items
+      .filter(it => it.str.length > 0 && it.width > 0)
+      .map(it => it.width / it.str.length);
+    const medianCharWidth = charWidths.length > 0
+      ? charWidths.sort((a, b) => a - b)[Math.floor(charWidths.length / 2)]
+      : 6; // fallback
+    const columnGapThreshold = medianCharWidth * 4;
+
+    // Detect if page has multi-column layout by checking for consistent X-gaps
+    let hasColumns = false;
+    const gapPositions = [];
+    for (const line of lines) {
+      if (line.length < 2) continue;
+      for (let j = 1; j < line.length; j++) {
+        const gap = line[j].x - (line[j - 1].x + line[j - 1].width);
+        if (gap > columnGapThreshold) {
+          gapPositions.push(line[j].x);
+        }
+      }
+    }
+
+    // If enough lines have a gap at a similar X position, treat as multi-column
+    if (gapPositions.length >= 3) {
+      gapPositions.sort((a, b) => a - b);
+      const medianGapX = gapPositions[Math.floor(gapPositions.length / 2)];
+      // Check if at least 30% of lines with 2+ items have a gap near the median
+      const tolerance = medianCharWidth * 6;
+      const gapsNearMedian = gapPositions.filter(g => Math.abs(g - medianGapX) < tolerance).length;
+      hasColumns = gapsNearMedian >= Math.max(3, lines.length * 0.2);
+
+      if (hasColumns) {
+        // Split items into left and right columns based on the median gap X
+        const splitX = medianGapX - columnGapThreshold / 2;
+        const leftLines = [];
+        const rightLines = [];
+
+        for (const line of lines) {
+          const left = line.filter(it => it.x + it.width / 2 < splitX);
+          const right = line.filter(it => it.x + it.width / 2 >= splitX);
+          if (left.length > 0) leftLines.push(left);
+          if (right.length > 0) rightLines.push(right);
+        }
+
+        const joinLine = (lineItems) => lineItems.map(it => it.str).join('');
+        const leftText = leftLines.map(joinLine).join('\n').trim();
+        const rightText = rightLines.map(joinLine).join('\n').trim();
+        const pageText = [leftText, rightText].filter(Boolean).join('\n\n');
+        if (pageText) pageTexts.push(pageText);
+        continue; // skip single-column path
+      }
+    }
+
+    // Single-column: join items per line normally
+    const pageText = lines
+      .map(line => line.map(it => it.str).join(''))
+      .join('\n')
+      .trim();
     if (pageText) pageTexts.push(pageText);
   }
 

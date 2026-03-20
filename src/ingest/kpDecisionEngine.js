@@ -17,13 +17,25 @@ import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { rethrowIfRateLimit } from "../utils/rateLimitError.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
+import { NodeRepo } from "../db/repositories/NodeRepo.js";
 
-// ── Thresholds ────────────────────────────────────────────────────────────────
+// ── Thresholds (config-driven, learned by self-learning system) ──────────────
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 
-const IGNORE_CONF_THRESHOLD   = 0.35;
-const IGNORE_MIN_LENGTH       = 15;
-const MERGE_AUTO_THRESHOLD    = 0.80;
-const REPLACE_AUTO_CONF       = 0.85;
+function getThreshold(key, fallback) {
+  try {
+    const v = DatasetConfigRepo.get(key);
+    if (v != null) { const n = parseFloat(v); if (Number.isFinite(n)) return n; }
+  } catch (_) { /* dataset context may not be active during tests */ }
+  return fallback;
+}
+
+const IGNORE_MIN_LENGTH = 15;
+
+// Getter functions replace const — one sync SQLite call per KP, negligible cost
+function IGNORE_CONF_THRESHOLD_VAL()  { return getThreshold('learning:ignore_conf_threshold', 0.35); }
+function MERGE_AUTO_THRESHOLD_VAL()   { return getThreshold('learning:merge_auto_threshold', 0.80); }
+function REPLACE_AUTO_CONF_VAL()      { return getThreshold('learning:replace_auto_conf', 0.85); }
 
 // ── Authority ranks ───────────────────────────────────────────────────────────
 
@@ -101,6 +113,25 @@ const TEMPORAL_PATTERNS = [
   /\b20\d{2}-\d{2}(?:-\d{2})?\b/,                // 2024-01 or 2024-01-15
   /\bQ[1-4]\s*20\d{2}\b/i,                        // Q1 2024
   /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[,.\s]+20\d{2}\b/i,
+  /\bsupersed(?:es?|ed|ing)\b/i,
+  /\bdeprecat(?:es?|ed|ing)\b/i,
+  /\bexpir(?:es?|ed|ing)\b/i,
+  /\bobsolet(?:e|ed|ing)\b/i,
+  /\bno\s+longer\s+(?:valid|applicable|in\s+effect)\b/i,
+  /\bformerly\b/i,
+  /\bpreviously\b/i,
+  /\breplac(?:es?|ed|ing)\b/i,
+  /\bversion\s+\d/i,
+  /\bv\d+\.\d+/i,
+  /\bamend(?:s|ed|ment|ing)\b/i,
+  /\brescind(?:s|ed|ing)\b/i,
+  /\bwithdrawn\b/i,
+  /\bvalid\s+(?:through|until|from)\b/i,
+  /\beffective\s+(?:date|from|until)\b/i,
+  // CJK temporal signals
+  /已(?:废止|过期|失效|替换|更新)/,
+  /生效日期/,
+  /有效期至/,
 ];
 
 function detectTemporalSignal(content) {
@@ -175,7 +206,7 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
   if (content.length < IGNORE_MIN_LENGTH) {
     return { action: "IGNORE", reason: "content too short" };
   }
-  if ((kp.confidence ?? 1) < IGNORE_CONF_THRESHOLD) {
+  if ((kp.confidence ?? 1) < IGNORE_CONF_THRESHOLD_VAL()) {
     return { action: "IGNORE", reason: `low confidence (${kp.confidence})` };
   }
   if (isBoilerplate(content)) {
@@ -197,12 +228,40 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
     }
   }
 
+  // ── [2b] Sibling-node version scan ────────────────────────────────────────
+  // When within-node scan found no match or only a weak match, also scan
+  // sibling nodes (same parent) for similar KPs. Catches the common case
+  // where a fact drifted to a neighboring topic node. Higher threshold (0.75)
+  // to avoid false cross-node matches.
+  if ((!bestCandidate || bestSim < 0.55) && nodeId) {
+    try {
+      const node = NodeRepo.findById(nodeId);
+      const parentId = node?.parent_id;
+      if (parentId) {
+        const siblings = NodeRepo.findByParent(parentId).filter(n => n.node_id !== nodeId);
+        for (const sib of siblings.slice(0, 5)) {
+          const sibCandidates = ChunkRepo.findSimilarInNode(sib.node_id, content, 5, excludeChunkId);
+          for (const sibCand of sibCandidates) {
+            const sim = wordDiceSimilarity(content, sibCand.content_clean || "");
+            if (sim >= 0.75 && sim > bestSim) {
+              bestSim = sim;
+              bestCandidate = sibCand;
+              logger.debug(`Sibling scan: found match in "${sib.name}" (Dice ${sim.toFixed(2)})`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug(`Sibling scan skipped: ${err.message}`);
+    }
+  }
+
   // True duplicate with many existing KPs → IGNORE
   if (bestSim >= 0.98 && candidates.length >= 3) {
     return { action: "IGNORE", reason: `exact duplicate (Dice ${bestSim.toFixed(2)})` };
   }
 
-  if (bestCandidate && bestSim >= MERGE_AUTO_THRESHOLD) {
+  if (bestCandidate && bestSim >= MERGE_AUTO_THRESHOLD_VAL()) {
     // Check for value mismatch before auto-merging
     if (hasValueMismatch(content, bestCandidate.content_clean || "")) {
       // Values differ — fall through to LLM conflict detection
@@ -230,7 +289,7 @@ export async function resolveKPAction(kp, nodeId, documentId, options = {}) {
     const incomingRank = authorityRank(kp.authority_level);
     const existingRank = authorityRank(bestCandidate.authority_level);
 
-    if (incomingRank >= existingRank && (kp.confidence ?? 1) >= REPLACE_AUTO_CONF) {
+    if (incomingRank >= existingRank && (kp.confidence ?? 1) >= REPLACE_AUTO_CONF_VAL()) {
       // Auto-replace: mark existing as superseded, return flag to insert new one
       // The actual insert is done by the caller (assignKPToNode) after this returns.
       // We store the old id so caller can supersede it after insertion.

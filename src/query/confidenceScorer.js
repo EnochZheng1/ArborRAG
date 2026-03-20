@@ -1,9 +1,21 @@
 /**
  * Confidence Calibration Module
  *
- * Provides nuanced confidence scoring based on multiple factors
- * Uses conservative estimates - it's better to underestimate confidence
+ * Provides nuanced confidence scoring based on multiple factors.
+ * Returns TWO signals:
+ *   - retrieval_confidence: how well did we find relevant sources?
+ *   - answer_groundedness:  how faithful is the answer to those sources?
+ * Plus a combined `score` for backward compatibility.
+ *
+ * Uses conservative estimates - it's better to underestimate confidence.
  */
+
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
+import {
+  CONFIDENCE_LINEAR_SCALE, CONFIDENCE_RECENCY_WEIGHT,
+  CONFIDENCE_FEW_CHUNKS_PENALTY, CONFIDENCE_SINGLE_NODE_PENALTY,
+  GROUNDEDNESS_HALLUCINATION_CAP, NO_ANSWER_FLOOR
+} from "./scoringConfig.js";
 
 /**
  * Calculate calibrated confidence score
@@ -39,64 +51,76 @@ export function calculateConfidence(context) {
     query_coverage: calculateQueryCoverage(query, chunks)
   };
 
-  // Weights for different query types
-  const weights = getWeightsForQueryType(queryType);
-
-  // Calculate weighted score
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  for (const [factor, score] of Object.entries(factors)) {
-    const weight = weights[factor] || 1;
-    weightedSum += score * weight;
-    totalWeight += weight;
+  // ── Split 1: Retrieval confidence ──────────────────────────────────────────
+  // How well did we find relevant sources? (no answer dependency)
+  const retrievalFactors = ['source_coverage', 'retrieval_quality', 'query_coverage', 'authority_score'];
+  const retrievalWeights = getWeightsForQueryType(queryType);
+  let retrievalSum = 0, retrievalW = 0;
+  for (const f of retrievalFactors) {
+    const w = retrievalWeights[f] || 1;
+    retrievalSum += (factors[f] || 0) * w;
+    retrievalW += w;
   }
+  let retrievalConfidence = retrievalW > 0 ? retrievalSum / retrievalW : 0;
+  retrievalConfidence *= CONFIDENCE_LINEAR_SCALE;
 
-  let overallScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
-
-  // Apply mild linear scaling instead of sqrt dampening.
-  // sqrt() was compressing ALL scores into a 0.5–0.7 band, making confidence
-  // meaningless (a perfect answer scored only 0.07 higher than a poor one).
-  // Linear scaling preserves the relative differences between good and bad answers.
-  overallScore = overallScore * 0.92;
-
-  // Query specificity adjustment (R8): specific fact queries with corroboration
-  // deserve a slight boost; vague queries with few sources deserve a slight penalty.
-  const isSpecificQuery = /^(?:what|who|when|where|which|how\s+(?:much|many|often|long))\s+(?:is|are|was|were|does|do|did|will)\b/i.test(query);
-  const isVagueQuery = /^(?:tell\s+me\s+about|explain|describe|discuss|summarize|overview)/i.test(query);
-
-  if (isSpecificQuery && chunks.length >= 2) {
-    overallScore = Math.min(1.0, overallScore * 1.08); // Slight boost for fact queries with corroboration
-  }
-  if (isVagueQuery && chunks.length < 4) {
-    overallScore *= 0.92; // Slight penalty for vague queries with few sources
-  }
-
-  // Recency factor (R9): blend source freshness into the score.
-  // Newer sources are more likely to be current and accurate.
   const recencyFactor = calculateRecencyFactor(chunks);
-  overallScore = overallScore * 0.85 + recencyFactor * 0.15;
+  retrievalConfidence = retrievalConfidence * (1 - CONFIDENCE_RECENCY_WEIGHT) + recencyFactor * CONFIDENCE_RECENCY_WEIGHT;
 
-  // Additional penalties
-  // Penalty for few chunks
-  if (chunks.length < 3) {
-    overallScore *= 0.85;
-  }
-  // Penalty for single node
-  if (nodes.length <= 1) {
-    overallScore *= 0.9;
+  if (chunks.length < 3) retrievalConfidence *= CONFIDENCE_FEW_CHUNKS_PENALTY;
+  if (nodes.length <= 1) retrievalConfidence *= CONFIDENCE_SINGLE_NODE_PENALTY;
+
+  retrievalConfidence = Number.isFinite(retrievalConfidence)
+    ? Math.max(0.05, Math.min(0.95, retrievalConfidence)) : 0.1;
+
+  // ── Split 2: Answer groundedness ───────────────────────────────────────────
+  // How faithful is the answer to the sources?
+  let answerGroundedness = factors.answer_grounding || 0.2;
+
+  // Stricter hallucination detection: if answer contains specific values
+  // (numbers/dates/currency) not found in ANY source chunk, cap groundedness
+  if (answer) {
+    const answerValues = extractSpecificValues(answer);
+    if (answerValues.length > 0) {
+      const allContent = chunks
+        .map(c => (c.content || c.content_clean || '').toLowerCase())
+        .join(' ');
+      let foundCount = 0;
+      for (const val of answerValues) {
+        if (allContent.includes(val.toLowerCase())) foundCount++;
+      }
+      const ratio = foundCount / answerValues.length;
+      if (ratio < 0.3) {
+        answerGroundedness = Math.min(answerGroundedness, GROUNDEDNESS_HALLUCINATION_CAP);
+      }
+    }
   }
 
-  // Clamp to reasonable range — guard against NaN propagating into JSON as null
+  // "No answer" floor: if answer says it can't find info, both scores are low
+  const noAnswerPhrases = /\b(not found|cannot find|don'?t have|no information|no relevant|unable to find|没有找到|无法找到|没有相关)\b/i;
+  if (answer && noAnswerPhrases.test(answer)) {
+    retrievalConfidence = Math.min(retrievalConfidence, NO_ANSWER_FLOOR);
+    answerGroundedness = Math.min(answerGroundedness, NO_ANSWER_FLOOR);
+  }
+
+  answerGroundedness = Number.isFinite(answerGroundedness)
+    ? Math.max(0.05, Math.min(0.95, answerGroundedness)) : 0.1;
+
+  // Blend source agreement into groundedness (corroboration signal)
+  answerGroundedness = answerGroundedness * 0.7 + (factors.source_agreement || 0.3) * 0.3;
+  answerGroundedness = Math.max(0.05, Math.min(0.95, answerGroundedness));
+
+  // ── Combined score (backward compat) ───────────────────────────────────────
+  let overallScore = retrievalConfidence * 0.5 + answerGroundedness * 0.5;
   overallScore = Number.isFinite(overallScore)
-    ? Math.max(0.05, Math.min(0.95, overallScore))
-    : 0.1;
+    ? Math.max(0.05, Math.min(0.95, overallScore)) : 0.1;
 
-  // Determine confidence level (with stricter thresholds)
   const level = getConfidenceLevel(overallScore);
 
   return {
     score: Math.round(overallScore * 100) / 100,
+    retrieval_confidence: Math.round(retrievalConfidence * 100) / 100,
+    answer_groundedness: Math.round(answerGroundedness * 100) / 100,
     level,
     factors,
     explanation: generateExplanation(factors, level)
@@ -351,12 +375,21 @@ function getWeightsForQueryType(queryType) {
 }
 
 /**
- * Get confidence level label (stricter thresholds)
+ * Get confidence level label (config-driven thresholds from learning system)
  */
 function getConfidenceLevel(score) {
-  if (score >= 0.75) return 'high';
-  if (score >= 0.55) return 'medium';
-  if (score >= 0.35) return 'low';
+  let high = 0.75, medium = 0.55, low = 0.35;
+  try {
+    const h = DatasetConfigRepo.get('learning:conf_threshold_high');
+    const m = DatasetConfigRepo.get('learning:conf_threshold_medium');
+    const l = DatasetConfigRepo.get('learning:conf_threshold_low');
+    if (h != null) { const v = parseFloat(h); if (Number.isFinite(v)) high = v; }
+    if (m != null) { const v = parseFloat(m); if (Number.isFinite(v)) medium = v; }
+    if (l != null) { const v = parseFloat(l); if (Number.isFinite(v)) low = v; }
+  } catch (_) { /* use defaults if no dataset context */ }
+  if (score >= high) return 'high';
+  if (score >= medium) return 'medium';
+  if (score >= low) return 'low';
   return 'very_low';
 }
 
@@ -432,6 +465,24 @@ function calculateRecencyFactor(chunks) {
 }
 
 // Helper functions
+
+/**
+ * Extract specific values (numbers+units, currency, dates) from text.
+ * Used for hallucination detection — if the answer quotes values not in sources.
+ */
+function extractSpecificValues(text) {
+  const vals = [];
+  for (const m of text.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(%|percent|days?|hours?|months?|years?|minutes?|weeks?)\b/gi)) {
+    vals.push(m[0].toLowerCase().replace(/\s+/g, ' ').trim());
+  }
+  for (const m of text.matchAll(/[$¥€£]\s?[\d,]+(?:\.\d+)?/g)) {
+    vals.push(m[0].replace(/\s/g, ''));
+  }
+  for (const m of text.matchAll(/\b\d{4}-\d{2}(?:-\d{2})?\b/g)) {
+    vals.push(m[0]);
+  }
+  return vals;
+}
 
 function extractTerms(text) {
   if (!text) return [];

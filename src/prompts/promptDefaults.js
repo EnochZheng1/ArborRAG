@@ -1081,6 +1081,60 @@ Return ONLY a JSON array of top-level nodes with nested children:
 JSON array:`
   },
 
+  // ── Aggregation Enumeration ──────────────────────────────────────────────
+
+  aggregation_enumeration_en: {
+    label: "Aggregation Enumeration (English)",
+    category: QUERY,
+    description: "Answers enumeration queries using structured tree data (count + items list)",
+    variables: ["query", "count", "parent_name", "items_list", "supporting_chunks"],
+    default: `Answer the user's question using the structured data below.
+
+Question: {{query}}
+
+The knowledge base has exactly {{count}} items under "{{parent_name}}":
+
+{{items_list}}
+
+Supporting details:
+{{supporting_chunks}}
+
+Rules:
+- State the exact count ({{count}}) as a hard fact — do not guess or approximate.
+- List each item by name with a brief description from the data above.
+- If the user asked "how many", lead with the count.
+- If the user asked "list all", list every item.
+- Be concise and cite the item names exactly as shown.
+
+Answer:`
+  },
+
+  aggregation_enumeration_zh: {
+    label: "Aggregation Enumeration (Chinese)",
+    category: QUERY,
+    description: "使用结构化树数据回答枚举查询（数量+列表）",
+    variables: ["query", "count", "parent_name", "items_list", "supporting_chunks"],
+    default: `根据以下结构化数据回答用户的问题。
+
+问题：{{query}}
+
+知识库中"{{parent_name}}"下共有 {{count}} 个项目：
+
+{{items_list}}
+
+补充细节：
+{{supporting_chunks}}
+
+规则：
+- 明确说明准确数量（{{count}}），不要猜测或近似。
+- 按名称列出每个项目，附简短描述。
+- 如果用户问"有多少"，先说数量。
+- 如果用户问"列出所有"，列出每个项目。
+- 简洁回答，准确引用项目名称。
+
+回答：`
+  },
+
   // ── Manage (Chatbot) ────────────────────────────────────────────────────────
 
   manageIntent: {

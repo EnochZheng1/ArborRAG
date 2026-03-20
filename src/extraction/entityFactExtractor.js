@@ -23,7 +23,7 @@ import { logger } from "../utils/logger.js";
  * @returns {Promise<object>} Extracted entities and facts
  */
 export async function extractEntitiesAndFacts(chunk, options = {}) {
-  const { useLLM = true, existingEntities = [] } = options;
+  const { useLLM = true, existingEntities = [], targetAttributes = [] } = options;
 
   const content = chunk.content || chunk.content_clean || '';
   if (!content || content.length < 20) {
@@ -49,8 +49,18 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
         : `\nKnown entities (reuse exact names if referring to same thing): ${existingEntities.slice(0, 15).map(e => e.name).join(', ')}`)
       : '';
 
+    // Attribute-aware hint: when target node has schema-defined attributes, instruct
+    // the LLM to map extracted facts to specific attribute names.
+    let attributeHint = '';
+    if (targetAttributes.length > 0) {
+      const attrList = targetAttributes.map(a => `- ${a.name} (${a.type}): ${a.label}`).join('\n');
+      attributeHint = isChineseLang(lang)
+        ? `\n\n目标属性 — 请将提取的事实映射到以下属性名称（在每个fact的"attribute_name"字段中填写）：\n${attrList}`
+        : `\n\nTarget attributes — map extracted facts to these attribute names (set "attribute_name" field on each fact):\n${attrList}`;
+    }
+
     // Use bilingual prompt based on content language
-    const prompt = getPrompt('entityFactExtraction', lang, content.slice(0, 3000), existingHint);
+    const prompt = getPrompt('entityFactExtraction', lang, content.slice(0, 3000), existingHint + attributeHint);
 
     const text = await callLLM({ prompt, temperature: 0.1, maxOutputTokens: 4000, taskName: 'entity_extraction' }) || '';
 
@@ -95,11 +105,13 @@ export async function extractEntitiesAndFacts(chunk, options = {}) {
     })).filter(e => e.name && e.name.length >= 2);
 
     // Validate and clean facts
+    const validAttrNames = new Set(targetAttributes.map(a => a.name));
     const facts = (extracted.facts || []).map(f => ({
       content: String(f.content || '').trim(),
       type: validateFactType(f.type),
       confidence: typeof f.confidence === 'number' ? Math.min(1, Math.max(0, f.confidence)) : 0.8,
-      entities: Array.isArray(f.entities) ? f.entities.map(e => String(e).trim()) : []
+      entities: Array.isArray(f.entities) ? f.entities.map(e => String(e).trim()) : [],
+      attribute_name: (f.attribute_name && validAttrNames.has(f.attribute_name)) ? f.attribute_name : null
     })).filter(f => f.content && f.content.length >= 10);
 
     return { entities, facts };
@@ -365,7 +377,8 @@ export function saveExtraction(extraction, chunkId, options = {}) {
       const result = EntityFactRepo.insertFact({
         content: fact.content,
         factType: fact.type,
-        confidence: fact.confidence
+        confidence: fact.confidence,
+        attributeName: fact.attribute_name || null
       });
       factId = result.lastInsertRowid;
     }
@@ -407,9 +420,19 @@ export function saveExtraction(extraction, chunkId, options = {}) {
 export async function processChunkForExtraction(chunk, options = {}) {
   const existingEntities = EntityFactRepo.getRecent(50);
 
+  // Look up schema-defined attributes for the chunk's node (if any)
+  let targetAttributes = options.targetAttributes || [];
+  if (targetAttributes.length === 0 && chunk.node_id) {
+    try {
+      const { NodeRepo } = await import("../db/repositories/NodeRepo.js");
+      targetAttributes = NodeRepo.getAttributes(chunk.node_id);
+    } catch (_) { /* non-fatal */ }
+  }
+
   const extraction = await extractEntitiesAndFacts(chunk, {
     ...options,
-    existingEntities
+    existingEntities,
+    targetAttributes
   });
 
   if (extraction.entities.length > 0 || extraction.facts.length > 0) {

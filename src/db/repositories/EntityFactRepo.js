@@ -83,10 +83,10 @@ export const EntityFactRepo = {
   // ── Fact writes ───────────────────────────────────────────────────────────────
 
   /** Insert a new fact. Returns run() result. */
-  insertFact({ content, factType, confidence }) {
+  insertFact({ content, factType, confidence, attributeName = null }) {
     return db.prepare(
-      "INSERT INTO facts (content, fact_type, confidence) VALUES (?, ?, ?)"
-    ).run(content, factType, confidence);
+      "INSERT INTO facts (content, fact_type, confidence, attribute_name) VALUES (?, ?, ?, ?)"
+    ).run(content, factType, confidence, attributeName);
   },
 
   /** Link an entity to a fact (INSERT OR IGNORE). */
@@ -433,5 +433,61 @@ export const EntityFactRepo = {
       GROUP BY e.node_id
       LIMIT 10
     `).all();
+  },
+
+  // ── Attribute-based queries (Phase 2C) ──────────────────────────────────────
+
+  /** Get facts by attribute name, optionally filtered to specific entity IDs. */
+  getFactsByAttribute(attributeName, entityIds = []) {
+    if (entityIds.length > 0) {
+      const ph = entityIds.map(() => "?").join(",");
+      return db.prepare(`
+        SELECT f.*, e.name as entity_name, e.type as entity_type
+        FROM facts f
+        JOIN entity_facts ef ON f.id = ef.fact_id
+        JOIN entities e ON ef.entity_id = e.id
+        WHERE f.attribute_name = ? AND f.status = 'active'
+          AND e.id IN (${ph})
+        ORDER BY f.confidence DESC
+      `).all(attributeName, ...entityIds);
+    }
+    return db.prepare(`
+      SELECT f.*, e.name as entity_name, e.type as entity_type
+      FROM facts f
+      JOIN entity_facts ef ON f.id = ef.fact_id
+      JOIN entities e ON ef.entity_id = e.id
+      WHERE f.attribute_name = ? AND f.status = 'active'
+      ORDER BY f.confidence DESC
+    `).all(attributeName);
+  },
+
+  /** Search facts by attribute value using LIKE. */
+  searchFactsByAttributeValue(attributeName, searchValue, limit = 20) {
+    return db.prepare(`
+      SELECT f.*, e.name as entity_name, e.type as entity_type
+      FROM facts f
+      JOIN entity_facts ef ON f.id = ef.fact_id
+      JOIN entities e ON ef.entity_id = e.id
+      WHERE f.attribute_name = ? AND f.status = 'active'
+        AND f.content LIKE ?
+      ORDER BY f.confidence DESC
+      LIMIT ?
+    `).all(attributeName, `%${searchValue}%`, limit);
+  },
+
+  /** Get all facts with attribute_name set, grouped by entity. */
+  getStructuredFactsForEntities(entityIds, limit = 50) {
+    if (!entityIds.length) return [];
+    const ph = entityIds.map(() => "?").join(",");
+    return db.prepare(`
+      SELECT f.*, f.attribute_name, e.name as entity_name, e.id as entity_id
+      FROM facts f
+      JOIN entity_facts ef ON f.id = ef.fact_id
+      JOIN entities e ON ef.entity_id = e.id
+      WHERE f.attribute_name IS NOT NULL AND f.status = 'active'
+        AND e.id IN (${ph})
+      ORDER BY e.name, f.attribute_name
+      LIMIT ?
+    `).all(...entityIds, limit);
   }
 };

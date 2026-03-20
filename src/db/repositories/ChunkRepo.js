@@ -306,6 +306,13 @@ export const ChunkRepo = {
     ).run(newChunkId, existingId);
   },
 
+  /** Move a chunk to a different node. */
+  moveToNode(chunkId, newNodeId) {
+    return db.prepare(
+      "UPDATE chunks SET node_id = ? WHERE id = ?"
+    ).run(newNodeId, chunkId);
+  },
+
   /** Delete a chunk, its FTS entry, and its embedding by primary key. */
   deleteById(id) {
     db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?').run(String(id));

@@ -12,11 +12,17 @@ import { wordDiceSimilarity } from "./knowledgeExtractor.js";
 import { generateNodeId, ensureRootNode } from "./nodeHierarchy.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
 
-// Lowered from 0.40 → 0.35: slightly more aggressive reuse.
-// Node lookup now uses a direct DB sibling scan (not BM25) so every sibling
-// is considered; a lower threshold is safe because we're comparing against the
-// full sibling set rather than a potentially incomplete BM25 top-10.
-export const TOPIC_MATCH_THRESHOLD = 0.35;
+// Config-driven, learned by self-learning system. Falls back to 0.35.
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
+
+function getTopicMatchThreshold() {
+  try {
+    const v = DatasetConfigRepo.get('learning:topic_match_threshold');
+    if (v != null) { const n = parseFloat(v); if (Number.isFinite(n)) return n; }
+  } catch (_) { /* dataset context may not be active */ }
+  return 0.35;
+}
+export const TOPIC_MATCH_THRESHOLD = 0.35; // kept for external imports; internal code uses getter
 // wordDiceSimilarity imported from knowledgeExtractor.js
 
 // Generic/placeholder topic hints that the LLM returns when it can't classify.
@@ -135,7 +141,7 @@ export async function findOrCreateTopicNode(topicName, parentId, options = {}) {
       }
     }
 
-    if (bestScore >= TOPIC_MATCH_THRESHOLD) {
+    if (bestScore >= getTopicMatchThreshold()) {
       logger.debug(`Topic node reused: "${bestMatch.name}" (score=${bestScore.toFixed(2)}) for "${topicName}"`);
       return { ...bestMatch, _created: false };
     }
@@ -285,6 +291,44 @@ export async function buildTopicalHierarchy(kps, docTitle, documentId, options =
   }
 
   for (const [topicName, topicKPs] of byTopic) {
+    // ── General node cap: sub-group when a single document sends >15 KPs to General ──
+    if (topicName === 'General' && topicKPs.length > 15) {
+      // Sub-group by subtopic_hint where available
+      const bySubHint = new Map();
+      const unsorted = [];
+      for (const kp of topicKPs) {
+        const sub = (kp.subtopic_hint || '').trim();
+        if (sub) {
+          if (!bySubHint.has(sub)) bySubHint.set(sub, []);
+          bySubHint.get(sub).push(kp);
+        } else {
+          unsorted.push(kp);
+        }
+      }
+      // For remaining unsorted KPs, use docTitle as secondary grouping key
+      if (unsorted.length > 15 && docTitle) {
+        const subName = `General — ${docTitle}`.slice(0, 60);
+        if (!bySubHint.has(subName)) bySubHint.set(subName, []);
+        bySubHint.get(subName).push(...unsorted);
+      } else if (unsorted.length > 0) {
+        if (!bySubHint.has('General')) bySubHint.set('General', []);
+        bySubHint.get('General').push(...unsorted);
+      }
+      // Create sub-nodes under the General domain node
+      const generalNode = await findOrCreateTopicNode('General', "root", { useLLM });
+      if (generalNode._created) newNodes.push(generalNode);
+      for (const [subName, subKPs] of bySubHint) {
+        if (subName === 'General') {
+          for (const kp of subKPs) nodeMap.set(kp.index, generalNode.node_id);
+        } else {
+          const subNode = await findOrCreateTopicNode(subName, generalNode.node_id, { useLLM });
+          if (subNode._created) newNodes.push(subNode);
+          for (const kp of subKPs) nodeMap.set(kp.index, subNode.node_id);
+        }
+      }
+      continue;
+    }
+
     const domainNode = await findOrCreateTopicNode(topicName, "root", { useLLM });
     if (domainNode._created) newNodes.push(domainNode);
 
@@ -372,4 +416,88 @@ export function assignKPToNode(kp, nodeId, documentId) {
 
     return Number(chunkId);
   });
+}
+
+// ── General node health monitoring ────────────────────────────────────────────
+
+/**
+ * Get stats about "General" nodes — chunk count, sub-node count.
+ * Used by the /schema/health endpoint.
+ */
+export function getGeneralNodeStats() {
+  const allNodes = NodeRepo.getAllSortedByLevel();
+  const generalNodes = allNodes.filter(n => n.name === 'General' || n.name.startsWith('General —'));
+  let totalChunks = 0;
+  const nodes = [];
+  for (const node of generalNodes) {
+    const chunks = ChunkRepo.getForNodeLimited(node.node_id, 200);
+    totalChunks += chunks.length;
+    nodes.push({ node_id: node.node_id, name: node.name, chunk_count: chunks.length });
+  }
+  return { total_chunks: totalChunks, nodes, warning: totalChunks > 30 };
+}
+
+/**
+ * Reclassify KPs from "General" nodes to better-matching non-General nodes.
+ * Uses Dice similarity — zero LLM calls.
+ *
+ * @returns {{ moved: number, suggested: number, unchanged: number }}
+ */
+export function reclassifyGeneralKPs() {
+  const allNodes = NodeRepo.getAllSortedByLevel();
+  const generalNodes = allNodes.filter(n => n.name === 'General');
+  const nonGeneralNodes = allNodes.filter(n => n.name !== 'General' && !n.name.startsWith('General —'));
+
+  let moved = 0, suggested = 0, unchanged = 0;
+  const suggestions = [];
+
+  for (const gNode of generalNodes) {
+    const chunks = ChunkRepo.getForNode(gNode.node_id);
+
+    for (const chunk of chunks) {
+      const content = (chunk.content_clean || chunk.content || '').toLowerCase();
+      let bestNode = null;
+      let bestScore = 0;
+
+      for (const candidate of nonGeneralNodes) {
+        // Score against node name + keywords + summary + sample chunks
+        const nodeText = [
+          candidate.name,
+          candidate.node_summary || '',
+          candidate.node_description || ''
+        ].join(' ').toLowerCase();
+
+        const score = wordDiceSimilarity(content, nodeText);
+        if (score > bestScore) {
+          bestScore = score;
+          bestNode = candidate;
+        }
+      }
+
+      if (bestScore >= 0.6 && bestNode) {
+        // High confidence — auto-move
+        try {
+          ChunkRepo.moveToNode(chunk.id, bestNode.node_id);
+          NodeRepo.touch(bestNode.node_id);
+          moved++;
+        } catch (err) {
+          logger.warn(`Reclassify move failed for chunk ${chunk.id}: ${err.message}`);
+        }
+      } else if (bestScore >= 0.4 && bestNode) {
+        // Medium confidence — log suggestion only
+        suggestions.push({
+          chunk_id: chunk.id,
+          from_node: gNode.node_id,
+          to_node: bestNode.node_id,
+          to_name: bestNode.name,
+          score: bestScore
+        });
+        suggested++;
+      } else {
+        unchanged++;
+      }
+    }
+  }
+
+  return { moved, suggested, unchanged, suggestions };
 }

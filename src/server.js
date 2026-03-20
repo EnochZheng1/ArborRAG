@@ -33,6 +33,8 @@ import schemaRouter from "./routes/schema.js";
 import promptsRouter from "./routes/prompts.js";
 import manageRouter from "./routes/manage.js";
 import schemaInterviewRouter from "./routes/schemaInterview.js";
+import learningRouter from "./routes/learning.js";
+import { runLearningCycleAllDatasets } from "./learning/learningScheduler.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -146,6 +148,7 @@ app.use("/schema/interview", schemaInterviewRouter);
 app.use("/schema", schemaRouter);
 app.use("/prompts", promptsRouter);
 app.use("/manage", manageRouter);
+app.use("/learning", learningRouter);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, _next) => {
@@ -198,6 +201,10 @@ httpServer.listen(PORT, () => {
   logger.info(`TreeKB server running on http://localhost:${PORT}`);
   cleanupOrphanedUploads(); // Run once at startup
   setInterval(cleanupOrphanedUploads, 6 * 60 * 60 * 1000); // Every 6 hours
+
+  // Self-learning cycle — runs periodically across all datasets
+  const learningIntervalHours = Number(process.env.LEARNING_INTERVAL_HOURS) || 6;
+  setInterval(() => runLearningCycleAllDatasets(), learningIntervalHours * 60 * 60 * 1000);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

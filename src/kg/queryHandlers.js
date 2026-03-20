@@ -5,7 +5,9 @@ import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { bm25RecallNodes, bm25RecallChunks, hybridRecallNodes, hierarchicalRecallNodes, getHierarchicalChunks, searchChunksByDocTitle, simpleContentSearch, keywordTagSearch, buildRetrievalQueryVariants } from "./recallNodes.js";
 import { generateSnippet, generateSnippetsForChunks, extractKeySentences } from "../utils/snippetGenerator.js";
 import { rankNodes, decideNode } from "./nodeScoring.js";
-import { classifyQuery, QUERY_TYPES } from "../query/classifier.js";
+import { classifyQuery, QUERY_TYPES, detectAggregationSubType } from "../query/classifier.js";
+import { enumerateFromTree, getEnumerationChunks } from "./treeEnumerator.js";
+import { tryStructuredQuery } from "../query/structuredQueryHandler.js";
 import { generateComparison, formatComparisonForAPI } from "../query/comparator.js";
 import { generateRecommendation, formatRecommendationForAPI, extractCriteriaFromQuery } from "../query/recommender.js";
 import { reason, formatReasoningAsText } from "../query/reasoner.js";
@@ -19,7 +21,7 @@ import { generateAnswerWithCitations, addCitationsToAnswer } from "../query/cita
 import { calculateConfidence, quickConfidence } from "../query/confidenceScorer.js";
 import { generateRelatedQuestions, formatQuestionsForAPI } from "../query/relatedQuestions.js";
 import { getSuggestions, recordQuery } from "../query/suggestions.js";
-import { recordFeedback, applyFeedbackBoost } from "../query/feedback.js";
+import { recordFeedback, applyFeedbackBoost, applyLearnedPenalties } from "../query/feedback.js";
 import { getFactsForQuestion, retrieveFactsForQuery } from "../extraction/entityFactRetriever.js";
 import { enhancedRetrieval, buildEnhancedContext } from "./enhancedRetrieval.js";
 import { hierarchicalRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
@@ -28,6 +30,7 @@ import { getDatasetLang, getEffectiveLang } from "../utils/datasetLang.js";
 
 import { QueryTrace } from "./queryTrace.js";
 import { isNumericQuery, extractQueryEntities } from "../utils/queryHelpers.js";
+import { RETRIEVAL_MAX_HIERARCHICAL, RETRIEVAL_MAX_DIRECT, RETRIEVAL_RERANKER_POOL } from "../query/scoringConfig.js";
 
 // Detect language - wrapper that considers both query and context (for text metadata only)
 function detectLanguage(text) {
@@ -428,8 +431,121 @@ export async function handleReasoningQuery(query, classification, trace) {
   };
 }
 
+// Handle enumeration queries using tree structure directly
+async function handleEnumerationQuery(query, classification, trace) {
+  trace?.addStep('Enumeration Handler', 'Attempting tree-based enumeration');
+
+  const treeResult = enumerateFromTree(query);
+  if (!treeResult || !treeResult.structured) {
+    trace?.addStep('Enumeration Fallback', 'Tree enumeration failed, falling back to chunk-based aggregation', null, 'skipped');
+    return null; // signal caller to fall back
+  }
+
+  trace?.addStep('Tree Enumeration', `Found ${treeResult.count} items under "${treeResult.parentNode.name}"`, {
+    parent: treeResult.parentNode.name,
+    count: treeResult.count,
+    items: treeResult.nodes.map(n => n.name)
+  });
+
+  // Build structured items list
+  const itemsList = treeResult.nodes.map((n, i) => {
+    const parts = [`${i + 1}. **${n.name}**`];
+    if (n.summary) parts.push(`   Summary: ${n.summary}`);
+    if (n.description) parts.push(`   Description: ${n.description}`);
+    if (n.keywords.length > 0) parts.push(`   Keywords: ${n.keywords.join(', ')}`);
+    return parts.join('\n');
+  }).join('\n\n');
+
+  // Get supporting chunks (2-3 per child node)
+  const chunks = getEnumerationChunks(treeResult.nodes, 3);
+  const supportingText = chunks.length > 0
+    ? chunks.slice(0, 15).map(c => `[${c.node_name}] ${(c.content || '').slice(0, 300)}`).join('\n\n')
+    : '(No additional detail chunks available)';
+
+  trace?.addStep('Supporting Chunks', `Retrieved ${chunks.length} supporting chunks across ${treeResult.count} nodes`);
+
+  // Detect language and get prompt
+  const lang = detectLanguage(query);
+  const promptKey = isChineseLang(lang) ? 'aggregation_enumeration_zh' : 'aggregation_enumeration_en';
+
+  const { getCustomPrompt } = await import("../prompts/promptManager.js");
+  const vars = {
+    query,
+    count: String(treeResult.count),
+    parent_name: treeResult.parentNode.name,
+    items_list: itemsList,
+    supporting_chunks: supportingText
+  };
+
+  const prompt = getCustomPrompt(promptKey, vars) ?? getCustomPrompt('aggregation_enumeration_en', vars) ?? `Answer the question using the structured data below.
+
+Question: ${query}
+
+The knowledge base has exactly ${treeResult.count} items under "${treeResult.parentNode.name}":
+
+${itemsList}
+
+Supporting details:
+${supportingText}
+
+State the exact count (${treeResult.count}) as fact. List each item by name with a brief description. Be concise.
+
+Answer:`;
+
+  trace?.addStep('LLM Generation', 'Generating enumeration answer from structured tree data');
+  const text = await callLLM({ prompt, temperature: 0.1, taskName: 'aggregation_enumeration' });
+  trace?.addStep('LLM Complete', 'Enumeration answer generated');
+
+  // Calculate confidence — tree-based enumeration is high-confidence
+  const confidenceResult = calculateConfidence({
+    chunks,
+    nodes: treeResult.nodes,
+    query,
+    answer: text,
+    queryType: QUERY_TYPES.AGGREGATION
+  });
+
+  // Boost confidence for tree-structured answers (we know the count is exact)
+  const boostedScore = Math.min(1, confidenceResult.score + 0.15);
+
+  return {
+    query_type: QUERY_TYPES.AGGREGATION,
+    success: true,
+    data: {
+      final_answer: text,
+      conditions: [],
+      citations: [],
+      conflicts: [],
+      missing_info: []
+    },
+    confidence: boostedScore,
+    confidence_details: { ...confidenceResult, score: boostedScore, tree_enumeration: true },
+    nodes_used: treeResult.nodes.map(n => ({ node_id: n.node_id, name: n.name })),
+    chunks_used: chunks.length,
+    snippets: [],
+    enumeration: {
+      parent: treeResult.parentNode.name,
+      count: treeResult.count,
+      items: treeResult.nodes.map(n => n.name)
+    },
+    classification
+  };
+}
+
 // Handle aggregation queries
 export async function handleAggregationQuery(query, classification, queryScope, useHybridSearch, trace) {
+  // Check if this is an enumeration query — if so, try tree-based approach first
+  const subtype = detectAggregationSubType(query);
+  if (subtype === 'enumeration') {
+    try {
+      const enumResult = await handleEnumerationQuery(query, classification, trace);
+      if (enumResult) return enumResult;
+    } catch (err) {
+      logger.debug(`Enumeration handler failed, falling back: ${err.message}`);
+      trace?.addStep('Enumeration Error', `Failed: ${err.message}, falling back to chunk-based`, null, 'warn');
+    }
+  }
+
   // For aggregation, we want multiple results with hierarchy expansion
   let candidates;
   if (useHybridSearch) {
@@ -657,6 +773,24 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     temperature = 0.1
   } = retrievalOptions;
 
+  // Try structured query first (fact-table lookup for entity+attribute queries)
+  try {
+    const classification = enhancedOptions._classification || { entities: extractQueryEntities(query) };
+    const structured = tryStructuredQuery(query, classification);
+    if (structured && structured.facts.length > 0) {
+      trace?.addStep('Structured Query', `Found ${structured.facts.length} structured facts for ${structured.entities.length} entities`, {
+        entities: structured.entities.map(e => e.name),
+        facts: structured.facts.length
+      });
+
+      // Supplement: still run chunk retrieval but prepend structured context
+      enhancedOptions._structuredContext = structured.context;
+      enhancedOptions._structuredFacts = structured.facts;
+    }
+  } catch (err) {
+    logger.debug(`Structured query handler skipped: ${err.message}`);
+  }
+
   let retrievalQueryVariants = [{ text: query, weight: 1, lang: detectLanguage(query), sources: ["original"] }];
   try {
     const variants = await buildRetrievalQueryVariants(query, {
@@ -842,149 +976,59 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     trace?.addStep('Hierarchical Retrieval', `Failed: ${err.message}`, null, 'error');
   }
 
-  // STEP 2: Supplement strategy — node-scope first, supplement with direct when thin.
+  // STEP 2: Unified merge — direct and hierarchical are EQUAL peers.
   //
-  // Hierarchical chunks are the primary source (node-scoped, avoids most cross-doc bleed).
-  // When hierarchical returns fewer than SUPPLEMENT_THRESHOLD chunks the tree only found a
-  // partial match (e.g., navigated to Company Overview instead of Health Insurance). In that
-  // case we supplement with the top direct BM25 chunks so specific numeric facts that live in
-  // a different node than the one the tree navigated to are still covered.
-  //
-  // This avoids both failure modes:
-  //   • Pure MERGE: always adds global direct chunks → cross-doc contamination
-  //   • Pure STRICT FALLBACK: discards direct when ANY hierarchical found → misses specific facts
-  const SUPPLEMENT_THRESHOLD = 8;
+  // Both sources contribute to a shared candidate pool. The reranker determines
+  // final ranking. Per-source caps prevent either from flooding the pool.
+  // Dedup collision: keep max score, union source tags for provenance.
   let usedFallback = false;
   const allChunks = [];
-  const seenChunkIds = new Set();
+  const seenChunkIds = new Map(); // id → index in allChunks
 
-  if (hierarchicalChunks.length > 0) {
-    // Primary: tree found at least one node — use hierarchical chunks first.
-    for (const chunk of hierarchicalChunks) {
-      if (!seenChunkIds.has(chunk.id)) {
-        seenChunkIds.add(chunk.id);
-        allChunks.push({ ...chunk, retrieval_source: 'hierarchical' });
-      }
+  // Cap hierarchical contributions
+  const cappedHierarchical = hierarchicalChunks.slice(0, RETRIEVAL_MAX_HIERARCHICAL);
+  for (const chunk of cappedHierarchical) {
+    if (!seenChunkIds.has(chunk.id)) {
+      const idx = allChunks.length;
+      seenChunkIds.set(chunk.id, idx);
+      allChunks.push({ ...chunk, retrieval_source: ['hierarchical'] });
     }
-
-    if (hierarchicalChunks.length < SUPPLEMENT_THRESHOLD && directChunks.length > 0) {
-      // Supplement: hierarchical coverage is thin — add direct BM25 chunks to fill gaps.
-      // IMPORTANT: prefer same-document chunks to avoid cross-doc contamination.
-      // E.g. if tree navigated to CompanyA's node, adding CompanyB's "CEO" chunk
-      // from direct search causes the LLM to conflate the two companies.
-      const hierarchicalDocs = new Set(
-        hierarchicalChunks.map(c => c.doc_title).filter(Boolean)
-      );
-
-      // Partition direct chunks: same-doc first, cross-doc second
-      const sameDocChunks = [];
-      const crossDocChunks = [];
-      for (const chunk of directChunks) {
-        if (seenChunkIds.has(chunk.id)) continue;
-        if (!chunk.doc_title || hierarchicalDocs.has(chunk.doc_title)) {
-          sameDocChunks.push(chunk);
-        } else {
-          crossDocChunks.push(chunk);
-        }
-      }
-
-      // Add same-doc supplements first
-      for (const chunk of sameDocChunks) {
-        seenChunkIds.add(chunk.id);
-        allChunks.push({ ...chunk, retrieval_source: 'supplement_same_doc' });
-      }
-      // Only add cross-doc if still very thin (< 4 chunks total)
-      if (allChunks.length < 4) {
-        for (const chunk of crossDocChunks) {
-          seenChunkIds.add(chunk.id);
-          allChunks.push({ ...chunk, retrieval_source: 'supplement_cross_doc' });
-        }
-      }
-
-      const supplementCount = allChunks.length - hierarchicalChunks.length;
-      trace?.addStep('Chunk Selection', `Used ${hierarchicalChunks.length} hierarchical + ${supplementCount} supplemental chunks (${sameDocChunks.length} same-doc, ${Math.max(0, supplementCount - sameDocChunks.length)} cross-doc)`, {
-        from_hierarchical: hierarchicalChunks.length,
-        from_supplement: supplementCount,
-        same_doc: sameDocChunks.length,
-        cross_doc_added: Math.max(0, supplementCount - sameDocChunks.length)
-      });
-    } else if (directChunks.length > 0) {
-      // Hierarchical has enough chunks — but BM25 may have found relevant chunks
-      // from nodes the tree didn't navigate to (same doc) or from other documents.
-      const hierarchicalDocs = new Set(
-        hierarchicalChunks.map(c => c.doc_title).filter(Boolean)
-      );
-      const queryLower = query.toLowerCase();
-      let supplementedCount = 0;
-
-      // Collect node IDs already covered by hierarchical search
-      const hierarchicalNodeIds = new Set(
-        hierarchicalChunks.map(c => c.node_id).filter(Boolean)
-      );
-
-      // Sort direct chunks by relevance so the best BM25 hits get priority
-      const sortedDirect = [...directChunks].sort(
-        (a, b) => (b.relevance_score || 0) - (a.relevance_score || 0)
-      );
-
-      // Add the best same-doc BM25 hits from unvisited nodes.
-      // Cap at 4 so facts in distant nodes (e.g. "promotion requirements" in
-      // a "Review Delivery" node) still surface when tree routing picks the wrong node.
-      const MAX_SAME_DOC = 4;
-      const MAX_CROSS_DOC = 4;
-      let sameDocAdded = 0;
-      let crossDocAdded = 0;
-
-      for (const chunk of sortedDirect) {
-        if (seenChunkIds.has(chunk.id)) continue;
-
-        const isCrossDoc = chunk.doc_title && !hierarchicalDocs.has(chunk.doc_title);
-
-        if (isCrossDoc) {
-          if (crossDocAdded >= MAX_CROSS_DOC) continue;
-          // Cross-doc: only include if doc_title contains a distinctive query term
-          const titleTerms = (chunk.doc_title || '').replace(/[-_.]/g, ' ')
-            .toLowerCase().split(/\s+/)
-            .filter((t, i, a) => t.length >= 5 && a.indexOf(t) === i);
-          if (!titleTerms.some(term => queryLower.includes(term))) continue;
-          crossDocAdded++;
-        } else {
-          if (sameDocAdded >= MAX_SAME_DOC) continue;
-          // Same-doc: only include chunks from nodes the tree DIDN'T visit.
-          if (chunk.node_id && hierarchicalNodeIds.has(chunk.node_id)) continue;
-          sameDocAdded++;
-        }
-
-        seenChunkIds.add(chunk.id);
-        allChunks.push({ ...chunk, retrieval_source: isCrossDoc ? 'query_matched_doc' : 'supplement_same_doc' });
-        supplementedCount++;
-      }
-
-      if (supplementedCount > 0) {
-        trace?.addStep('Chunk Selection', `Using ${hierarchicalChunks.length} hierarchical + ${supplementedCount} direct BM25 chunks`, {
-          from_hierarchical: hierarchicalChunks.length,
-          supplemented: supplementedCount
-        });
-      } else {
-        trace?.addStep('Chunk Selection', `Using ${allChunks.length} node-scoped chunks (hierarchical only)`, {
-          from_hierarchical: hierarchicalChunks.length,
-          direct_discarded: directChunks.length
-        });
-      }
-    }
-  } else {
-    // Fallback: tree localization failed entirely — use global direct chunks.
-    usedFallback = true;
-    for (const chunk of directChunks) {
-      if (!seenChunkIds.has(chunk.id)) {
-        seenChunkIds.add(chunk.id);
-        allChunks.push({ ...chunk, retrieval_source: 'direct' });
-      }
-    }
-    trace?.addStep('Chunk Selection', `Tree localization failed — falling back to ${allChunks.length} global chunks`, {
-      from_direct: directChunks.length
-    }, 'warn');
   }
+
+  // Cap direct contributions — merge with dedup
+  const cappedDirect = directChunks.slice(0, RETRIEVAL_MAX_DIRECT);
+  for (const chunk of cappedDirect) {
+    if (seenChunkIds.has(chunk.id)) {
+      // Overlap: keep max score, union source tags
+      const existing = allChunks[seenChunkIds.get(chunk.id)];
+      const existScore = existing.hierarchical_score || existing.relevance_score || 0;
+      const newScore = chunk.relevance_score || 0;
+      if (newScore > existScore) {
+        existing.relevance_score = newScore;
+      }
+      if (!existing.retrieval_source.includes('direct')) {
+        existing.retrieval_source.push('direct');
+      }
+    } else {
+      const idx = allChunks.length;
+      seenChunkIds.set(chunk.id, idx);
+      allChunks.push({ ...chunk, retrieval_source: ['direct'] });
+    }
+  }
+
+  if (allChunks.length === 0) {
+    usedFallback = true;
+  }
+
+  // Count overlaps for trace
+  const overlapCount = allChunks.filter(c => c.retrieval_source.length > 1).length;
+
+  trace?.addStep('Retrieval Sources', `Merged pool: ${allChunks.length} chunks (hierarchical: ${cappedHierarchical.length}, direct: ${cappedDirect.length}, overlap: ${overlapCount})`, {
+    hierarchical: cappedHierarchical.length,
+    direct: cappedDirect.length,
+    overlap: overlapCount,
+    pool_size: allChunks.length
+  });
 
   // If no chunks found at all
   if (allChunks.length === 0) {
@@ -1027,8 +1071,21 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     }))
   });
 
-  // STEP 4: Apply feedback-based boosting
+  // STEP 4: Apply feedback-based boosting + track scoring
+  for (const chunk of chunks) {
+    chunk._scoring = { initial_relevance: chunk.hierarchical_score || chunk.relevance_score || 0 };
+  }
   chunks = applyFeedbackBoost(chunks);
+  for (const chunk of chunks) {
+    chunk._scoring.feedback_adj = chunk.feedback_adjusted ? (chunk.score - chunk._scoring.initial_relevance) : 0;
+  }
+
+  // STEP 4a: Apply learned penalties (node penalties + known issues)
+  const preLearnedScores = new Map(chunks.map(c => [c.id, c.score || 0]));
+  chunks = applyLearnedPenalties(chunks, query);
+  for (const chunk of chunks) {
+    chunk._scoring.learned_penalty = (chunk.score || 0) - (preLearnedScores.get(chunk.id) || 0);
+  }
 
   // STEP 4b: Pre-boost chunks matching document scope BEFORE reranking.
   // If the query contains a document/entity name, boost matching chunks and mildly
@@ -1041,6 +1098,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         const title = (chunk.doc_title || '').toLowerCase();
         const hasDocMatch = queryTerms5.some(t => title.includes(t));
         chunk._docBoost = hasDocMatch ? 0.1 : -0.05;
+        if (chunk._scoring) chunk._scoring.doc_boost = chunk._docBoost;
         // Apply the boost to relevance / hierarchical score so the reranker sees it
         const baseScore = chunk.hierarchical_score || chunk.relevance_score || 0;
         chunk.hierarchical_score = baseScore + chunk._docBoost;
@@ -1200,7 +1258,11 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     // "Lost in the middle" is a concern at 50k+ tokens; 12000 chars ≈ 3k tokens is well
     // within the reliable extraction range for modern LLMs.
     const chunkContext = buildExpandedContext(expandedChunks, { includeNeighbors: true, maxTotalLength: 12000 });
-    const context = chunkContext + factsContext;
+    // Prepend structured facts context if available (from tryStructuredQuery)
+    const structuredPrefix = enhancedOptions._structuredContext
+      ? `\n\n[Structured Data]\n${enhancedOptions._structuredContext}\n\n`
+      : '';
+    const context = structuredPrefix + chunkContext + factsContext;
 
     // Determine node context for LLM (use chosen node or derive from chunks)
     const nodeId = chosenNode?.node?.node_id || chunks[0]?.node_id || 'direct_search';
@@ -1256,9 +1318,28 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       answer: llmResponse.final_answer,
       queryType: QUERY_TYPES.SIMPLE_LOOKUP
     });
-    trace?.addStep('Confidence Calibration', `Score: ${confidenceResult.score} (${confidenceResult.level})`, {
-      factors: confidenceResult.factors
+    trace?.addStep('Confidence Calibration', `Score: ${confidenceResult.score} (${confidenceResult.level}) — retrieval: ${confidenceResult.retrieval_confidence}, groundedness: ${confidenceResult.answer_groundedness}`, {
+      factors: confidenceResult.factors,
+      retrieval_confidence: confidenceResult.retrieval_confidence,
+      answer_groundedness: confidenceResult.answer_groundedness
     });
+
+    // Scoring breakdown in trace (top 10 chunks)
+    if (trace && chunks.length > 0) {
+      trace.addStep('Scoring Breakdown', `Per-chunk scoring for top ${Math.min(10, chunks.length)} chunks`, {
+        chunks: chunks.slice(0, 10).map(c => ({
+          id: c.id,
+          doc: c.doc_title?.substring(0, 30),
+          retrieval_source: c.retrieval_source,
+          _scoring: c._scoring
+        })),
+        retrieval_source_counts: {
+          hierarchical: hierarchicalChunks.length,
+          direct: directChunks.length,
+          overlap: hierarchicalChunks.filter(h => directChunks.some(d => d.id === h.id)).length
+        }
+      });
+    }
 
     // Generate related questions
     let relatedQuestions = [];
@@ -1293,6 +1374,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       action: chunks.length > 0 ? "answer" : "no_results",
       chosen: chosenNode,
       confidence: confidenceResult.score,
+      retrieval_confidence: confidenceResult.retrieval_confidence,
+      answer_groundedness: confidenceResult.answer_groundedness,
       confidence_details: confidenceResult,
       top: topNodes,
       llm_response: llmResponse,

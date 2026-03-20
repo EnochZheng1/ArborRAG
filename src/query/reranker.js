@@ -2,6 +2,40 @@ import { logger } from "../utils/logger.js";
 import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
 import { isNumericQuery, extractNegatedTerms, hasNumericContent } from "../utils/queryHelpers.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
+import {
+  NUMERIC_CHUNK_BOOST, NUMERIC_UNIT_BOOST, ENTITY_MATCH_BOOST, NEGATION_PENALTY_FACTOR
+} from "./scoringConfig.js";
+
+// ── Config-driven reranker weights (cached per-dataset with 5-min TTL) ───────
+import { getActiveDatasetId } from "../db/activeDb.js";
+
+const _weightCacheMap = new Map(); // datasetId → { weights, ts }
+const WEIGHT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_WEIGHTS = { keyword: 0.30, bm25: 0.20, embedding: 0.50 };
+
+function getRerankerWeights() {
+  const now = Date.now();
+  let dsId;
+  try { dsId = getActiveDatasetId() ?? '__default'; } catch (_) { dsId = '__default'; }
+  const cached = _weightCacheMap.get(dsId);
+  if (cached && (now - cached.ts) < WEIGHT_CACHE_TTL) return cached.weights;
+  try {
+    const wk = DatasetConfigRepo.get('learning:reranker_w_keyword');
+    const wb = DatasetConfigRepo.get('learning:reranker_w_bm25');
+    const we = DatasetConfigRepo.get('learning:reranker_w_embedding');
+    const weights = {
+      keyword:   wk != null ? parseFloat(wk) : 0.30,
+      bm25:      wb != null ? parseFloat(wb) : 0.20,
+      embedding: we != null ? parseFloat(we) : 0.50
+    };
+    _weightCacheMap.set(dsId, { weights, ts: now });
+    return weights;
+  } catch (_) {
+    _weightCacheMap.set(dsId, { weights: DEFAULT_WEIGHTS, ts: now });
+    return DEFAULT_WEIGHTS;
+  }
+}
 
 /**
  * Heuristic + optional LLM Re-ranking Module
@@ -123,25 +157,32 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
     // Signal 3 — embedding cosine similarity (default 0.0 if missing)
     const embScore = chunk.similarity != null && Number.isFinite(chunk.similarity) ? chunk.similarity : 0.0;
 
-    let score = 0.30 * overlapScore + 0.20 * rankScore + 0.50 * embScore;
+    const w = getRerankerWeights();
+    let score = w.keyword * overlapScore + w.bm25 * rankScore + w.embedding * embScore;
 
     // Query-type aware boosting
     if (numericQuery && /\d/.test(content)) {
-      // Boost chunks containing numbers for numeric queries
-      score += 0.05;
-      // Extra boost if chunk contains percentages or unit-bearing numbers
+      score += NUMERIC_CHUNK_BOOST;
       if (hasNumericContent(content)) {
-        score += 0.05;
+        score += NUMERIC_UNIT_BOOST;
       }
     }
     if (isEntityQuery && queryEntities.length > 0) {
-      // Boost chunks containing named entities from the query
       for (const entity of queryEntities) {
-        if (content.includes(entity)) { score += 0.08; break; }
+        if (content.includes(entity)) { score += ENTITY_MATCH_BOOST; break; }
       }
     }
 
-    return { ...chunk, rerank_score: score, rerank_score_raw: score, original_rank: i };
+    return {
+      ...chunk,
+      rerank_score: score,
+      rerank_score_raw: score,
+      original_rank: i,
+      _scoring: {
+        ...chunk._scoring,
+        rerank: { keyword: overlapScore, bm25_rank: rankScore, embedding: embScore, combined: score }
+      }
+    };
   });
 
   // Negation handling: penalize chunks heavily featuring negated terms
@@ -151,7 +192,7 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
       const chunkContent = (item.content || item.content_clean || '').toLowerCase();
       for (const term of negatedTerms) {
         if (chunkContent.includes(term)) {
-          item.rerank_score *= 0.4; // heavy penalty
+          item.rerank_score *= NEGATION_PENALTY_FACTOR;
           break;
         }
       }

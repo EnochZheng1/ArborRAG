@@ -1,6 +1,6 @@
-# TreeKB — Tree-Based Knowledge Graph
+# ArborRAG — Tree-Based Knowledge Graph
 
-**v3.0.0** · Node.js · SQLite · OpenAI / Gemini
+**v3.1.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -83,6 +83,14 @@ INGEST_QUEUE_CONCURRENCY=2
 INGEST_QUEUE_MAX_ATTEMPTS=3
 INGEST_QUEUE_RETRY_DELAY_MS=5000
 INGEST_CLEANUP_ON_SUCCESS=true
+
+# Ingestion tuning (v3.1)
+INGEST_SKIP_ALIASES=false          # Skip alias generation during ingestion
+INGEST_ORPHAN_CLEANUP=false        # Merge sparse nodes into parents
+
+# Retrieval tuning (v3.1)
+RETRIEVAL_MAX_HIERARCHICAL=15      # Max chunks from tree retrieval
+RETRIEVAL_MAX_DIRECT=15            # Max chunks from direct BM25 search
 ```
 
 ---
@@ -110,6 +118,8 @@ INGEST_CLEANUP_ON_SUCCESS=true
 | `GET` | `/schema` | Get schema nodes as hierarchical tree |
 | `POST` | `/schema/import` | Import schema from JSON |
 | `GET` | `/schema/export` | Export schema as JSON |
+| `GET` | `/schema/health` | Tree health stats and General node monitoring |
+| `POST` | `/schema/reclassify` | Reclassify General KPs to better-matching nodes |
 | `GET/PATCH` | `/schema/settings` | Get or update mapping mode / strictness / routing |
 | `GET/POST` | `/schema/templates` | List or create global schema templates |
 | `POST` | `/schema/templates/:id/apply` | Apply a template to the current dataset |
@@ -154,6 +164,27 @@ docs/
 ---
 
 ## Changelog
+
+### v3.1.0 — Architectural Fixes
+
+Three-phase release addressing data integrity, knowledge quality, and ingestion fidelity.
+
+**Phase 1: Data Integrity**
+- **PDF column detection** — `parsePdfFile()` now collects text items with X/Y coordinates, detects multi-column layouts by analysing X-gaps (> 4× median char width), and reconstructs columns separately instead of interleaving. Single-column PDFs produce identical output (no regression).
+- **Feedback score bounds + decay** — `feedback_score` clamped to [-1.0, 1.0] on every update. Learning cycle (every 6h) recomputes all cached scores from raw feedback events with exponential time-decay (half-life 60 days, 90-day window). `checkKnownIssues` sensitivity lowered from `negRate > 0.6` to `negRate > 0.4 OR negative_count >= 5`. Schema v2 migration clamps existing out-of-bounds values.
+
+**Phase 2: Knowledge Quality**
+- **General node cap + reclassification** — When a single document sends >15 KPs to "General", excess sub-grouped by subtopic or doc title (e.g. "General — HR Policy"). New `stageReclassifyGeneral` pipeline stage auto-moves KPs to better-matching nodes (Dice >= 0.6) or logs suggestions (0.4-0.6). New `GET /schema/health` and `POST /schema/reclassify` endpoints for monitoring and manual trigger.
+- **Confidence split** — `calculateConfidence` now returns `retrieval_confidence` (source quality) and `answer_groundedness` (answer faithfulness) as separate signals alongside the combined `score`. Stricter hallucination detection: if <30% of answer values (numbers, dates, currency) appear in source chunks, groundedness capped at 0.25. "No answer" floor: phrases like "not found" / "cannot find" cap both scores at 0.10. Removed `isSpecificQuery × 1.08` boost and `isVagueQuery × 0.92` penalty (rewarded/punished question format, not answer quality). `confidence_at_answer` now stored with feedback events for future calibration.
+- **Scoring observability** — Per-chunk `_scoring` object tracks `initial_relevance`, `feedback_adj`, `learned_penalty`, `doc_boost`, and `rerank` breakdown at each step. New `src/query/scoringConfig.js` centralises all 27+ scoring constants. Trace output includes "Scoring Breakdown" (top-10 chunks with full scoring detail) and "Retrieval Sources" (per-source counts + overlap).
+- **Unified retrieval** — Direct BM25 and hierarchical tree search merged as equal peers (replaces supplement strategy). Configurable per-source caps via `RETRIEVAL_MAX_HIERARCHICAL` and `RETRIEVAL_MAX_DIRECT` env vars (default 15 each). Dedup collisions keep max score and union provenance tags (`retrieval_source: ['hierarchical', 'direct']`). Reranker selects top 20 from the merged pool.
+
+**Phase 3: Ingestion Quality**
+- **Temporal detection expanded** — 18 new temporal patterns: supersede, deprecate, expire, obsolete, replace, amend, rescind, withdrawn, version markers, "valid through/until", CJK signals (已废止, 生效日期, 有效期至). Sibling-node version scan: when within-node Dice < 0.55, scans up to 5 sibling nodes (same parent) with Dice >= 0.75 to catch facts that drifted to neighbouring topic nodes.
+- **Segmentation fidelity** — `detectTables()` now runs BEFORE segmentation; table boundaries become no-break zones that the splitter will not cut through. Heading-boundary awareness: prefers breaking just before section headings in the 50-100% window. CJK overlap increase: when text is >30% CJK characters, overlap widens from 300 to 600 chars.
+- **LLM call reduction** — New `generateAliasesBatch()` batches up to 5 nodes per LLM call (5 calls → 1). `INGEST_SKIP_ALIASES=true` env var skips alias generation entirely (useful for vector-routing datasets). Pipeline stages re-ordered: reclassify → canonicalize → orphan cleanup.
+
+**Files changed:** 16 modified + 1 new (`src/query/scoringConfig.js`)
 
 ### v3.0.0
 - **Frontend Modularization** — split monolithic 8,200-line `app.js` into 10 ES modules under `public/modules/`; thin entry point with `<script type="module">`; shared state via imports; function registry for cross-module calls without circular dependencies

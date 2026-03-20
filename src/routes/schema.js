@@ -9,6 +9,7 @@ import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { SchemaTemplateRepo } from "../db/repositories/SchemaTemplateRepo.js";
 import { generateNodeId, ensureRootNode } from "../ingest/nodeHierarchy.js";
+import { getGeneralNodeStats, reclassifyGeneralKPs } from "../ingest/kpNormaliser.js";
 import { runTransaction, safeJson } from "../db/db.js";
 import { apiLogger as logger } from "../utils/logger.js";
 import { ApiError } from "../utils/apiError.js";
@@ -51,6 +52,7 @@ function importSchemaNodes(rawNodes, mode) {
     const description = nodeData.description || '';
     const aliases     = Array.isArray(nodeData.aliases) ? nodeData.aliases.filter(a => typeof a === 'string') : [];
     const keywords    = Array.isArray(nodeData.keywords) ? nodeData.keywords.filter(k => typeof k === 'string') : [];
+    const attributes  = Array.isArray(nodeData.attributes) ? nodeData.attributes : [];
     if (!name) return;
 
     const nodeId = nodeData.id || generateNodeId(name);
@@ -64,6 +66,7 @@ function importSchemaNodes(rawNodes, mode) {
       if (description) NodeRepo.updateDescription(existing.node_id, description);
       if (aliases.length > 0) NodeRepo.update(existing.node_id, { aliases });
       if (keywords.length > 0) NodeRepo.mergeKeywords(existing.node_id, keywords);
+      if (attributes.length > 0) NodeRepo.setAttributes(existing.node_id, attributes);
       updated.push(existing.node_id);
 
       for (const child of (nodeData.children || [])) {
@@ -186,10 +189,11 @@ router.get('/export', (req, res) => {
 router.get('/settings', (req, res) => {
   try {
     res.json({
-      mapping_mode:        DatasetConfigRepo.get('mapping_mode')        ?? 'free',
-      mapping_strictness:  DatasetConfigRepo.get('mapping_strictness')  ?? 'soft',
-      schema_template_id:  DatasetConfigRepo.get('schema_template_id')  ?? null,
-      tree_routing_mode:   DatasetConfigRepo.get('tree_routing_mode')   ?? 'keyword'
+      mapping_mode:               DatasetConfigRepo.get('mapping_mode')               ?? 'free',
+      mapping_strictness:         DatasetConfigRepo.get('mapping_strictness')         ?? 'soft',
+      schema_template_id:         DatasetConfigRepo.get('schema_template_id')         ?? null,
+      tree_routing_mode:          DatasetConfigRepo.get('tree_routing_mode')          ?? 'keyword',
+      entity_extraction_enabled:  DatasetConfigRepo.get('entity_extraction_enabled')  ?? 'false'
     });
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
@@ -225,11 +229,20 @@ router.patch('/settings', (req, res) => {
       DatasetConfigRepo.set('tree_routing_mode', tree_routing_mode);
     }
 
-    const newMode        = DatasetConfigRepo.get('mapping_mode')       ?? 'free';
-    const newStrictness  = DatasetConfigRepo.get('mapping_strictness') ?? 'soft';
-    const newRouting     = DatasetConfigRepo.get('tree_routing_mode')  ?? 'keyword';
-    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting}`);
-    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting });
+    const { entity_extraction_enabled } = req.body;
+    if (entity_extraction_enabled !== undefined) {
+      if (!['true', 'false'].includes(String(entity_extraction_enabled))) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`entity_extraction_enabled` must be "true" or "false"' } });
+      }
+      DatasetConfigRepo.set('entity_extraction_enabled', String(entity_extraction_enabled));
+    }
+
+    const newMode        = DatasetConfigRepo.get('mapping_mode')              ?? 'free';
+    const newStrictness  = DatasetConfigRepo.get('mapping_strictness')        ?? 'soft';
+    const newRouting     = DatasetConfigRepo.get('tree_routing_mode')         ?? 'keyword';
+    const newEntityExt   = DatasetConfigRepo.get('entity_extraction_enabled') ?? 'false';
+    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting} entityExtraction=${newEntityExt}`);
+    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting, entity_extraction_enabled: newEntityExt });
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("PATCH /schema/settings error:", err.message);
@@ -419,6 +432,85 @@ router.delete('/:nodeId', (req, res) => {
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error(`DELETE /schema/${req.params.nodeId} error:`, err.message);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// ── GET /schema/nodes/:nodeId/attributes ────────────────────────────────────
+// Get schema-defined attributes for a node.
+
+router.get('/nodes/:nodeId/attributes', (req, res) => {
+  try {
+    const { nodeId } = req.params;
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Node not found' } });
+    const attributes = NodeRepo.getAttributes(nodeId);
+    res.json({ node_id: nodeId, attributes });
+  } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
+    logger.error(`GET /schema/nodes/${req.params.nodeId}/attributes error:`, err.message);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// ── PUT /schema/nodes/:nodeId/attributes ────────────────────────────────────
+// Set schema-defined attributes for a node.
+// Body: { attributes: [{ name: "premium", type: "currency", label: "Monthly Premium" }, ...] }
+
+router.put('/nodes/:nodeId/attributes', (req, res) => {
+  try {
+    const { nodeId } = req.params;
+    if (!NodeRepo.existsById(nodeId)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Node not found' } });
+
+    const { attributes } = req.body;
+    if (!Array.isArray(attributes)) {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`attributes` must be an array' } });
+    }
+
+    // Validate each attribute entry
+    const validTypes = ['text', 'number', 'currency', 'date', 'boolean', 'enum'];
+    const cleaned = attributes.map(a => {
+      const name = String(a.name || '').trim();
+      const type = validTypes.includes(a.type) ? a.type : 'text';
+      const label = String(a.label || a.name || '').trim();
+      return { name, type, label };
+    }).filter(a => a.name.length > 0);
+
+    NodeRepo.setAttributes(nodeId, cleaned);
+    logger.info(`Attributes set for node ${nodeId}: ${cleaned.length} attributes`);
+    res.json({ ok: true, node_id: nodeId, attributes: cleaned });
+  } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
+    logger.error(`PUT /schema/nodes/${req.params.nodeId}/attributes error:`, err.message);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// ── GET /schema/health ─────────────────────────────────────────────────────────
+// Returns health stats including General node size and warnings.
+
+router.get('/health', (req, res) => {
+  try {
+    const generalStats = getGeneralNodeStats();
+    const treeStats = NodeRepo.getTreeStats();
+    res.json({ general: generalStats, tree: treeStats });
+  } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
+    logger.error("GET /schema/health error:", err.message);
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
+  }
+});
+
+// ── POST /schema/reclassify ──────────────────────────────────────────────────
+// Trigger reclassification of General KPs to better-matching nodes.
+
+router.post('/reclassify', (req, res) => {
+  try {
+    const result = reclassifyGeneralKPs();
+    logger.info(`Reclassification: ${result.moved} moved, ${result.suggested} suggestions`);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
+    logger.error("POST /schema/reclassify error:", err.message);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } });
   }
 });

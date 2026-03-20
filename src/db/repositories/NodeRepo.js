@@ -386,6 +386,21 @@ export const NodeRepo = {
     return db.prepare("SELECT id FROM chunks WHERE node_id = ?").all(nodeId).map(r => r.id);
   },
 
+  /** Get schema-defined attributes for a node. Returns parsed array. */
+  getAttributes(nodeId) {
+    const row = db.prepare("SELECT attributes_json FROM nodes WHERE node_id = ?").get(nodeId);
+    return row ? safeJson(row.attributes_json, []) : [];
+  },
+
+  /** Set schema-defined attributes for a node.
+   * @param {string} nodeId
+   * @param {Array<{name: string, type: string, label: string}>} attributes
+   */
+  setAttributes(nodeId, attributes) {
+    return db.prepare("UPDATE nodes SET attributes_json = ?, updated_at = datetime('now') WHERE node_id = ?")
+      .run(JSON.stringify(attributes), nodeId).changes;
+  },
+
   /**
    * Merge new keywords into a node's keywords_json, deduplicating (lowercased).
    * Also refreshes the FTS entry to include the keyword text.

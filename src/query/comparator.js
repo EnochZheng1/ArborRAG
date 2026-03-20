@@ -3,6 +3,7 @@ import { parseLLMJson } from "../utils/parseJSON.js";
 import { retrieveForComparison, buildMultiNodeContext } from "./multiNodeRetriever.js";
 import { logger } from "../utils/logger.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
+import { tryStructuredQuery } from "./structuredQueryHandler.js";
 
 /**
  * Comparison Query Handler
@@ -33,8 +34,24 @@ export async function generateComparison(query, entities, aspects = []) {
     };
   }
 
+  // Supplement with structured facts if available
+  try {
+    const structured = tryStructuredQuery(query, { entities });
+    if (structured && structured.facts.length > 0) {
+      comparisonData._structuredContext = structured.context;
+    }
+  } catch (_) { /* non-fatal */ }
+
   // Use LLM to generate comparison
   const comparison = await llmGenerateComparison(query, comparisonData, aspects);
+
+  // Compute per-entity coverage levels
+  const maxEntityChunks = Math.max(1, ...foundEntities.map(e => e.chunks.length));
+  const coverage = foundEntities.map(e => {
+    const ratio = e.chunks.length / maxEntityChunks;
+    const level = ratio >= 0.6 ? 'good' : ratio >= 0.3 ? 'partial' : 'thin';
+    return { entity: e.name, chunk_count: e.chunks.length, coverage_level: level };
+  });
 
   return {
     success: true,
@@ -44,6 +61,7 @@ export async function generateComparison(query, entities, aspects = []) {
     comparison_table: comparison.table,
     summary: comparison.summary,
     recommendation: comparison.recommendation,
+    coverage,
     sources: foundEntities.map(e => ({
       entity: e.name,
       node_id: e.node_id,
@@ -60,13 +78,20 @@ async function llmGenerateComparison(query, comparisonData, aspects) {
     return generateBasicComparison(comparisonData, aspects);
   }
 
-  // Build context from comparison data
+  // Build context from comparison data (enriched with node metadata)
   const contextParts = [];
+  const chunkCounts = [];
   for (const entity of comparisonData.entities) {
     if (!entity.found) continue;
 
     contextParts.push(`## ${entity.name}\n`);
     contextParts.push(`Summary: ${entity.summary || "N/A"}\n`);
+    if (entity.description) {
+      contextParts.push(`Description: ${entity.description}\n`);
+    }
+    if (entity.keywords && entity.keywords.length > 0) {
+      contextParts.push(`Key attributes: ${entity.keywords.join(', ')}\n`);
+    }
 
     if (entity.chunks.length > 0) {
       contextParts.push("Details:");
@@ -75,9 +100,25 @@ async function llmGenerateComparison(query, comparisonData, aspects) {
       }
     }
     contextParts.push("");
+    chunkCounts.push({ entity: entity.name, count: entity.chunks.length });
   }
 
-  const context = contextParts.join("\n");
+  // Coverage gap detection — warn LLM about entities with thin data
+  let coverageWarning = '';
+  if (chunkCounts.length >= 2) {
+    const maxChunks = Math.max(...chunkCounts.map(c => c.count));
+    const minChunks = Math.min(...chunkCounts.map(c => c.count));
+    if (maxChunks > 0 && (1 - minChunks / maxChunks) > 0.6) {
+      const thin = chunkCounts.filter(c => c.count === minChunks).map(c => c.entity);
+      coverageWarning = `\nNote: Data for ${thin.join(', ')} is limited (${minChunks} sources vs ${maxChunks}). Mark unavailable attributes as "N/A" rather than guessing.\n`;
+    }
+  }
+
+  // Append structured facts if available
+  const structuredSection = comparisonData._structuredContext
+    ? `\n\n## Structured Data\n${comparisonData._structuredContext}\n`
+    : '';
+  const context = contextParts.join("\n") + coverageWarning + structuredSection;
 
   const aspectsText = aspects.length > 0 ? `Comparison Aspects: ${aspects.join(", ")}` : "";
   const prompt = getCustomPrompt('comparison', { query, aspects: aspectsText, context }) ?? `You are a comparison analyst. Generate a detailed comparison based on the provided information.
@@ -261,6 +302,7 @@ export function formatComparisonForAPI(comparisonResult) {
       summary: comparisonResult.summary,
       recommendation: comparisonResult.recommendation
     },
+    coverage: comparisonResult.coverage || [],
     sources: comparisonResult.sources,
     error: comparisonResult.error
   };

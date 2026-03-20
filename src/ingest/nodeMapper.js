@@ -753,6 +753,96 @@ export async function generateAndSaveAliases(nodeId, options = {}) {
 }
 
 /**
+ * Batch alias generation — generate aliases for up to 5 nodes in one LLM call.
+ * Reduces 5 separate calls to 1. Falls back to individual generation on failure.
+ * @param {string[]} nodeIds - Node IDs to generate aliases for
+ * @param {object} options
+ * @returns {Promise<number>} Number of nodes with aliases generated
+ */
+export async function generateAliasesBatch(nodeIds, options = {}) {
+  const { maxAliases = 8 } = options;
+  if (!nodeIds.length) return 0;
+  if (!isLlmConfigured()) {
+    // Fallback: generate simple aliases for each
+    for (const nid of nodeIds) {
+      const node = NodeRepo.findById(nid);
+      if (node) updateNodeAliases(nid, generateSimpleAliases(node.name));
+    }
+    return nodeIds.length;
+  }
+
+  // Collect context for all nodes
+  const nodeContexts = [];
+  for (const nid of nodeIds) {
+    const node = NodeRepo.findById(nid);
+    if (!node) continue;
+    const chunks = ChunkRepo.getWithKeywords(nid, 3);
+    const keywords = new Set();
+    for (const c of chunks) {
+      const kws = safeJson(c.keywords_json, []);
+      kws.forEach(k => keywords.add(k));
+    }
+    nodeContexts.push({
+      nodeId: nid,
+      name: node.name,
+      summary: node.node_summary || '',
+      keywords: [...keywords].slice(0, 10).join(', ')
+    });
+  }
+
+  if (nodeContexts.length === 0) return 0;
+
+  const lang = getEffectiveLang(nodeContexts[0].name);
+  const nodeList = nodeContexts.map((nc, i) =>
+    `[${i + 1}] Name: "${nc.name}" | Summary: ${nc.summary || '(none)'} | Keywords: ${nc.keywords || '(none)'}`
+  ).join('\n');
+
+  const prompt = `Generate ${maxAliases} search aliases for each knowledge base node below.
+Aliases should be alternative names, abbreviations, or related terms that users might search for.
+
+Nodes:
+${nodeList}
+
+Return a JSON array of arrays, one inner array per node (same order). Each inner array contains string aliases.
+Example: [["alias1","alias2"],["alias3","alias4"]]
+
+JSON only:`;
+
+  try {
+    const text = await callLLM({ prompt, temperature: 0.0, seed: 42, taskName: 'batch_alias_generation' }) ?? '[]';
+    const parsed = await parseLLMJson(text, 'array', { context: 'batch_alias_generation', fallback: [] });
+
+    let count = 0;
+    for (let i = 0; i < nodeContexts.length; i++) {
+      const aliases = Array.isArray(parsed[i]) ? parsed[i] : [];
+      const valid = aliases
+        .filter(a => typeof a === 'string' && a.length > 0 && a.length < 100)
+        .filter(a => a.toLowerCase() !== nodeContexts[i].name.toLowerCase())
+        .slice(0, maxAliases);
+      if (valid.length > 0) {
+        updateNodeAliases(nodeContexts[i].nodeId, valid);
+        count++;
+      }
+    }
+    logger.info(`Batch alias generation: ${count}/${nodeContexts.length} nodes aliased`);
+    return count;
+  } catch (err) {
+    rethrowIfRateLimit(err);
+    logger.warn(`Batch alias generation failed, falling back to individual: ${err.message}`);
+    // Fallback: individual generation
+    let count = 0;
+    for (const nc of nodeContexts) {
+      try {
+        await generateAndSaveAliases(nc.nodeId, { includeChunks: true, maxAliases });
+        count++;
+      } catch (e) { rethrowIfRateLimit(e); }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return count;
+  }
+}
+
+/**
  * Generate aliases for all nodes missing aliases
  * @param {object} options - Options
  * @returns {Promise<object>} Results

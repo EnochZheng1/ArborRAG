@@ -14,18 +14,22 @@
  *   → (stageFinalize)     [results.success = true]
  */
 
-import { logAudit, runTransaction } from "../../db/db.js";
+import { db, logAudit, runTransaction } from "../../db/db.js";
 import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
 import { DatasetConfigRepo } from "../../db/repositories/DatasetConfigRepo.js";
 import { parseFile, isSupportedFileType } from "../fileParser.js";
 import { extractKnowledgePoints } from "../knowledgeExtractor.js";
 import { detectAuthorityLevel } from "../metadataExtractor.js";
-import { autoMapChunks, assignChunkToNode, generateAndSaveAliases } from "../nodeMapper.js";
+import { autoMapChunks, assignChunkToNode, generateAndSaveAliases, generateAliasesBatch } from "../nodeMapper.js";
+
+const SKIP_ALIASES = process.env.INGEST_SKIP_ALIASES === 'true';
 import { syncEmbeddings } from "../../embedding/chunkEmbeddings.js";
 import { invalidateVectorCache } from "../../kg/vectorTreeRouter.js";
+import { recordIngestionMetrics } from "../../learning/ingestionTracker.js";
 import { callLLM, isLlmConfigured } from "../../utils/llm.js";
 import { getCustomPrompt } from "../../prompts/promptManager.js";
 import { findMergeCandidates, queueNodeMergeSuggestion } from "../nodeMerger.js";
+import { reclassifyGeneralKPs } from "../kpNormaliser.js";
 import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
@@ -186,34 +190,71 @@ export async function stageMapChunks(ctx) {
       ctx.results.errors.push(`${mappingResult.unmapped.length} chunks could not be mapped to nodes`);
     }
 
-    // Generate search aliases for newly created nodes
-    if (useLLM && mappingResult.newNodes?.length > 0) {
+    // Generate search aliases for newly created nodes (batched, optional)
+    if (useLLM && !SKIP_ALIASES && mappingResult.newNodes?.length > 0) {
       ctx.setStep(documentId, "generating_aliases", "Generating search aliases for new nodes.", 95);
-      for (let i = 0; i < mappingResult.newNodes.length; i++) {
-        const node = mappingResult.newNodes[i];
+      const nodeIds = mappingResult.newNodes.map(n => n.node_id);
+      // Batch up to 5 nodes per LLM call
+      for (let b = 0; b < nodeIds.length; b += 5) {
+        const batch = nodeIds.slice(b, b + 5);
         try {
-          await generateAndSaveAliases(node.node_id, { includeChunks: true, maxAliases: 8 });
+          await generateAliasesBatch(batch, { maxAliases: 8 });
         } catch (err) {
-          logger.warn(`Failed to generate aliases for node ${node.node_id}: ${err.message}`);
+          logger.warn(`Batch alias generation failed: ${err.message}`);
         }
-        if (i < mappingResult.newNodes.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
+        if (b + 5 < nodeIds.length) await new Promise(r => setTimeout(r, 100));
       }
+    } else if (SKIP_ALIASES && mappingResult.newNodes?.length > 0) {
+      logger.info(`Alias generation skipped (INGEST_SKIP_ALIASES=true) for ${mappingResult.newNodes.length} new nodes`);
     }
   }
 }
 
 // ── Stage 5: Extract entities and facts from chunks ───────────────────────────
-// NOTE: Entity/fact LLM extraction is disabled — schema and tables are preserved
-// for future use but the LLM call is suppressed to reduce cost and latency.
+// Controlled by the per-dataset `entity_extraction_enabled` setting.
+// When disabled (default), schema and tables are preserved but LLM calls are skipped.
 
 export async function stageExtractEntities(ctx) {
   const { documentId } = ctx;
-  ctx.setStep(documentId, "entity_extraction", "Entity extraction skipped (disabled).", 96);
-  ctx.results.stats.entitiesExtracted = 0;
-  ctx.results.stats.factsExtracted = 0;
-  ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [] };
+  const enabled = DatasetConfigRepo.get('entity_extraction_enabled') === 'true';
+
+  if (!enabled) {
+    ctx.setStep(documentId, "entity_extraction", "Entity extraction skipped (disabled).", 96);
+    ctx.results.stats.entitiesExtracted = 0;
+    ctx.results.stats.factsExtracted = 0;
+    ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [] };
+    return;
+  }
+
+  ctx.setStep(documentId, "entity_extraction", "Extracting entities and facts…", 84);
+  logger.info(`[doc:${documentId}] Entity extraction enabled — processing chunks`);
+
+  try {
+    const { processDocumentForExtraction } = await import("../../extraction/entityFactExtractor.js");
+    const result = await processDocumentForExtraction(documentId, {
+      useLLM: true,
+      batchSize: 1,
+      onProgress: (progress) => {
+        ctx.setStep(documentId, "entity_extraction",
+          `Extracting entities… ${progress.chunks_processed}/${progress.chunks_total}`,
+          84 + Math.floor((progress.chunks_processed / Math.max(1, progress.chunks_total)) * 10)
+        );
+      }
+    });
+
+    ctx.results.stats.entitiesExtracted = result.total_entities || 0;
+    ctx.results.stats.factsExtracted = result.total_facts || 0;
+    ctx.results.extraction = result;
+    logger.info(`[doc:${documentId}] Entity extraction complete: ${result.total_entities} entities, ${result.total_facts} facts`);
+    ctx.setStep(documentId, "entity_extraction",
+      `Extracted ${result.total_entities} entities, ${result.total_facts} facts.`, 96);
+  } catch (err) {
+    logger.warn(`[doc:${documentId}] Entity extraction failed (non-fatal): ${err.message}`);
+    ctx.setStep(documentId, "entity_extraction", `Entity extraction failed: ${err.message}`, 96);
+    ctx.results.stats.entitiesExtracted = 0;
+    ctx.results.stats.factsExtracted = 0;
+    ctx.results.extraction = { entities: 0, facts: 0, chunks_processed: 0, errors: [err.message] };
+  }
 }
 
 // ── Stage 5b: Generate node summaries for newly created nodes ─────────────────
@@ -263,6 +304,27 @@ export async function stageNodeSummaries(ctx) {
   if (generated > 0) {
     logger.info(`Generated summaries for ${generated}/${newNodeIds.length} new nodes`);
     ctx.setStep(documentId, "node_summaries", `Generated ${generated} node summaries.`, 88);
+  }
+}
+
+// ── Stage 5b2: Reclassify "General" KPs to better-matching nodes ─────────────
+
+export async function stageReclassifyGeneral(ctx) {
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+  if (newNodeIds.length === 0) return; // no new nodes to reclassify against
+
+  ctx.setStep(documentId, "reclassify_general", "Reclassifying General KPs…", 88);
+
+  try {
+    const result = reclassifyGeneralKPs();
+    if (result.moved > 0 || result.suggested > 0) {
+      logger.info(`Reclassified General KPs: ${result.moved} moved, ${result.suggested} suggestions, ${result.unchanged} unchanged`);
+      ctx.setStep(documentId, "reclassify_general",
+        `Reclassified ${result.moved} KPs, ${result.suggested} suggestions.`, 89);
+    }
+  } catch (err) {
+    logger.warn(`General reclassification failed (non-fatal): ${err.message}`);
   }
 }
 
@@ -397,6 +459,34 @@ export function stageFinalize(ctx) {
   const { documentId, results } = ctx;
   ctx.setStep(documentId, "finalizing", "Finalizing document processing.", 99);
   updateDocumentStatus(documentId, "processed", results.chunks.length);
+
+  // Record ingestion metrics for the learning system
+  try {
+    // Derive metrics from available ctx data (not all stats are tracked inline)
+    const mappedChunks = results.chunks?.length ?? 0;
+    const newNodeCount = (ctx.createdNodeIds || []).length;
+
+    // Count decisions created during this document's ingestion
+    let decisionsCreated = 0;
+    try {
+      const decRows = db.prepare(`
+        SELECT COUNT(*) as c FROM pending_decisions
+        WHERE incoming_chunk_id IN (
+          SELECT id FROM chunks WHERE document_id = ?
+        )
+      `).get(documentId);
+      decisionsCreated = decRows?.c ?? 0;
+    } catch (_) { /* table may not have data yet */ }
+
+    recordIngestionMetrics(documentId, {
+      kpCount: mappedChunks,
+      avgKpConfidence: results.stats?.avgKpConfidence ?? 0,
+      decisionsCreated,
+      autoResolvedCount: 0, // auto-resolve happens inline; not tracked per-doc yet
+      newNodeCount
+    });
+  } catch (_) { /* non-fatal */ }
+
   ctx.setStep(documentId, "completed", "Document processed successfully.", 100, "processed");
 }
 
