@@ -20,7 +20,7 @@ export const NEGATION_PENALTY_FACTOR = 0.4;  // multiply score by this for negat
 // ── Retrieval caps ───────────────────────────────────────────────────────────
 export const RETRIEVAL_MAX_HIERARCHICAL = parseInt(process.env.RETRIEVAL_MAX_HIERARCHICAL, 10) || 15;
 export const RETRIEVAL_MAX_DIRECT       = parseInt(process.env.RETRIEVAL_MAX_DIRECT, 10) || 15;
-export const RETRIEVAL_RERANKER_POOL    = 20; // reranker selects top N from merged pool
+export const RETRIEVAL_RERANKER_POOL    = parseInt(process.env.RETRIEVAL_RERANKER_POOL, 10) || 30;
 
 // ── Document-scope reranker signal (4th heuristic on merged pool) ────────────
 export const DOC_MATCH_BOOST   = 0.1;   // boost for chunks whose doc_title matches query terms

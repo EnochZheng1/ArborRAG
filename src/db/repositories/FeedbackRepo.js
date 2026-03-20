@@ -73,11 +73,19 @@ export const FeedbackRepo = {
     }
 
     // Zero out scores and counts for chunks with no recent feedback events
-    db.prepare(`
-      UPDATE chunks SET feedback_score = 0, feedback_count = 0
-      WHERE (feedback_score != 0 OR feedback_count != 0)
-        AND id NOT IN (${[...chunkScores.keys()].map(() => '?').join(',') || 'NULL'})
-    `).run(...chunkScores.keys());
+    if (chunkScores.size === 0) {
+      // No recent events — reset ALL non-zero scores
+      db.prepare(`
+        UPDATE chunks SET feedback_score = 0, feedback_count = 0
+        WHERE feedback_score != 0 OR feedback_count != 0
+      `).run();
+    } else {
+      db.prepare(`
+        UPDATE chunks SET feedback_score = 0, feedback_count = 0
+        WHERE (feedback_score != 0 OR feedback_count != 0)
+          AND id NOT IN (${[...chunkScores.keys()].map(() => '?').join(',')})
+      `).run(...chunkScores.keys());
+    }
 
     return { updated, total: chunkScores.size };
   },

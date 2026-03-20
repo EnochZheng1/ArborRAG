@@ -1050,7 +1050,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     const scoreB = b.hierarchical_score || b.relevance_score || 0;
     return scoreB - scoreA;
   });
-  let chunks = allChunks.slice(0, maxChunks);
+  const rerankerPoolSize = Math.max(maxChunks, RETRIEVAL_RERANKER_POOL);
+  let chunks = allChunks.slice(0, rerankerPoolSize);
 
   // Determine the best node (if any) from hierarchical search
   let chosenNode = null;

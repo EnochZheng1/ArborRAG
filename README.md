@@ -1,6 +1,6 @@
 # ArborRAG — Tree-Based Knowledge Graph
 
-**v3.1.1** · Node.js · SQLite · OpenAI / Gemini
+**v3.1.2** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -92,6 +92,7 @@ INGEST_ORPHAN_CLEANUP=false        # Merge sparse nodes into parents
 # Retrieval tuning (v3.1)
 RETRIEVAL_MAX_HIERARCHICAL=15      # Max chunks from tree retrieval
 RETRIEVAL_MAX_DIRECT=15            # Max chunks from direct BM25 search
+RETRIEVAL_RERANKER_POOL=30         # Pre-reranker candidate pool size
 ```
 
 ---
@@ -165,6 +166,15 @@ docs/
 ---
 
 ## Changelog
+
+### v3.1.2 — Retrieval Pipeline Bug Fixes
+
+- **Feedback boost score resolution** — `applyFeedbackBoost()` now reads `hierarchical_score` / `relevance_score` instead of always falling back to 0.5 when `score` is absent; fixes ranking compression that affected every query
+- **Stale feedback score reset** — `recomputeFeedbackScores()` handles the empty-set case correctly; previously `NOT IN (NULL)` evaluated to UNKNOWN in SQLite, leaving stale scores permanently non-zero
+- **Frontend confidence tracking** — feedback submissions now include `confidenceAtAnswer` from the query result, populating the previously-empty `confidence_at_answer` column for calibration
+- **Reranker candidate pool** — pre-reranker slice now uses `RETRIEVAL_RERANKER_POOL` (default 30, env-configurable) instead of `maxChunks`, giving the reranker 50% more candidates to select from
+
+**Files changed:** 5 modified
 
 ### v3.1.1 — Scoring Simplification & Feedback Deferral
 

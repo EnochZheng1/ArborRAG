@@ -192,7 +192,10 @@ async function handleFeedback(rating) {
         answer: state.currentQueryResult.llm_response?.final_answer,
         rating,
         nodeIds,
-        chunkIds
+        chunkIds,
+        confidenceAtAnswer: state.currentQueryResult.confidence
+          ?? state.currentQueryResult.confidence_details?.score
+          ?? null
       })
     });
 

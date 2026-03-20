@@ -174,7 +174,7 @@ export function applyFeedbackBoost(chunks) {
 
   return chunks.map(chunk => {
     const feedbackScore = chunk.feedback_score || 0;
-    const baseScore = chunk.score || 0.5;
+    const baseScore = chunk.score ?? chunk.hierarchical_score ?? chunk.relevance_score ?? 0.5;
 
     // Apply feedback_score × learned multiplier, capped at ±0.3
     const rawAdj = feedbackScore * multiplier;
