@@ -336,6 +336,10 @@ function renderAskExecutionSummary(result) {
 
   const confidence = Number(result.confidence);
   const confidenceText = Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : 'n/a';
+  const rc = Number(result.retrieval_confidence);
+  const ag = Number(result.answer_groundedness);
+  const retrievalConfText = Number.isFinite(rc) ? `${Math.round(rc * 100)}%` : 'n/a';
+  const groundednessText = Number.isFinite(ag) ? `${Math.round(ag * 100)}%` : 'n/a';
   const chunksUsed = Number(result.chunks_used);
   const sourceCount = Array.isArray(result.sources)
     ? result.sources.length
@@ -358,7 +362,8 @@ function renderAskExecutionSummary(result) {
   const metricItems = [
     { label: 'Type', value: formatQueryTypeLabel(result.query_type || 'simple_lookup') },
     { label: 'Routing', value: routingLabel },
-    { label: 'Confidence', value: confidenceText },
+    { label: 'Retrieval', value: retrievalConfText },
+    { label: 'Grounding', value: groundednessText },
     { label: 'Chunks', value: formatSummaryNumber(chunksUsed) },
     { label: 'Sources', value: formatSummaryNumber(sourceCount) },
     { label: 'Citations', value: formatSummaryNumber(citationsCount) },
@@ -1193,7 +1198,12 @@ function displayAskResult(result, showTrace = false) {
     confidenceBadge.className = `confidence-badge confidence-${confidenceLevel}`;
     confidenceBadge.style.display = '';
     if (result.confidence_details?.explanation?.summary) {
-      confidenceBadge.title = result.confidence_details.explanation.summary;
+      const parts = [result.confidence_details.explanation.summary];
+      if (Number.isFinite(result.retrieval_confidence))
+        parts.push(`Retrieval: ${Math.round(result.retrieval_confidence * 100)}%`);
+      if (Number.isFinite(result.answer_groundedness))
+        parts.push(`Groundedness: ${Math.round(result.answer_groundedness * 100)}%`);
+      confidenceBadge.title = parts.join(' | ');
     }
   } else {
     confidenceBadge.style.display = 'none';

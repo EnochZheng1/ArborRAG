@@ -46,11 +46,6 @@ export function recordFeedback(feedbackData) {
       confidenceAtAnswer: confidenceAtAnswer != null ? Number(confidenceAtAnswer) : null
     });
 
-    // Update chunk quality scores based on feedback
-    if (chunkIds.length > 0) {
-      updateChunkQualityScores(chunkIds, normalizedRating);
-    }
-
     // Update node relevance tracking
     if (nodeIds.length > 0) {
       updateNodeRelevanceTracking(nodeIds, query, normalizedRating);
@@ -73,24 +68,6 @@ function normalizeRating(rating) {
     return Math.max(1, Math.min(5, Math.round(rating)));
   }
   return 3; // Neutral
-}
-
-/**
- * Update chunk quality scores based on feedback
- */
-function updateChunkQualityScores(chunkIds, rating) {
-  try {
-    // Adjust quality_score in chunks table
-    // Positive feedback increases score, negative decreases
-    const adjustment = (rating - 3) * 0.1; // -0.2 to +0.2
-
-    for (const chunkId of chunkIds) {
-      FeedbackRepo.updateChunkScore(chunkId, adjustment);
-    }
-  } catch (error) {
-    // Non-critical, log and continue
-    logger.warn(`Error updating chunk scores: ${error.message}`);
-  }
 }
 
 /**

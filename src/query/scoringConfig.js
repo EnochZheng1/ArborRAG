@@ -22,7 +22,7 @@ export const RETRIEVAL_MAX_HIERARCHICAL = parseInt(process.env.RETRIEVAL_MAX_HIE
 export const RETRIEVAL_MAX_DIRECT       = parseInt(process.env.RETRIEVAL_MAX_DIRECT, 10) || 15;
 export const RETRIEVAL_RERANKER_POOL    = 20; // reranker selects top N from merged pool
 
-// ── Document-scope pre-boost ─────────────────────────────────────────────────
+// ── Document-scope reranker signal (4th heuristic on merged pool) ────────────
 export const DOC_MATCH_BOOST   = 0.1;   // boost for chunks whose doc_title matches query terms
 export const DOC_MISMATCH_PENALTY = -0.05; // penalty for non-matching doc titles
 

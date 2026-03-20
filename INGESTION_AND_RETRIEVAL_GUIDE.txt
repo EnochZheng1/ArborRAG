@@ -1,0 +1,1537 @@
+================================================================================
+  TreeKB — Complete Ingestion & Retrieval Pipeline Guide
+  Every sub-action explained in detail
+================================================================================
+
+
+================================================================================
+PART 1: INGESTION — From File Upload to Stored Knowledge
+================================================================================
+
+
+1. FILE UPLOAD & JOB QUEUE
+--------------------------------------------------------------------------------
+
+1a. File Upload (src/routes/ingest.js)
+
+  When a file is uploaded via POST /upload, the Multer middleware saves it to
+  the /uploads directory on disk. The file filter checks the extension against
+  supported formats: PDF, DOCX, XLSX, TXT, MD, JSON, CSV, HTML, PPTX. The
+  original filename is decoded from HTTP Latin1 encoding back to UTF-8 (browsers
+  encode non-ASCII filenames this way).
+
+  The upload endpoint accepts several options:
+    - targetNodeId: force all chunks into a specific node (skip auto-mapping)
+    - useLLM: enable/disable LLM processing (default true)
+    - sync: if true, process inline and return results; if false, queue a
+      background job and return 202 with a job ID
+
+  In async mode (default), the file path and options are inserted into the
+  ingestion_jobs table with status "queued". The frontend can poll the job
+  status or listen via WebSocket for progress updates.
+
+1b. Job Queue (src/ingest/jobQueue.js)
+
+  A background loop (runPump) runs continuously. It iterates all dataset
+  connections and claims the next queued job from each dataset's
+  ingestion_jobs table using an atomic SQL UPDATE (prevents two workers from
+  claiming the same job).
+
+  Processing a claimed job:
+    1. Sets job status to "processing"
+    2. Starts a heartbeat timer (emits WebSocket update every 2 minutes to
+       prove the job is alive during long LLM calls)
+    3. Calls processDocument() inside the correct dataset's AsyncLocalStorage
+       context (so all db.prepare() calls route to the right SQLite file)
+    4. On success: marks job "completed", deletes uploaded file from disk
+    5. On failure: retries up to 3 times with 5-second delays
+
+  Special error handling:
+    - Rate-limit errors (HTTP 429): job paused with status "rate_limited",
+      requires manual resume. This avoids hammering the LLM API.
+    - Transient errors (network, timeout, 5xx): exponential backoff from 30s
+      to 5min, up to 10 retries before giving up
+    - Stuck job detection: if no heartbeat for 30 minutes, job is requeued
+      (checked every 5 minutes by a sweep timer)
+
+  Environment variables that control queue behavior:
+    INGEST_QUEUE_CONCURRENCY=1     (jobs processed one at a time)
+    INGEST_QUEUE_MAX_ATTEMPTS=3    (retry limit)
+    INGEST_QUEUE_RETRY_DELAY_MS=5000  (initial backoff between retries)
+    INGEST_STUCK_TIMEOUT_MINUTES=30   (heartbeat timeout)
+    INGEST_AUTO_EMBED=true         (auto-run embedding sync after ingestion batch)
+    INGEST_SKIP_ALIASES=false      (skip alias generation during ingestion)
+
+  Environment variables that control retrieval behavior:
+    RETRIEVAL_MAX_HIERARCHICAL=15  (max chunks from tree retrieval in merged pool)
+    RETRIEVAL_MAX_DIRECT=15        (max chunks from direct BM25 search in merged pool)
+
+
+2. PIPELINE RUNNER (src/ingest/pipeline/index.js)
+--------------------------------------------------------------------------------
+
+  The pipeline executes 10 stages in sequence. Each stage receives a shared
+  context object (ctx) and mutates it. If any stage throws an exception,
+  rollbackFailedDocument() is called to undo all changes:
+
+    - Deletes all chunks created for this document
+    - For shared KPs (source_documents_json has >1 entry), only removes this
+      doc's entry from the JSON array (keeps the chunk)
+    - Deletes FTS entries, embeddings, and decisions referencing deleted chunks
+    - Deletes newly created nodes that are now empty (no chunks, no children)
+      unless they are schema nodes (user-defined structure)
+    - Sets document status to "failed"
+
+  Stage order:
+    1. Parse File
+    2. Register Document
+    3. Extract Knowledge Points
+    4. Map Chunks to Nodes
+    5. Extract Entities (optional)
+    6. Generate Node Summaries
+    7. Reclassify General (auto-move KPs from "General" to better-matching nodes)
+    8. Topic Canonicalization
+    9. Orphan Cleanup (optional)
+   10. Finalize
+
+  After all documents in a batch finish, embedding sync runs once (not per
+  document) to generate vectors for all new nodes and chunks.
+
+
+3. STAGE 1: PARSE FILE (stageParseFile)
+--------------------------------------------------------------------------------
+
+3a. parseFile(filePath) — What happens to your document
+
+  The parser reads the file from disk and extracts plain text plus metadata.
+  The specific process depends on file type:
+
+  PDF Parsing:
+    1. Reads raw bytes, checks for %PDF magic bytes to verify it's really a PDF
+    2. Uses pdfjs-dist to extract text items from each page. Each text item has
+       an x,y coordinate and a string value.
+    3. Groups text items by Y-coordinate (same horizontal line) and sorts by
+       X-coordinate (left to right). Items on the same Y-line with a gap > 10
+       pixels get a space inserted between them. This handles multi-column
+       layouts — column 1 on the left and column 2 on the right are on the
+       same Y range but different X ranges.
+    4. Lines are joined with newlines to produce the final text.
+    5. Extracts PDF metadata via pdf.getMetadata():
+       - Title, Author, Subject, Creator, Producer
+       - CreationDate (parsed from PDF format D:20240115120000+08'00' to ISO)
+       - ModDate (same parsing)
+       - Page count
+    6. Returns { content: "full text...", docMeta: { title, author, ... } }
+
+  DOCX Parsing:
+    1. Checks ZIP magic bytes (DOCX is a ZIP archive)
+    2. Uses mammoth library to convert the XML content to plain text
+    3. Opens the ZIP, reads docProps/core.xml, extracts metadata via regex:
+       <dc:creator>, <cp:revision>, <dcterms:created>, etc.
+    4. Returns { content, docMeta }
+
+  XLSX/CSV Parsing:
+    1. Reads all sheets using xlsx library
+    2. Each row becomes tab-separated values: "Name\tRate\tDate"
+    3. Rows joined with newlines
+    4. This tab-separated format is important because detectTables() in Stage 3
+       will recognize it as structured table data
+
+  HTML Parsing:
+    1. Uses cheerio to parse the HTML DOM
+    2. Removes <script>, <style>, <noscript> tags
+    3. Extracts body text
+    4. Collapses whitespace
+
+  PPTX Parsing:
+    1. Opens as ZIP, reads slide XML files in order
+    2. Extracts text from <a:t> tags (PowerPoint text elements)
+    3. Also reads notesSlides for speaker notes
+    4. Merges with docProps metadata (same as DOCX)
+
+  HOW THIS AFFECTS RETRIEVAL:
+    The doc_title extracted here (from PDF metadata title field, or filename if
+    no metadata) is stored on every chunk created from this document. At query
+    time, searchByDocTitle("HR Policy") uses a LIKE match on chunks.doc_title
+    to find all chunks from documents whose title contains "HR Policy". This
+    is one of 4 direct search methods used before tree navigation.
+
+
+4. STAGE 2: REGISTER DOCUMENT (stageRegister)
+--------------------------------------------------------------------------------
+
+4a. File Hashing and Duplicate Detection
+
+  The pipeline reads the file from disk and computes a SHA256 hash of the
+  entire file contents. This produces a unique fingerprint like "a7f3b2c1..."
+  for each file.
+
+  Duplicate check logic:
+    - Queries: SELECT * FROM documents WHERE file_hash = ?
+    - If found with status "processed": this exact file was already ingested.
+      Sets ctx.isDuplicate = true. All subsequent stages are skipped.
+    - If found with status "failed" or "pending": a previous attempt was
+      incomplete. Reuses the same document_id and retries processing.
+    - If not found: creates a new row in the documents table with:
+      filename, original_name, file_type, file_size, file_hash,
+      metadata_json (from parsing stage), status = "processing"
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Prevents the same content from appearing multiple times in search results.
+    Without dedup, uploading the same PDF 3 times would create 3 copies of
+    every chunk, diluting reranker scores (the same fact occupies 3 of the
+    top 20 slots instead of 1) and wasting LLM context window during answer
+    generation.
+
+
+5. STAGE 3: EXTRACT KNOWLEDGE POINTS (stageExtractKPs)
+--------------------------------------------------------------------------------
+
+  This is the most complex stage. It converts the raw document text into
+  30-50 atomic Knowledge Points (KPs) using several sub-processes.
+
+5a. Section Heading Detection — detectSectionHeadings(text)
+
+  Purpose: Find the document's structural outline before splitting into
+  segments, so each segment knows which section it belongs to.
+
+  The function scans every line of the document text and checks against 14
+  regex patterns in priority order:
+
+  Pattern                          Example                  Detected Level
+  ─────────────────────────────────────────────────────────────────────────
+  ALL-CAPS (no lowercase, 3-80ch)  EMPLOYEE BENEFITS        1
+  Markdown # heading               ## Health Insurance       2 (# count)
+  Numbered N. Title                1. Probationary Period    1
+  Multi-level N.N Title            3.1 Annual Leave          2 (dots + 1)
+  Multi-level N.N.N Title          1.2.3 Sick Leave Policy   3 (dots + 1)
+  CJK chapter 第X章                第一章 总则               1
+  CJK section 第X节                第二节 薪资               2
+  CJK article 第X条                第三条 绩效考核            3
+  CJK enumeration 一、             一、招聘流程               1
+  CJK sub-enum （一）              （一）面试要求             2
+  CJK bracket 【一】               【一】通知                2
+  Parenthesis enum (1)             (1) Required documents    3
+
+  URL-like strings are skipped (e.g., "https://..." or percent-encoded paths
+  that sometimes appear in PDF metadata text).
+
+  Each heading gets a startIndex (character offset in the full text). The
+  function returns an ordered list of { heading, startIndex, level } objects.
+
+  Breadcrumb path reconstruction — getSectionAtPosition(headings, charPos):
+    Maintains a 5-level stack. As it scans headings up to the given character
+    position, it sets the heading at its level slot and clears all deeper
+    levels. Example:
+
+    Headings encountered up to position 5000:
+      Level 1: "Employee Benefits" (at char 200)
+      Level 2: "Leave Policies" (at char 2000)
+      Level 3: "Sick Leave Policy" (at char 4500)
+
+    Stack: ["Employee Benefits", "Leave Policies", "Sick Leave Policy"]
+    Returns: { heading: "Sick Leave Policy",
+               path: ["Employee Benefits", "Leave Policies", "Sick Leave Policy"] }
+
+  HOW THIS AFFECTS RETRIEVAL:
+    These section paths become topic_hint and subtopic_hint on each KP. During
+    tree building (Stage 4), the path ["Employee Benefits", "Leave Policies",
+    "Sick Leave Policy"] creates 3 nested nodes in the knowledge tree:
+      Root → Employee Benefits → Leave Policies → Sick Leave Policy
+    At query time, a search for "sick leave" navigates to "Sick Leave Policy"
+    via beam search, finding all KPs underneath it. Without section detection,
+    all KPs would get a generic topic like the document title, creating one
+    flat node with 40+ chunks instead of a navigable tree.
+
+5b. Text Segmentation — splitIntoSegments(text, 8000, 300, headings)
+
+  Purpose: Split the document into pieces small enough for a single LLM call.
+  The LLM can't process an 80,000-character document in one request.
+
+  Algorithm:
+    1. Start at character 0
+    2. Set window end = start + 8000 (segment size)
+    3. If end is not at the document end, look backward from end for a "\n\n"
+       (paragraph break) within the last 40% of the window. If found, break
+       there instead of mid-sentence.
+    4. Tag this segment with its section heading by calling
+       getSectionAtPosition(headings, startCharOffset)
+    5. Advance: next start = end - 300 (overlap)
+    6. Forward-progress guard: ensure at least 4000 chars advance per step
+       (prevents infinite loops on text with no paragraph breaks)
+    7. Snap forward to nearest paragraph break in the overlap zone
+
+  The 300-character overlap ensures that a KP spanning the segment boundary
+  appears in both segments. Cross-segment deduplication (step 5h) will later
+  remove the duplicate.
+
+  Example: A 24,000-char document with 3 sections becomes 3 segments:
+    Segment 1: chars 0–8000     (tagged "Section 1")
+    Segment 2: chars 7700–15700 (300 overlap, tagged "Section 2")
+    Segment 3: chars 15400–24000 (tagged "Section 3")
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Each segment gets sent to the LLM with its section context. The section
+    tag helps the LLM generate better topic_hint values. Without the section
+    tag, segment 2 might generate topic_hint: "General" instead of
+    topic_hint: "Leave Policies", leading to poorly organized tree nodes.
+
+5c. LLM KP Extraction — extractKPsFromSegment(segment, docTitle, lang, ...)
+
+  Purpose: Ask the LLM to break the text into atomic, self-contained
+  knowledge statements.
+
+  The function builds a prompt that includes:
+    - The extraction instruction (from prompt catalog or custom override)
+    - Document title for context
+    - The segment text (up to 8000 chars)
+    - Section path context, appended as:
+      "Context: This text falls under section path: 'Employee Benefits' >
+       'Leave Policies'. Use 'Employee Benefits' as topic_hint and
+       'Leave Policies' as subtopic_hint for KPs."
+
+  LLM call parameters:
+    temperature: 0.0    (deterministic — same input produces same output)
+    seed: 42            (reinforces determinism for models that support it)
+    maxOutputTokens: 8192  (allows ~50 KPs per segment, each ~150 JSON tokens)
+    thinkingBudget: 0   (disables "chain of thought" mode — KP extraction is
+                         pure structured output, thinking wastes tokens and
+                         can cause output truncation)
+
+  The LLM returns a JSON array like:
+    [
+      {
+        "statement": "Employees with 3+ years of service receive 15 days of
+                      annual leave per year",
+        "kp_type": "rule",
+        "topic_hint": "Leave Policies",
+        "subtopic_hint": "Annual Leave",
+        "tags": ["annual leave", "3 years", "15 days"],
+        "confidence": 0.92,
+        "source_excerpt": "...employees who have completed three (3) or more
+                          years of continuous service shall be entitled to
+                          fifteen (15) working days..."
+      },
+      ...more KPs...
+    ]
+
+  Checkpoint recovery: Before processing each batch of segments, the current
+  state (segment index + all extracted KPs so far) is saved to the job's
+  checkpoint_json field. If a 429 rate-limit error occurs, the job pauses.
+  When it resumes later, it reads the checkpoint and continues from the last
+  incomplete segment instead of re-extracting everything from scratch.
+
+  Paragraph fallback: If the LLM call fails for a non-rate-limit reason
+  (malformed output, timeout, etc.), that segment's text is split on "\n\n"
+  into paragraphs, and each paragraph becomes a low-confidence KP
+  (confidence: 0.5, kp_type: "context"). This ensures some content is
+  captured even when the LLM fails.
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Each KP becomes a chunk in the database:
+    - "statement" becomes the searchable content (what BM25 FTS indexes)
+    - "tags" become keywords_json on the chunk (used by keywordTagSearch at
+      query time — bypasses BM25's IDF weighting for short values like "3")
+    - "kp_type" categorizes the knowledge (fact/rule/definition/procedure/
+      example/context) — displayed in the frontend
+    - "source_excerpt" is the verbatim original text — appended to content so
+      exact numbers survive LLM paraphrasing and remain FTS-searchable
+    - "topic_hint" / "subtopic_hint" determine which tree node this KP goes
+      under — this drives the entire tree structure
+
+5d. Quality Scoring — scoreKPQuality(content)
+
+  Purpose: Adjust each KP's confidence based on how specific and concrete
+  its content is. Specific facts with numbers, dates, and names are more
+  valuable than vague general statements.
+
+  Scoring rules (cumulative):
+    +0.05  if content has numbers with units ("15 days", "90%", "4 hours")
+    +0.05  if content has currency amounts ("$5,000", "¥300")
+    +0.03  if content has dates ("2024-01-15", "January 15")
+    +0.02  if content has proper nouns ("John Smith", "Human Resources Dept")
+    +0.02  if content has any standalone number
+    +0.03  if content has CJK numbers with units ("3天", "5个月")
+    -0.10  if content starts with generic phrases ("the company", "this
+           policy", "employees", "it is important") AND has no positive
+           markers above
+    -0.05  if content is very short (< 40 chars) AND has no positive markers
+
+  Total range: -0.15 to +0.10. This adjustment is added to the base
+  confidence (typically 0.8 from LLM).
+
+  Example:
+    "Employees with 3+ years get 15 days leave" → +0.05 (number+unit) +0.02
+    (standalone number) = +0.07 → final confidence: 0.87
+    "The company provides various benefits" → -0.10 (generic) → confidence: 0.70
+
+  HOW THIS AFFECTS RETRIEVAL:
+    The confidence value is used in two places:
+    1. The KP Decision Engine (Stage 4) can IGNORE KPs with confidence below
+       0.35 (configurable threshold). Low-quality generic statements are
+       filtered out.
+    2. At query time, chunks with higher confidence contribute more to the
+       authority_score factor in confidence scoring. A chunk with 0.87
+       confidence is weighted higher than one with 0.65.
+
+5e. KP Normalization — normaliseKP(raw, index, docTitle, documentId, authority)
+
+  Purpose: Clean and standardize each raw LLM output into the format needed
+  for database storage.
+
+  Processing steps:
+    1. Filter short: if statement < 10 chars, discard (LLM sometimes returns
+       noise like "See above" or "N/A")
+    2. Validate kp_type: must be one of {fact, rule, definition, procedure,
+       example, context}. Unknown types default to "fact"
+    3. Append source_excerpt to content:
+       The LLM's "statement" is often a paraphrase that loses exact wording.
+       The "source_excerpt" is the verbatim original text. By storing:
+         content = statement + "\n" + source_excerpt
+       exact numbers from the original document (like "90 days", "$5,000",
+       "2024-01-15") remain in the chunk's searchable text even if the LLM
+       rounded or rephrased them.
+       Exception: if the excerpt is already contained within the statement
+       (substring match), skip appending to avoid redundancy.
+    4. Build source_documents_json: JSON array with one entry:
+       [{ doc_id: 123, doc_title: "HR Policy", excerpt: "..." }]
+       This will grow if other documents MERGE into this chunk later.
+    5. Apply quality scoring (scoreKPQuality) to adjust confidence
+    6. Clamp final confidence to [0.1, 1.0]
+
+  Output: A normalized KP object with all fields needed for database storage:
+    content, kp_type, topic_hint, subtopic_hint, confidence, keywords,
+    authority_level, source_excerpt, source_documents_json, doc_title, etc.
+
+5f. Table Detection — detectTables(text)
+
+  Purpose: Find structured tabular data in the document text that the LLM
+  might miss or misinterpret.
+
+  The function scans line by line for two patterns:
+
+  Markdown tables: Lines matching the pattern "| cell | cell |"
+    Example input:
+      | Level  | Days | Rate |
+      |--------|------|------|
+      | Junior | 10   | 80%  |
+      | Senior | 15   | 100% |
+
+    Processing:
+      1. Groups consecutive lines starting with "|"
+      2. Removes separator rows (lines with only dashes, pipes, colons)
+      3. Splits remaining lines on "|", trims whitespace
+      4. First row = headers, remaining = data rows
+      5. Returns { startIndex, endIndex, headers: ["Level","Days","Rate"],
+                   rows: [["Junior","10","80%"], ["Senior","15","100%"]] }
+
+  Tab-separated tables: Consecutive lines with the same number of tab
+  characters (>=1 tab), running for 3+ lines.
+    Example input (from Excel paste or CSV):
+      Level\tDays\tRate
+      Junior\t10\t80%
+      Senior\t15\t100%
+
+    Processing:
+      1. Counts tabs in each line
+      2. Groups consecutive lines with matching tab counts
+      3. Requires 3+ lines to qualify as a table
+      4. Splits each line on "\t"
+      5. First row = headers, rest = data rows
+
+5g. Table-to-KP Conversion — tableRowsToKPs(tables, docTitle, options)
+
+  Purpose: Convert each table row into a searchable, self-contained chunk.
+
+  For each row in each detected table:
+    1. Build header-value pairs: "Level: Junior | Days: 10 | Rate: 80%"
+    2. Skip rows where the content is < 10 chars
+    3. Derive topic_hint from the section heading that the table appears
+       under (using getSectionAtPosition with the table's startIndex).
+       If no heading found, use docTitle.
+    4. Set confidence: 0.85 (structured data is reliable)
+    5. Set kp_type: "fact"
+    6. Extract keywords from the content string
+
+  Deduplication against LLM KPs: If the LLM already extracted
+  "Junior level employees get 10 days at 80% rate", the table KP
+  "Level: Junior | Days: 10 | Rate: 80%" would have wordDiceSimilarity
+  >= 0.75 and is discarded. Only table rows that the LLM missed are kept.
+
+  Cross-dedup against paragraph fallbacks: Same process at 0.75 threshold
+  to prevent table rows from duplicating paragraph content.
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Tables contain the densest factual data in most documents: rate tables,
+    threshold tiers, schedule matrices. A query like "what is the leave rate
+    for senior employees?" needs to find the specific row. Without table-to-KP
+    conversion, the entire table would be one big chunk, and the answer LLM
+    would need to parse the table format. With row-level KPs, BM25 can
+    directly match "Senior" + "Rate" to the exact row chunk.
+
+5h. Paragraph Fallbacks — extractParagraphFallbacks(text, docTitle, options)
+
+  Purpose: Safety net for content the LLM missed. Ensures every substantial
+  block of text is BM25-searchable.
+
+  Algorithm:
+    1. Split text on "\n\n" (double newline = paragraph break)
+    2. Track character offset for each paragraph (needed for section mapping)
+    3. Merge short paragraphs: consecutive paragraphs under 100 chars are
+       joined (prevents bullet points from becoming separate tiny chunks)
+    4. Filter: keep only paragraphs >= 80 chars AND not matching boilerplate
+       patterns (page numbers, "Table of Contents", "DRAFT", copyright, etc.)
+    5. Cap: min(40, max(10, kpCount / 3)) — if the LLM extracted 30 KPs,
+       allow up to 10 paragraph fallbacks. For large documents (90 KPs),
+       up to 30 fallbacks.
+    6. For each paragraph, derive topic_hint from its section heading
+       (getSectionAtPosition with the paragraph's char offset)
+    7. Set kp_type: "paragraph_context", confidence: 0.6
+
+  Deduplication against LLM KPs: Only paragraphs with wordDiceSimilarity
+  < 0.85 against all existing KPs are kept. A paragraph that is 90% covered
+  by existing KPs is discarded. The 0.85 threshold is deliberately high
+  because paragraphs typically contain 2-3 facts while KPs are atomic — so
+  overlap is partial even when topics match.
+
+  HOW THIS AFFECTS RETRIEVAL:
+    These paragraph chunks appear in BM25 search results alongside LLM KPs.
+    Their lower confidence (0.6 vs ~0.85 for LLM KPs) means they rank lower
+    in the reranker. But they act as a recall safety net: if a user asks about
+    a specific clause that the LLM missed extracting as a KP, the paragraph
+    containing that clause is still findable via FTS5 full-text search.
+
+5i. Cross-Segment Deduplication — deduplicateAcrossSegments(kps, 0.9)
+
+  Purpose: Remove duplicate KPs created by the 300-char overlap between
+  segments. A sentence at the overlap boundary might be extracted as a KP
+  by both adjacent segments.
+
+  Algorithm: O(n²) comparison. For each KP, compute wordDiceSimilarity
+  against all previously kept KPs. If similarity >= 0.9 (near-identical),
+  drop the duplicate. With n = 30-50 KPs, this completes in < 1ms.
+
+
+6. STAGE 4: MAP CHUNKS TO NODES (stageMapChunks)
+--------------------------------------------------------------------------------
+
+  This is where KPs enter the knowledge tree. The main function is
+  autoMapChunks() in nodeMapper.js. If a targetNodeId was specified in the
+  upload request, all chunks go to that single node (skip all the logic
+  below).
+
+6a. Topic Canonicalization — canonicalizeTopicHints(uniqueTopics, useLLM)
+
+  Purpose: Before building the tree, check if any of the LLM-generated
+  topic names match existing nodes in the tree. This prevents creating
+  duplicate nodes like "Leave Policy" and "Employee Leave" for the same
+  concept.
+
+  Algorithm:
+    1. Collect all unique topic_hint values from the current document's KPs
+       (excluding "General")
+    2. For each unique topic:
+       a. BM25 search existing nodes: recalls top 12 candidates by name/summary
+       b. Ask LLM: "Is topic 'Employee Leave' equivalent to any of these
+          existing nodes? [list of candidates]"
+       c. If LLM matches (e.g., "Employee Leave" = "Leave Policies"):
+          remap all KPs with topic_hint "Employee Leave" to "Leave Policies"
+    3. This typically makes 3-10 LLM calls per document (one per unique topic)
+
+  Example:
+    Document 1 created node "Leave Policies".
+    Document 2's LLM extracted KPs with topic_hint "Employee Leave".
+    Canonicalization asks LLM: "Is 'Employee Leave' same as 'Leave Policies'?"
+    Answer: Yes.
+    Result: All "Employee Leave" KPs now use "Leave Policies" → they go under
+    the existing node instead of creating a new one.
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Prevents tree fragmentation. If 5 documents each create their own variant
+    of the same topic ("Leave Policy", "Leave Policies", "Employee Leave",
+    "PTO", "Annual/Sick Leave"), the tree would have 5 separate nodes with
+    scattered chunks. A query about "leave policy" would need beam search to
+    explore all 5 nodes. Canonicalization merges them into 1 concentrated
+    node, making retrieval faster and more complete.
+
+6b. Build Topical Hierarchy — buildTopicalHierarchy(kps, docTitle, docId, ...)
+
+  Purpose: Organize KPs into a tree structure based on their topic_hint
+  and subtopic_hint values.
+
+  Algorithm:
+    1. Group KPs by normalized topic_hint:
+       { "Leave Policies": [kp1, kp2, kp5],
+         "Compensation":   [kp3, kp4, kp6] }
+
+    2. For each topic group, call findOrCreateTopicNode() (see 6c below)
+       to either reuse an existing node or create a new one.
+
+    3. Subtopic depth decision: For each topic, collect all unique
+       subtopic_hint values. Calculate mean pairwise wordDiceSimilarity
+       across all unique subtopics:
+       - If mean >= 0.6: subtopics are too similar to warrant separate nodes
+         → all KPs go directly under the topic node (flat)
+       - If mean < 0.6: subtopics are meaningfully different → create
+         subtopic child nodes
+
+       Example (creates subtopic nodes):
+         topic="Benefits", subtopics=["Health Insurance","Dental","Vision"]
+         Mean Dice: "Health Insurance" vs "Dental" = 0.15,
+                    "Health Insurance" vs "Vision" = 0.10, etc.
+         Mean ~0.12 < 0.6 → Create 3 subtopic nodes under Benefits
+
+       Example (flat, no subtopic nodes):
+         topic="Benefits", subtopics=["Benefits Overview","Benefit Summary"]
+         Mean Dice: "Benefits Overview" vs "Benefit Summary" = 0.65
+         Mean ~0.65 >= 0.6 → All KPs go directly under Benefits node
+
+    4. Multi-level paths: If subtopic_hint contains " > " separator
+       (e.g., "Health Insurance > Enrollment"), it's split into intermediate
+       and leaf nodes. This creates 3-level depth:
+       Benefits → Health Insurance → Enrollment
+
+    Returns: { nodeMap: Map(kpIndex → nodeId), newNodes: [...] }
+
+  HOW THIS AFFECTS RETRIEVAL:
+    This hierarchy IS the tree that beam search navigates at query time.
+    Good hierarchy = efficient retrieval:
+    - A 3-level tree like Root → Benefits → Health Insurance → [chunks]
+      lets beam search narrow quickly: root scoring finds "Benefits" →
+      children scoring finds "Health Insurance" → returns relevant chunks
+    - A flat tree with 1 node containing 40 chunks requires the reranker
+      to sort all 40, which is less precise than navigating to a 5-chunk
+      leaf node
+
+6c. Find or Create Topic Node — findOrCreateTopicNode(topicName, parentId, ...)
+
+  Purpose: Decide whether to reuse an existing node or create a new one.
+  This is called once per unique topic during hierarchy building.
+
+  Algorithm:
+    1. Fetch siblings: NodeRepo.findByParent(parentId) — gets all direct
+       children of the parent node (up to 50)
+    2. Score each sibling: compute wordDiceSimilarity(topicName, sibling.name)
+       for every sibling
+    3. Find best match (highest Dice score)
+    4. Decision:
+       - Score >= threshold (default 0.35, tunable by learning system):
+         REUSE the matching sibling node.
+         Returns { ...sibling, _created: false }
+       - Score between 0.25 and threshold:
+         ASK LLM to confirm: "Is 'Employee Leave' semantically equivalent to
+         'Leave Policies'?" Only reuse if LLM confidence >= 0.65
+       - Score < 0.25:
+         CREATE NEW node under parent. Insert into nodes table, update FTS.
+         Returns { ...newNode, _created: true }
+    5. Race condition handling: If two parallel ingestion jobs try to create
+       the same node simultaneously, the second INSERT hits the UNIQUE
+       constraint on (parent_id, name). The catch block re-scans siblings
+       and reuses any match with Dice > 0.85.
+
+  What wordDiceSimilarity actually computes:
+    1. Tokenize both strings: CJK characters become single tokens, Latin
+       text splits on word boundaries. Everything lowercased.
+       "Annual Leave Policy" → ["annual", "leave", "policy"]
+       "Leave Policies" → ["leave", "policies"]
+    2. Compute unigram Dice: 2 × |intersection| / (|setA| + |setB|)
+       intersection = {"leave"} → 1
+       Dice = 2×1 / (3+2) = 0.40
+    3. Compute bigram Dice: same formula on consecutive token pairs
+       "annual|leave", "leave|policy" vs "leave|policies"
+       intersection = 0 → Dice = 0
+    4. If either text has < 4 tokens: return unigram Dice (0.40)
+       Otherwise: 0.3 × unigram + 0.7 × bigram
+
+  HOW THE 0.35 THRESHOLD AFFECTS RETRIEVAL:
+    Too low (0.20) = aggressive reuse. "Training Policy" and "Payroll Policy"
+    have Dice ~0.25 and would be merged, mixing unrelated content under one
+    node. Query for "payroll" would return training content too.
+    Too high (0.60) = conservative splitting. "Annual Leave" and "Annual Leave
+    Policy" (Dice ~0.55) would become separate nodes, fragmenting retrieval.
+    The self-learning system adjusts this threshold based on how users resolve
+    node_merge_suggestion decisions.
+
+6d. KP Decision Engine — resolveKPAction(kp, nodeId, documentId)
+
+  Purpose: For each KP about to be stored under a node, decide what to do.
+  This prevents duplicates, detects conflicts, and handles versioning.
+
+  Five possible actions: IGNORE, MERGE, REPLACE, NORMALIZE_THEN_STORE, STORE
+
+  STEP 1 — IGNORE CHECKS (3 fast filters, no DB or LLM calls):
+    a. Content length < 15 chars → IGNORE
+       Reason: too short to be a meaningful knowledge point
+    b. kp.confidence < 0.35 (configurable threshold) → IGNORE
+       Reason: the quality scorer flagged this as too uncertain
+    c. Content matches any of 12 boilerplate regex patterns → IGNORE
+       Patterns: "Page 3 of 12", "Chapter 1", "Table of Contents",
+       "Last Modified", "Confidential", "DRAFT", "Do Not Distribute",
+       "All Rights Reserved", "Copyright © 2024", "[]", "Version 1.2"
+
+  STEP 2 — SIMILARITY SCAN (1 DB query + CPU comparisons):
+    a. ChunkRepo.findSimilarInNode(nodeId, content, 15) — runs a BM25
+       search on chunks_fts scoped to chunks in this specific node.
+       Returns up to 15 candidate chunks that share words with the incoming KP.
+    b. For each candidate, compute wordDiceSimilarity(incoming, candidate).
+       Track the best match (highest Dice score).
+
+    Decision based on best Dice score:
+
+    Dice >= 0.98 AND 3+ chunks exist in node → IGNORE
+      This is an exact duplicate. The same fact already exists multiple
+      times in this node. No need to add another copy.
+
+    Dice >= 0.80 (configurable) AND no value mismatch → MERGE
+      The incoming KP says essentially the same thing as an existing chunk,
+      just with different wording. Instead of creating a duplicate chunk,
+      the system adds this document to the existing chunk's
+      source_documents_json array:
+        Before: [{ doc_id: 1, doc_title: "Policy Manual" }]
+        After:  [{ doc_id: 1, doc_title: "Policy Manual" },
+                 { doc_id: 2, doc_title: "Employee Handbook" }]
+      This tracks that two documents confirm the same fact.
+
+    Dice >= 0.80 AND value mismatch detected → falls through to Step 4
+      The texts are similar in topic but contain different numbers/values.
+      This needs LLM judgment.
+
+    Value mismatch detection (hasValueMismatch):
+      Extracts structured values from both texts using regex:
+        - Numbers with units: "15 days", "90%", "4 hours"
+        - Currency: "$5,000", "¥300"
+        - ISO dates: "2024-01-15"
+      If both texts have extracted values AND the value sets differ, it's
+      a value mismatch. If either text has zero extractable values, no
+      mismatch is declared (can't compare nothing).
+      Example:
+        Incoming: "Employees receive 15 days annual leave"
+        Existing: "Staff get 10 days annual leave"
+        Values: ["15 days"] vs ["10 days"] → mismatch → skip auto-merge
+
+  STEP 3 — TEMPORAL/AUTHORITY CHECK (runs only if there IS a best candidate
+  AND the incoming content contains a temporal signal):
+
+    detectTemporalSignal checks for 7 regex patterns that indicate the
+    incoming KP is a newer version of existing information:
+      "as of", "updated", "effective", "revised", "new"
+      "since 2024", ISO dates (2024-01-15), "Q1 2024", "January 2024"
+
+    If temporal signal found:
+      a. Compare authority ranks:
+         policy = 3, sop = 2, training = 1, personal = 0
+      b. If incoming has equal or higher authority AND confidence >= 0.85:
+         AUTO-REPLACE. Returns the existing chunk ID so the caller can
+         mark it superseded (status='superseded', superseded_by=newChunkId).
+      c. Otherwise: QUEUE replace_suggestion decision for human review.
+         The incoming KP is still stored (action=STORE), but a pending
+         decision is created so a human can confirm whether the old chunk
+         should be superseded.
+
+    Why authority matters: A personal note from an employee shouldn't
+    auto-replace an official policy document, even if it's newer. But a
+    new policy version (authority=policy) should replace an old policy
+    version (also authority=policy).
+
+  STEP 4 — LLM CONFLICT CHECK (runs when Dice >= 0.55 AND LLM is available):
+
+    Calls checkConflictOrNormalize(incomingContent, existingContent):
+      Sends this prompt to the LLM:
+        "Compare these two knowledge statements:
+         Statement A: 'Employees receive 15 days annual leave'
+         Statement B: 'Staff get 10 days annual leave'
+         Do they AGREE (same fact, different wording) or CONFLICT
+         (contradictory information)?
+         If agree: return a canonical merged statement.
+         If conflict: identify the specific difference."
+
+      Temperature 0.0, seed 42, maxOutputTokens 300.
+
+    LLM responses:
+      a. {"relationship":"agree", "canonical":"...", "confidence":0.85}
+         AND confidence >= 0.70:
+         → NORMALIZE_THEN_STORE
+         The incoming KP's content is mutated to the canonical form.
+         Both KPs say the same thing, but now the canonical version is
+         stored (cleaner for future matching).
+
+      b. {"relationship":"conflict", "conflict_detail":"A says 15 days while
+         B says 10 days", "confidence":0.90}
+         AND confidence >= 0.70:
+         → QUEUE value_conflict decision for human review.
+         The incoming KP is still stored (action=STORE), but a decision
+         is created with the conflict detail. A human must decide which
+         value is correct or if both are valid in different contexts.
+
+    Why Dice >= 0.55 threshold: At Dice 0.40, texts can be related in topic
+    but differ significantly in specificity (e.g., "probationary period"
+    vs "90-day probationary period" have Dice ~0.44). Below 0.55, both KPs
+    are stored separately to preserve the specific numeric detail.
+
+  STEP 5 — DEFAULT: STORE
+    If none of the above checks triggered, the KP is stored as a brand new
+    chunk with no special handling.
+
+  HOW THE 5-WAY DECISION AFFECTS RETRIEVAL:
+    IGNORE: Prevents noise chunks (boilerplate, duplicates, low-confidence
+      garbage) from appearing in search results
+    MERGE: Consolidates identical facts from multiple documents into one
+      chunk. At query time, one chunk appears instead of 3 duplicates, with
+      source_documents_json listing all 3 documents for richer citations.
+    REPLACE: Keeps information current. Old superseded chunks have
+      status='superseded' and are excluded from all queries (WHERE status =
+      'active'). Users always see the latest version.
+    NORMALIZE: Rewrites redundant wordings into a canonical form. Cleaner
+      BM25 matching because the same fact has consistent phrasing.
+    STORE + queued conflict: Preserves both versions until a human decides.
+      The answer LLM might generate "According to [Source A], the limit is
+      15 days, but [Source B] states 10 days" — which is more honest than
+      silently picking one.
+
+6e. Chunk Storage — assignKPToNode(kp, nodeId, documentId)
+
+  Purpose: Insert the KP into the chunks table and all related indexes.
+
+  Database operations:
+    1. ChunkRepo.insertKP({
+         doc_title, content_clean, chunk_type, keywords_json, fields_json,
+         scope_json, authority_level, node_id, document_id, chunk_index,
+         kp_type, source_excerpt, source_documents_json,
+         feedback_score: 0, feedback_count: 0
+       })
+       → INSERT INTO chunks (...) VALUES (...)
+       → Returns the new chunk ID
+
+    2. ChunkRepo.insertFts(chunkId, content_clean)
+       → INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)
+       This creates the full-text search index entry that BM25 searches
+       against at query time.
+
+    3. NodeRepo.touch(nodeId)
+       → UPDATE nodes SET updated_at = datetime('now') WHERE node_id = ?
+       Marks the node as recently modified.
+
+    4. logAudit('kp_stored', 'chunks', chunkId, null, { kp_type, node_id })
+       → INSERT INTO audit_log (...)
+       Records the change for the audit trail.
+
+  What each stored field is used for at retrieval time:
+    content_clean    → what BM25 FTS searches against
+    keywords_json    → what keywordTagSearch() matches (bypasses BM25 IDF)
+    authority_level  → feeds into confidence scoring (policy > sop > training)
+    node_id          → links chunk to tree node for hierarchical retrieval
+    document_id      → scopes context expansion to same document
+    chunk_index      → sequential position for fetching neighboring chunks
+    doc_title        → enables document-scoped search and citation labels
+    source_docs_json → enables multi-source citations in generated answers
+    feedback_score   → accumulates user feedback for retrieval boost
+    feedback_count   → minimum sample threshold for learning system
+
+6f. Keyword Accumulation on Nodes
+
+  After all KPs in a batch are stored (inside a transaction), each new KP's
+  keywords are merged into its parent node's keywords_json:
+    NodeRepo.mergeKeywords(nodeId, newKeywords)
+
+  The merge:
+    1. Reads existing keywords_json from the node
+    2. Lowercases all keywords
+    3. Adds new keywords, skipping duplicates
+    4. Writes back the merged array
+    5. Rebuilds the node's FTS entry:
+       nodes_fts text = name + " " + summary + " " + description + " " +
+                        keywords.join(" ") + " " + aliases.join(" ")
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Node-level keywords improve tree navigation during beam search. When
+    the query contains "annual leave", the node "Leave Policy" gets a keyword
+    match bonus in scoreNodeRelevance():
+      Full match ("annual leave" exactly in keywords): +0.25
+      Partial match ("annual" appears in a keyword): +0.10 per term
+
+
+7. STAGE 5: ENTITY/FACT EXTRACTION (stageExtractEntities)
+--------------------------------------------------------------------------------
+
+  Disabled by default (controlled by entity_extraction_enabled dataset config).
+  If enabled, extracts named entities (people, organizations, policy names)
+  and facts (relationships between entities) from the document's chunks.
+  Stores in entities, facts, entity_facts, fact_evidence tables.
+
+  HOW THIS AFFECTS RETRIEVAL:
+    retrieveFactsForQuery() can find facts about specific entities even when
+    BM25 or tree search misses them. For example, "who is the CEO?" could
+    match an entity with type "person" and role "CEO" even if the chunk text
+    doesn't rank highly in BM25.
+
+
+8. STAGE 6: NODE SUMMARIES (stageNodeSummaries)
+--------------------------------------------------------------------------------
+
+  For each newly created node (that doesn't already have a summary):
+    1. Fetch up to 8 chunks from the node
+    2. Build a prompt: "Summarize the following knowledge about '[node name]':
+       [chunk 1 content]
+       [chunk 2 content]
+       ...
+       Write 1-2 sentences."
+    3. Supports custom prompt overrides via getCustomPrompt('node_summary_generation')
+    4. Store result in nodes.node_summary
+    5. Rebuild the node's FTS entry (includes summary text now)
+    6. 100ms delay between LLM calls to respect rate limits
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Node summaries are the SECOND MOST IMPORTANT signal in beam search
+    (after node name). In scoreNodeRelevance():
+      - Text similarity: 0.4 × Jaccard(queryTerms, summaryTerms)
+        If the summary says "annual leave entitlements and carry-over
+        policies" and the query is "how many days leave can I carry over",
+        the Jaccard overlap captures "leave", "carry", "over" even though
+        no single chunk might contain all three terms.
+      - Term matching: +0.2 per query term found in summary
+      - For vector routing mode: summary is part of the embedding text
+        (name + summary + description + keywords), so semantic similarity
+        captures meaning beyond keyword overlap.
+    Without summaries, tree navigation relies only on node names, which are
+    often short (3-4 words) and may not contain the specific terms users
+    search for.
+
+
+9. STAGE 7: TOPIC CANONICALIZATION (stageTopicCanonicalization)
+--------------------------------------------------------------------------------
+
+  For each newly created node:
+    1. Call findMergeCandidates(nodeId) — searches for sibling nodes (same
+       parent) with similar names using wordDiceSimilarity
+    2. For each candidate with Dice >= 0.6 and significant content overlap:
+       determine which node is smaller (fewer chunks)
+    3. Queue a node_merge_suggestion decision with both node IDs, similarity
+       score, and merge direction (smaller → larger)
+    4. Users see these in the Decisions panel and can approve (merge all
+       chunks from smaller node into larger, then delete smaller) or reject
+       (keep separate)
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Catches near-duplicate nodes that canonicalization in step 6a missed.
+    If document 1 creates "Leave Policy" (Dice threshold was just below 0.35
+    against existing "Leave Policies"), this stage detects the similarity
+    post-hoc and suggests merging. Merging concentrates all leave-related
+    chunks under one node, improving beam search precision.
+
+
+10. STAGE 8: ORPHAN CLEANUP (stageOrphanCleanup)
+--------------------------------------------------------------------------------
+
+  Only runs when INGEST_ORPHAN_CLEANUP=true (disabled by default).
+
+  For each node (deepest first, so children before parents):
+    Skip if: root node, schema node, or has child nodes
+    Skip if: has 2+ chunks (not "sparse")
+    If has 1 chunk: merge into parent via executeMerge()
+      - Move the chunk's node_id to parent
+      - Delete the now-empty node + its FTS + its embedding
+    If has 0 chunks: delete the empty node directly
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Removes "leaf stubs" that fragment the tree. A node with 1 chunk forces
+    beam search to explore it as a separate branch. Merging that chunk into
+    its parent reduces tree breadth, making beam search more efficient.
+
+
+11. POST-BATCH: EMBEDDING SYNC (stageEmbeddingSync)
+--------------------------------------------------------------------------------
+
+  Runs ONCE after all documents in the batch are processed (not per document).
+
+  Node embedding generation:
+    For each node without an existing embedding:
+      text = node.name + " " + node.node_summary + " " + node.node_description
+             + " " + node.keywords.join(", ")
+      embedding = generateEmbedding(text)  → 3072-dimensional float vector
+      Store in embeddings table: { ref_type: "node", ref_id: nodeId,
+                                   embedding_json: "[0.012, -0.034, ...]" }
+
+  Chunk embedding generation:
+    For each active chunk without an existing embedding:
+      text = chunk.content_clean
+      embedding = generateEmbedding(text)
+      Store: { ref_type: "chunk", ref_id: String(chunkId), ... }
+
+  After all embeddings are generated, invalidateVectorCache() clears the
+  in-memory vector cache (used by vector routing mode to avoid re-reading
+  embeddings from disk on every query).
+
+  HOW THIS AFFECTS RETRIEVAL:
+    Node embeddings: Used in vector routing mode during tree navigation.
+      vectorScoreNodes(queryEmbedding, candidateNodes) computes cosine
+      similarity between query and each node. This captures semantic meaning
+      that keyword matching misses — "PTO" has high cosine similarity to
+      "paid time off" even though they share zero words.
+    Chunk embeddings: Used by the reranker as signal 3 (weight 0.50 default).
+      Cosine similarity between query embedding and chunk embedding captures
+      semantic relevance beyond lexical overlap. "How long is the trial
+      period?" has high similarity to "90-day probationary period" even
+      though "trial period" ≠ "probationary period" at the keyword level.
+
+
+12. STAGE 9: FINALIZE (stageFinalize)
+--------------------------------------------------------------------------------
+
+  Marks document status = "processed" with the final chunk count.
+  Records ingestion metrics for the self-learning system:
+    - kpCount: total chunks created
+    - newNodeCount: how many new tree nodes were created
+    - decisionsCreated: how many pending decisions were queued
+  Logs audit entry for the completed ingestion.
+
+
+
+================================================================================
+PART 2: RETRIEVAL — From User Query to Generated Answer
+================================================================================
+
+
+1. QUERY CLASSIFICATION (src/query/classifier.js)
+--------------------------------------------------------------------------------
+
+  When a user submits a question via POST /ask, the first step is to classify
+  what type of question it is.
+
+  Five query types:
+    simple_lookup   — "What is the annual leave policy?"
+    comparison      — "Compare plan A vs plan B"
+    aggregation     — "List all benefits" / "How many leave types?"
+    recommendation  — "Which plan should I choose?"
+    reasoning       — "Why does policy X require Y?"
+
+  Classification strategy:
+    1. Pattern matching first (fast, no LLM call):
+       - "vs", "compare", "difference between", "区别" → comparison
+       - "all", "list", "how many", "overview", "有哪些" → aggregation
+       - "suggest", "recommend", "which should" → recommendation
+       - "why", "cause", "effect", "reason" → reasoning
+       - Everything else → simple_lookup
+    2. Entity extraction: detects X和Y patterns, quoted terms
+    3. If no pattern matches with high confidence (>= 0.85), falls back to
+       LLM classification
+
+  Each type routes to a different handler. simple_lookup uses the full
+  retrieval pipeline described below. aggregation uses tree enumeration
+  to collect facts across all nodes.
+
+
+2. FOLLOW-UP DETECTION (src/query/querySession.js)
+--------------------------------------------------------------------------------
+
+  Checks if the current query is a follow-up to a previous query in the
+  same session. Detects:
+    - Pronouns: "it", "this", "that", "they", "其", "这个", "那个"
+    - Short queries (< 30 chars) without a clear subject
+    - References like "the above", "mentioned earlier"
+
+  If detected as follow-up, expands the query by prepending the previous
+  query's context. Example:
+    Previous: "What is the annual leave policy?"
+    Current:  "How many days?"
+    Expanded: "What is the annual leave policy? How many days?"
+
+  This helps retrieval find the right context even when the follow-up query
+  alone is too vague.
+
+
+3. DIRECT CHUNK SEARCH (Step 0 in handleSimpleLookup)
+--------------------------------------------------------------------------------
+
+  Before navigating the tree, the system runs 4 independent searches on the
+  raw chunk data. This ensures relevant content is found even if tree
+  navigation goes down the wrong branch.
+
+3a. Document Title Search — searchByDocTitle(query)
+
+  Scans chunks.doc_title with LIKE matching. If the query contains
+  "HR Policy", finds all chunks from documents whose title contains
+  "HR Policy". Returns a match score: exact title match scores higher than
+  partial match.
+
+  Uses ingested data: chunks.doc_title (set during assignKPToNode from the
+  parsed file metadata in Stage 1).
+
+3b. BM25 Full-Text Search — bm25Search(query)
+
+  FTS5 full-text search on the chunks_fts virtual table. SQLite ranks
+  results using BM25 scoring (term frequency × inverse document frequency).
+
+  The raw BM25 score is normalized against MAX_EXPECTED_BM25 = 15.0 to
+  produce a 0-1 score. This avoids inflating weak matches: a chunk with
+  BM25 score 3 gets normalized to 0.20 (not artificially boosted to 1.0
+  just because it's the best of a bad batch).
+
+  Uses ingested data: chunks_fts entries (created by insertFts during
+  chunk storage in Stage 4).
+
+3c. Simple Content Search — simpleContentSearch(query)
+
+  LIKE-based search on chunks.content_clean using OR logic across query
+  terms. Less precise than BM25 but catches exact substrings that FTS5
+  tokenization might miss. For example, "90-day" is tokenized by FTS5 into
+  "90" and "day" separately, so an exact search for "90-day" as a phrase
+  might miss it in BM25 but LIKE "%90-day%" catches it.
+
+3d. Keyword Tag Search — keywordTagSearch(query)
+
+  LIKE-based search on chunks.keywords_json. Finds chunks whose
+  LLM-extracted semantic tags match query terms.
+
+  This is critical for short numeric values: BM25's IDF (inverse document
+  frequency) weighting gives very low scores to common short terms like "3"
+  or "7 days" because they appear frequently across many chunks. But if
+  the LLM tagged a chunk with keyword "7 days notice", this search finds
+  it by matching "7 days" against the keyword array.
+
+  Uses ingested data: chunks.keywords_json (set from LLM-extracted "tags"
+  during normaliseKP in Stage 3).
+
+3e. Numeric Boost
+
+  If the query contains explicit numbers ("how many 15 day leave") or is
+  classified as a numeric query ("how many days", "what percentage"):
+    - Chunks containing the exact query numbers get +0.15 boost
+    - Chunks with any digit get +0.08 boost
+  This compensates for BM25's IDF down-weighting of common numbers.
+
+3f. Multi-Variant Search
+
+  If query expansion generated variants (synonyms, alias pivots), each
+  variant runs all 4 searches above. Results are merged with max-score
+  dedup: if the same chunk is found by multiple variants, it keeps its
+  highest score.
+
+
+4. HIERARCHICAL TREE RETRIEVAL (Step 1)
+--------------------------------------------------------------------------------
+
+  This is where the tree structure built during ingestion pays off.
+  The function navigateTreeTopDown does beam search through the node tree.
+
+4a. Root Node Scoring
+
+  Fetch ALL root nodes (NodeRepo.findRoots()). Score each against the query
+  using scoreNodeRelevance(). The scoring computes:
+
+    score = 0
+    For each query term:
+      If term appears in node.name (case-insensitive):     score += 1.0
+      If term appears in node.node_summary:                score += 0.2
+        (capped at +0.6 total from summary term matches)
+      If term appears in node.node_description:            score += 0.2
+        (capped at +0.6 total from description matches)
+      For each alias in node.aliases_json:
+        If term appears in alias:                          score += 0.5
+      For each keyword in node.keywords_json:
+        If term exactly equals keyword:                    score += 0.25
+        Elif term appears within keyword:                  score += 0.10
+        (capped at +0.6 total from keyword matches)
+
+    Plus text similarity between query and summary:
+      score += 0.4 × Jaccard(queryTerms, summaryTerms)
+      Where Jaccard = |intersection| / |union| of term sets
+
+  Note: ALL root nodes are scored (no slicing). This ensures no branch
+  is missed at the top level.
+
+  Uses ingested data: nodes.name, nodes.node_summary (from Stage 6),
+  nodes.node_description, nodes.keywords_json (from keyword accumulation),
+  nodes.aliases_json (from generateAndSaveAliases in Stage 4).
+
+4b. Routing Boost (optional, per-dataset configuration)
+
+  After base keyword scoring, an additional boost can be applied depending
+  on the tree_routing_mode dataset setting:
+
+  Keyword mode (default, <50ms):
+    No additional boost. Pure keyword-based scoring from step 4a above.
+
+  Vector mode (~0.3s):
+    1. Generate query embedding: queryEmbedding = generateEmbedding(query)
+    2. For each candidate node, load its embedding from the embeddings table
+       (cached in memory per dataset)
+    3. Compute cosine similarity: cos(queryEmbedding, nodeEmbedding)
+    4. Scale to 0-2.0 range: vectorScore = cosine × 2.0
+    5. Blend with keyword score using max():
+       finalScore = max(keywordScore, vectorScore)
+       This uses max rather than sum to avoid double-counting (both signals
+       often agree, so summing would over-inflate scores).
+
+  LLM mode (~14-25s):
+    1. Send all candidate nodes to the LLM in batches of 40:
+       "Rate the relevance of each node to the query '[query]' on a scale
+        of 0-10: [node1: summary], [node2: summary], ..."
+    2. Normalize LLM scores to 0-2.0 range: llmScore = (rating/10) × 2.0
+    3. Blend: finalScore = max(keywordScore, llmScore)
+    4. LRU cache (200 entries) prevents re-scoring the same query-node pair
+
+  Uses ingested data: embeddings table (node embeddings from Stage 11),
+  node summaries (sent to LLM in LLM mode).
+
+4c. Depth Traversal (Beam Search)
+
+  After scoring root nodes:
+    1. Take the top beamWidth × 2 nodes (default beam width = 3, so top 6)
+    2. For each, fetch its children (NodeRepo.findByParent)
+    3. Score all children using the same scoreNodeRelevance function
+    4. Take top beamWidth × 2 children
+    5. Repeat up to maxDepth = 5 levels deep
+    6. If using vector or LLM routing, apply the routing boost at each level
+
+  This beam search prunes irrelevant branches early. A tree with 100 nodes
+  might only explore 15-20 nodes total, visiting 2-3 at each level.
+
+4d. Chunk Collection from Winning Nodes
+
+  For each node the beam search selected, fetch chunks:
+    1. ChunkRepo.getForNodeLimited(nodeId, 30) — up to 30 active chunks
+    2. Score each chunk against the query:
+       queryTerms = query terms with stop words removed ("is","the","of",...)
+       For each chunk:
+         chunkTerms = chunk.content_clean tokenized
+         overlapScore = |intersection(queryTerms, chunkTerms)| /
+                        max(|queryTerms|, |chunkTerms|)
+         If any keyword from chunk.keywords_json matches a query term:
+           overlapScore += 0.4  (keyword tag bonus)
+    3. Sort by score, return top 5 chunks per node
+
+  Stop word filtering is critical here. Without it, a query "what is the
+  leave policy" would match every chunk containing "is" or "the" — which
+  is almost all of them. With filtering, only "leave" and "policy" count
+  as matching terms.
+
+  Uses ingested data: chunks.content_clean, chunks.keywords_json
+
+4e. Enrichment: Ancestors, Siblings, Descendants
+
+  After collecting chunks from seed nodes, the system enriches the result
+  set by exploring related parts of the tree:
+
+  ANCESTORS (2 levels up):
+    For each seed node, walk up to its parent and grandparent.
+    Fetch 4 chunks per ancestor level. Apply decay factor 0.82:
+      ancestor chunk score = original score × 0.82
+    This adds broader context — if the query matches "Sick Leave Policy",
+    chunks from parent "Leave Policies" (covering general leave rules)
+    are included with slightly lower priority.
+
+  SIBLINGS (3 per seed node):
+    For each seed node, find siblings (same parent, different node).
+    Score each sibling against the query using scoreNodeRelevance.
+    Keep siblings with score >= 0.15 (relevance minimum).
+    Fetch 3 chunks from each qualifying sibling.
+    Apply decay factor 0.78.
+    Example: if seed is "Annual Leave", siblings "Sick Leave" and "Parental
+    Leave" might also be relevant to a broad leave query.
+
+  DESCENDANTS (5 per seed, depth 2):
+    Walk down from seed nodes into their children and grandchildren.
+    Fetch 2 chunks per descendant. Decay score by depth.
+    Example: if seed is "Benefits", descendants "Health Insurance" and
+    "Dental Plan" provide more specific detail.
+
+
+5. CHUNK MERGING — UNIFIED MERGE (Step 2)
+--------------------------------------------------------------------------------
+
+  Hierarchical chunks (from tree navigation) and direct chunks (from
+  BM25/keyword search) are treated as EQUAL peers in a unified merge:
+
+  1. Cap hierarchical contributions to RETRIEVAL_MAX_HIERARCHICAL (env var,
+     default 15). Tag each as retrieval_source=['hierarchical'].
+  2. Cap direct contributions to RETRIEVAL_MAX_DIRECT (env var, default 15).
+     Tag each as retrieval_source=['direct'].
+  3. On dedup collision (same chunk ID from both sources):
+     - Keep the higher score (max of hierarchical_score and relevance_score)
+     - Union the retrieval_source tags: ['hierarchical', 'direct']
+  4. Sort the merged pool by score descending, take top maxChunks.
+  5. The reranker determines the final ranking from this merged pool.
+
+  If hierarchical found 0 chunks:
+    Pool contains only direct chunks (tree navigation failed or empty tree).
+
+  There is no SUPPLEMENT_THRESHOLD, no same-doc/cross-doc partitioning.
+  Cross-document contamination is handled downstream by the document-scope
+  filter (Step 5b) which removes chunks from unrelated documents when the
+  query explicitly names a document or company.
+
+
+6. FEEDBACK BOOSTING (Step 3)
+--------------------------------------------------------------------------------
+
+6a. applyFeedbackBoost(chunks)
+
+  For each chunk, adjusts its retrieval score based on accumulated user
+  feedback on previous answers that included this chunk.
+
+  Algorithm:
+    1. Read learned multiplier from dataset_config:
+       learning:feedback_boost_multiplier (default 1.0, range [0.5, 3.0])
+    2. For each chunk:
+       rawAdjustment = chunk.feedback_score × multiplier
+       adjustment = clamp(rawAdjustment, -0.3, +0.3)
+       chunk.score += adjustment
+
+  Example:
+    A chunk with feedback_score = 0.4 (users liked answers containing it):
+      adjustment = 0.4 × 1.0 = 0.4, clamped to 0.3
+      chunk.score increases by 0.3
+
+    A chunk with feedback_score = -0.3 (users disliked answers with it):
+      adjustment = -0.3 × 1.0 = -0.3
+      chunk.score decreases by 0.3
+
+  The multiplier is tuned by the self-learning system based on whether
+  feedback_score correlates with user ratings.
+
+  Note: recordFeedback() does NOT update chunks.feedback_score or
+  chunks.feedback_count — it only inserts into the feedback event table.
+  Both columns are written exclusively by recomputeFeedbackScores() in
+  the learning cycle (every 6h). This means new feedback takes up to 6h
+  to affect retrieval ranking, but eliminates the sawtooth between naive
+  accumulation and periodic decay recomputation.
+
+6b. applyLearnedPenalties(chunks, query)
+
+  Applies per-node penalties learned from negative feedback patterns.
+
+  Algorithm:
+    1. Load node penalties from config:
+       learning:node_penalties_json → e.g., {"node-abc": -0.15, "node-xyz": -0.05}
+    2. For each chunk:
+       a. If chunk.node_id is in the penalty map: apply penalty (negative)
+       b. Check known issues: look up node_query_relevance table for this
+          node + query pattern combination. If 3+ feedback samples AND
+          >40% are negative OR ≥5 negative events → additional -0.1 penalty
+    3. Known issue checks are cached per node_id in a Map to avoid
+       redundant DB queries (many chunks share the same node)
+
+
+7. RERANKING (Step 5)
+--------------------------------------------------------------------------------
+
+  After feedback boosting, all chunks are reranked using 4 heuristic signals
+  combined with configurable weights.
+
+  SIGNAL 1 — Keyword Overlap (default weight: 0.30):
+    queryTerms = query split into words, stop words removed
+    For each chunk:
+      chunkContent = chunk.content_clean lowercased
+      matches = count of queryTerms that appear in chunkContent
+      overlapScore = matches / queryTerms.length
+    Range: 0.0 (no overlap) to 1.0 (all query terms found)
+
+  SIGNAL 2 — BM25 Rank Position (default weight: 0.20):
+    rankScore = 1 - (position / (totalChunks - 1))
+    First chunk (position 0) gets 1.0, last chunk gets 0.0
+    This preserves the original recall ordering as a signal.
+
+  SIGNAL 3 — Embedding Cosine Similarity (default weight: 0.50):
+    embScore = cosine(queryEmbedding, chunkEmbedding)
+    If chunk has no embedding: embScore = 0.0
+    Range: typically 0.3-0.9 for relevant matches
+
+  SIGNAL 4 — Document Scope Match (additive boost/penalty):
+    If the query contains terms >= 5 chars that match the chunk's doc_title:
+      docBoost = DOC_MATCH_BOOST (+0.1)
+    Otherwise:
+      docBoost = DOC_MISMATCH_PENALTY (-0.05)
+    This is a heuristic on the merged pool — it biases toward chunks from
+    the document the user is asking about.
+
+  Combined score:
+    score = w.keyword × overlapScore + w.bm25 × rankScore + w.embedding × embScore + docBoost
+
+  Query-type boosting (added after base scoring):
+    Numeric queries (detected by regex patterns like "how many", digits):
+      Chunk contains numbers: +0.05
+      Chunk contains percentages or numbers with units: +0.05 more
+    Entity queries (query mentions specific named entities):
+      Chunk contains matching entity name: +0.08
+    Negation queries ("not X", "except X", "excluding X", "除了"):
+      Chunk contains the negated term: score × 0.4 (heavy penalty)
+
+  The weights (0.30, 0.20, 0.50) are stored as learning:reranker_w_keyword,
+  learning:reranker_w_bm25, learning:reranker_w_embedding in dataset_config.
+  They are cached per dataset with a 5-minute TTL to avoid hitting the DB
+  on every query. The self-learning system tunes these weights based on
+  feedback correlation analysis.
+
+
+8. CONTEXT EXPANSION (Step 6)
+--------------------------------------------------------------------------------
+
+  For top-ranked chunks, fetches neighboring chunks from the same document
+  to provide surrounding context:
+
+    before = ChunkRepo.getNeighborsBefore(docId, chunkIndex, windowSize=2)
+    after  = ChunkRepo.getNeighborsAfter(docId, chunkIndex, windowSize=2)
+
+  Up to 400 characters of context from neighbors are appended to each chunk.
+  This helps the answer LLM understand the chunk in its original context.
+
+  Example:
+    Chunk alone: "15 days per year"
+    With context: "...who have completed 3 years of continuous service...
+                   15 days per year ...subject to manager approval and must
+                   be taken within the calendar year..."
+
+  Uses ingested data: chunks.document_id (groups chunks by source document)
+  and chunks.chunk_index (sequential position within the document, set
+  during assignKPToNode).
+
+
+9. ANSWER GENERATION (Step 7 — src/query/citationGenerator.js)
+--------------------------------------------------------------------------------
+
+9a. Pre-summarization (for 5+ source chunks)
+
+  When there are 5 or more source chunks, a preliminary LLM call extracts
+  the most query-relevant fact from each source. This prevents the answer
+  LLM from being overwhelmed by too many long sources.
+
+  For each source chunk, the LLM returns a 1-sentence summary of the fact
+  most relevant to the query, preserving exact numbers and dates. If a
+  source has nothing relevant, it returns "N/A".
+
+  Activation threshold: only used if >= 40% of sources produce a non-"N/A"
+  summary. If most sources are "N/A", falls back to 200-char truncation
+  of the original content (pre-summarization failed to extract useful info).
+
+9b. Answer Prompt
+
+  Sends the query plus numbered sources to the LLM:
+    "Answer the following question based on the provided sources.
+     Cite sources using [1], [2], etc. inline.
+     Be COMPLETE — include all relevant details.
+
+     Question: [user query]
+
+     Sources:
+     [1] (HR Policy Manual) ...content...
+     [2] (Employee Handbook) ...content...
+     ..."
+
+  Temperature: 0.1 (slight creativity for natural phrasing while staying
+  close to sources).
+
+9c. Quality Gates (3 checks after answer generation)
+
+  CHECK 1 — "Not found" detection:
+    Scans answer for phrases like "not found in sources", "cannot find",
+    "information is not available", "I don't have", Chinese equivalents
+    like "缺少信息", "无法找到".
+    If detected → retry with a more aggressive prompt that demands the LLM
+    look harder at the sources.
+
+  CHECK 2 — Value alignment:
+    Extracts all numbers, dates, currency, and percentages from the answer
+    using regex. Checks what percentage of these values appear in any of
+    the source chunks.
+    If < 30% alignment → the answer contains numbers the LLM hallucinated
+    (not from sources). Regenerates with a source-grounding prompt that
+    demands every value be traceable to a specific source.
+
+  CHECK 3 — Missing source values:
+    If the answer has 0 citations AND the sources contain numeric values
+    that the answer ignores → triggers a structured fact extraction fallback.
+    The LLM is asked to extract specific facts from each source that answer
+    the query, producing a bullet-point format answer.
+
+
+10. CONFIDENCE SCORING (Step 8 — src/query/confidenceScorer.js)
+--------------------------------------------------------------------------------
+
+  Computes a calibrated confidence score (0.05 to 0.95) based on 6 factors.
+  Each factor is independently computed and then combined with query-type
+  specific weights.
+
+  FACTOR 1 — Source Coverage (weight varies by query type):
+    Count how many query terms appear anywhere across all retrieved chunks.
+    coverage = (matched terms / total query terms) × 0.9
+    The 0.9 multiplier applies conservative dampening.
+    High coverage means the retrieval found chunks relevant to all parts
+    of the question.
+
+  FACTOR 2 — Source Agreement:
+    Measures consistency across chunks by computing pairwise Jaccard
+    similarity of their content terms. If all chunks agree (high overlap),
+    confidence is higher. Contradictory or unrelated chunks lower this score.
+    Range: 0.3 (chunks are about different things) to 0.8 (highly consistent).
+
+  FACTOR 3 — Authority Score:
+    Maps each chunk's authority_level to a number:
+      policy = 1 (highest authority)
+      sop = 2
+      training = 3
+      personal = 4 (lowest authority)
+    Computes: score = (5 - average_authority) / 5
+    All policy sources → 0.80. All personal notes → 0.20.
+
+  FACTOR 4 — Answer Grounding (50% term + 50% value):
+    Term grounding: what fraction of answer terms appear in source chunks.
+    Value grounding: extract numbers, currency, dates from the answer. Check
+      how many of these specific values appear in any source chunk. Answers
+      that quote values not in sources get penalized.
+    This catches hallucination — if the answer says "$5,000" but no source
+    contains that number, grounding drops.
+
+  FACTOR 5 — Retrieval Quality:
+    A composite of 4 sub-signals:
+      - Chunk count (up to 0.25): more sources = higher quality
+      - Node diversity (0.15): chunks from multiple nodes = broader coverage
+      - Average chunk score (0.25): higher reranker scores = better matches
+      - Score variance (0.15): consistent scores = reliable retrieval
+    This measures how good the retrieval itself was, independent of the
+    answer quality.
+
+  FACTOR 6 — Query Coverage:
+    Detects distinct "aspects" in the query: who, what, when, where, how,
+    amount (numbers/quantities). Checks if at least one chunk addresses
+    each detected aspect.
+    Example: "How many days of leave do employees with 3 years get?"
+      Aspects: [how_many, who (employees), amount (3 years)]
+      If chunks cover all 3 → high coverage. If chunks only mention
+      "leave policy" without specific numbers → low coverage.
+
+  FINAL SCORE:
+    Weighted average of all 6 factors × 0.92 (linear scaling).
+
+  Adjustments:
+    - < 3 chunks retrieved: × 0.85 (sparse evidence penalty)
+    - All chunks from single node: × 0.90 (narrow evidence penalty)
+    - Specific fact query with corroborating sources: × 1.08 (boost)
+    - Vague query with < 4 sources: × 0.92 (penalty)
+
+  Clamped to [0.05, 0.95]. NaN fallback → 0.1.
+
+  Confidence level labels (configurable by learning system):
+    >= 0.75 → "high" (green in frontend)
+    >= 0.55 → "medium" (yellow)
+    >= 0.35 → "low" (orange)
+    <  0.35 → "very_low" (red)
+
+
+11. RESPONSE ASSEMBLY
+--------------------------------------------------------------------------------
+
+  The final response sent to the frontend includes:
+    - answer: the generated text with [1], [2] inline citations
+    - confidence: numeric score (0.05-0.95)
+    - confidence_level: "high" / "medium" / "low" / "very_low"
+    - confidence_details: breakdown of all 6 scoring factors
+    - sources: array of source chunks with id, content, doc_title, node_name
+    - related_questions: 3 LLM-generated follow-up questions
+    - trace: step-by-step retrieval log (if requested)
+    - routing_mode: "keyword" / "vector" / "llm"
+
+
+
+================================================================================
+END OF GUIDE
+================================================================================

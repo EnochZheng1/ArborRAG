@@ -1087,30 +1087,6 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     chunk._scoring.learned_penalty = (chunk.score || 0) - (preLearnedScores.get(chunk.id) || 0);
   }
 
-  // STEP 4b: Pre-boost chunks matching document scope BEFORE reranking.
-  // If the query contains a document/entity name, boost matching chunks and mildly
-  // penalize non-matching ones. The reranker then uses _docBoost as an additional signal.
-  {
-    const queryTerms5 = query.toLowerCase().split(/\s+/).filter(t => t.length >= 5);
-    if (queryTerms5.length > 0) {
-      let boosted = 0;
-      for (const chunk of chunks) {
-        const title = (chunk.doc_title || '').toLowerCase();
-        const hasDocMatch = queryTerms5.some(t => title.includes(t));
-        chunk._docBoost = hasDocMatch ? 0.1 : -0.05;
-        if (chunk._scoring) chunk._scoring.doc_boost = chunk._docBoost;
-        // Apply the boost to relevance / hierarchical score so the reranker sees it
-        const baseScore = chunk.hierarchical_score || chunk.relevance_score || 0;
-        chunk.hierarchical_score = baseScore + chunk._docBoost;
-        chunk.relevance_score = (chunk.relevance_score || 0) + chunk._docBoost;
-        if (hasDocMatch) boosted++;
-      }
-      if (boosted > 0 && boosted < chunks.length) {
-        trace?.addStep('Doc-Scope Pre-Boost', `Boosted ${boosted}/${chunks.length} chunks matching document terms`);
-      }
-    }
-  }
-
   // STEP 5: LLM Re-ranking for better relevance.
   // Threshold lowered from > 5 to > 1: with the merged pool, the reranker must always run
   // to filter wrong-node hierarchical chunks from the correct direct-BM25 chunks.
@@ -1168,40 +1144,6 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
             trace?.addStep('Document Scope Filter', `Filtered ${before - chunks.length} cross-doc chunks (query mentions: ${[...matchedDocs].join(', ')})`);
           }
         }
-      }
-    }
-
-    // STEP 5c: Term-overlap re-sort — promote chunks containing actual query terms to
-    // the top of the list. The LLM reranker (gpt-5-nano) sometimes gives all chunks
-    // similar scores, so a chunk about "SLA response time" might end up at position [8]
-    // behind chunks about vacations and products. The answer LLM is more likely to find
-    // and use information from the first few sources, so this simple heuristic ensures
-    // content-relevant chunks appear early in the source list.
-    {
-      const queryTerms = query.toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter(t => t.length >= 3);
-
-      if (queryTerms.length > 0) {
-        for (const chunk of chunks) {
-          const content = (chunk.content || chunk.content_clean || '').toLowerCase();
-          let termHits = 0;
-          for (const term of queryTerms) {
-            if (content.includes(term)) termHits++;
-          }
-          chunk._termOverlap = termHits / queryTerms.length;
-        }
-
-        // Stable sort: among chunks with similar reranker scores, prefer those with
-        // higher term overlap. This preserves the reranker's relative ordering while
-        // boosting content-relevant chunks to the top.
-        chunks.sort((a, b) => {
-          const overlapDiff = (b._termOverlap || 0) - (a._termOverlap || 0);
-          if (Math.abs(overlapDiff) > 0.2) return overlapDiff;
-          // Fall back to reranker score for similar overlap
-          return (b.rerank_score || 0) - (a.rerank_score || 0);
-        });
       }
     }
 

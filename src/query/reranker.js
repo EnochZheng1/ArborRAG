@@ -4,7 +4,8 @@ import { getCustomPrompt } from "../prompts/promptManager.js";
 import { isNumericQuery, extractNegatedTerms, hasNumericContent } from "../utils/queryHelpers.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import {
-  NUMERIC_CHUNK_BOOST, NUMERIC_UNIT_BOOST, ENTITY_MATCH_BOOST, NEGATION_PENALTY_FACTOR
+  NUMERIC_CHUNK_BOOST, NUMERIC_UNIT_BOOST, ENTITY_MATCH_BOOST, NEGATION_PENALTY_FACTOR,
+  DOC_MATCH_BOOST, DOC_MISMATCH_PENALTY
 } from "./scoringConfig.js";
 
 // ── Config-driven reranker weights (cached per-dataset with 5-min TTL) ───────
@@ -40,16 +41,15 @@ function getRerankerWeights() {
 /**
  * Heuristic + optional LLM Re-ranking Module
  *
- * Scores chunks using three heuristic signals:
+ * Scores chunks using four heuristic signals:
  *   - Keyword overlap with query (weight 0.30)
  *   - Original BM25 recall rank position (weight 0.20)
  *   - Embedding cosine similarity if available (weight 0.50)
+ *   - Document-scope match (additive boost/penalty on merged pool)
  *
  * Query-type aware boosting:
  *   - Numeric queries: boost chunks containing numbers/percentages
  *   - Entity queries: boost chunks with proper nouns matching query entities
- *
- * Adaptive score-gap cutoff: keeps chunks within 40% of top score.
  *
  * When RERANKER_LLM_ENABLED=true, also calls LLM for a relevance score (0-10)
  * per chunk in a single batched prompt, then blends: 0.5 × llm + 0.5 × heuristic.
@@ -173,6 +173,17 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
       }
     }
 
+    // Signal 4 — Document scope match (heuristic on merged pool)
+    let docBoost = 0;
+    if (queryLower) {
+      const qTerms5 = queryLower.split(/\s+/).filter(t => t.length >= 5);
+      if (qTerms5.length > 0) {
+        const title = (chunk.doc_title || '').toLowerCase();
+        docBoost = qTerms5.some(t => title.includes(t)) ? DOC_MATCH_BOOST : DOC_MISMATCH_PENALTY;
+      }
+    }
+    score += docBoost;
+
     return {
       ...chunk,
       rerank_score: score,
@@ -180,7 +191,7 @@ export async function rerankerChunks(query, chunks, optionsOrMaxChunks = 10) {
       original_rank: i,
       _scoring: {
         ...chunk._scoring,
-        rerank: { keyword: overlapScore, bm25_rank: rankScore, embedding: embScore, combined: score }
+        rerank: { keyword: overlapScore, bm25_rank: rankScore, embedding: embScore, doc_scope: docBoost, combined: score }
       }
     };
   });

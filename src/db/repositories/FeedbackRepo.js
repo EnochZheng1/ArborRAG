@@ -1,6 +1,7 @@
 /**
  * Feedback repository — feedback and node_query_relevance tables.
- * Also handles feedback-driven chunk score updates.
+ * chunks.feedback_score and chunks.feedback_count are written exclusively
+ * by recomputeFeedbackScores() (called by the learning cycle every 6h).
  */
 
 import { db } from "../db.js";
@@ -20,24 +21,13 @@ export const FeedbackRepo = {
   },
 
   /**
-   * Increment feedback_count and update feedback_score (clamped to [-1, 1]).
-   * The score column is a performance cache — the learning cycle periodically
-   * recomputes it from feedback events with time-decay applied.
-   */
-  updateChunkScore(chunkId, adjustment) {
-    db.prepare(`
-      UPDATE chunks
-      SET feedback_score = MAX(-1.0, MIN(1.0, COALESCE(feedback_score, 0) + ?)),
-          feedback_count = COALESCE(feedback_count, 0) + 1
-      WHERE id = ?
-    `).run(adjustment, chunkId);
-  },
-
-  /**
-   * Recompute cached feedback_score for all chunks from feedback events.
+   * Sole writer of chunks.feedback_score and chunks.feedback_count.
+   * Called by the learning cycle (every 6h). recordFeedback() does NOT
+   * touch these columns — it only inserts into the feedback event table.
+   *
    * Uses exponential decay: weight = 0.5^(days_since / halfLifeDays).
    * Events older than windowDays are ignored. Result clamped to [-1, 1].
-   * Called by the learning cycle (every 6 hours).
+   * feedback_count = number of feedback events within the active decay window.
    */
   recomputeFeedbackScores({ halfLifeDays = 60, windowDays = 90 } = {}) {
     // Get all feedback events within the window, grouped by chunk
@@ -48,8 +38,9 @@ export const FeedbackRepo = {
       ORDER BY created_at DESC
     `).all(windowDays);
 
-    // Accumulate decayed scores per chunk
+    // Accumulate decayed scores and event counts per chunk
     const chunkScores = new Map();
+    const chunkEventCounts = new Map();
     const now = Date.now();
 
     for (const event of events) {
@@ -63,27 +54,28 @@ export const FeedbackRepo = {
       const weight = Math.pow(0.5, daysSince / halfLifeDays);
 
       for (const cid of chunkIds) {
-        const prev = chunkScores.get(cid) || 0;
-        chunkScores.set(cid, prev + adjustment * weight);
+        chunkScores.set(cid, (chunkScores.get(cid) || 0) + adjustment * weight);
+        chunkEventCounts.set(cid, (chunkEventCounts.get(cid) || 0) + 1);
       }
     }
 
-    // Write clamped scores back
+    // Write clamped scores and event counts back
     const updateStmt = db.prepare(
-      `UPDATE chunks SET feedback_score = ? WHERE id = ?`
+      'UPDATE chunks SET feedback_score = ?, feedback_count = ? WHERE id = ?'
     );
 
     let updated = 0;
     for (const [chunkId, raw] of chunkScores) {
       const clamped = Math.max(-1.0, Math.min(1.0, raw));
-      updateStmt.run(Math.round(clamped * 1000) / 1000, chunkId);
+      const count = chunkEventCounts.get(chunkId) || 0;
+      updateStmt.run(Math.round(clamped * 1000) / 1000, count, chunkId);
       updated++;
     }
 
-    // Zero out scores for chunks with no recent feedback events
+    // Zero out scores and counts for chunks with no recent feedback events
     db.prepare(`
-      UPDATE chunks SET feedback_score = 0
-      WHERE feedback_score != 0
+      UPDATE chunks SET feedback_score = 0, feedback_count = 0
+      WHERE (feedback_score != 0 OR feedback_count != 0)
         AND id NOT IN (${[...chunkScores.keys()].map(() => '?').join(',') || 'NULL'})
     `).run(...chunkScores.keys());
 

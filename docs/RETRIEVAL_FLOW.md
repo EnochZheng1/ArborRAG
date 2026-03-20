@@ -43,7 +43,7 @@
 - `trace=false`
 - `forceQueryType=null`
 - `topK=10`
-- `maxChunks=12`
+- `maxChunks=20`
 - `minConfidence=0.0`
 - `hybridAlpha=0.5`
 - `rerankerThreshold=0.2`
@@ -131,25 +131,18 @@
 - `treePaths`
 - `sources`（tree_navigation / ancestor_enrichment / sibling_expansion / descendant_exploration）
 
-### 4.4 Step D: Chunk Selection 策略（关键）
+### 4.4 Step D: Chunk Selection — Unified Merge（关键）
 
-策略是“层级优先 + 受控补充”，不是简单 merge：
+Hierarchical 和 Direct 作为平等的两路源进行统一合并：
 
-1. 如果有 `hierarchicalChunks`：
-   - 先全部作为主集合（`retrieval_source=hierarchical`）。
-2. 若层级结果偏少（`SUPPLEMENT_THRESHOLD=8`）：
-   - 用 `directChunks` 做补充。
-   - 同文档优先：先加 `supplement_same_doc`。
-   - 跨文档只在总量仍很薄（<4）时才加：`supplement_cross_doc`。
-3. 若层级结果不少，但 direct 中存在“标题匹配 query 且层级未覆盖的跨文档 chunk”：
-   - 允许加入 `query_matched_doc`，避免错过目标文档。
-4. 如果层级完全失败：
-   - 直接回退全局 direct：`retrieval_source=direct`。
+1. Cap hierarchical 到 `RETRIEVAL_MAX_HIERARCHICAL`（env var，默认 15），tag `retrieval_source=['hierarchical']`。
+2. Cap direct 到 `RETRIEVAL_MAX_DIRECT`（env var，默认 15），tag `retrieval_source=['direct']`。
+3. 去重碰撞时：保留最高分，union source tags（如 `['hierarchical', 'direct']`）。
+4. 按分数排序，取 top `maxChunks`。
+5. 最终排名由 reranker 决定。
 
-这个策略的目标是同时避免：
-
-- 纯 merge 导致跨文档污染。
-- 纯 strict hierarchical 导致遗漏具体事实。
+不再有 `SUPPLEMENT_THRESHOLD`、`supplement_same_doc`、`supplement_cross_doc`。
+跨文档污染由下游 Document Scope Filter（Step 5b）处理。
 
 ### 4.5 Step E: 初排 + 截断
 
@@ -187,6 +180,21 @@
 
 - 从 entity/fact 图谱检索事实。
 - 将事实文本追加到上下文末尾 `[Extracted Facts]`。
+
+### 4.8b Scoring Observability
+
+每个 chunk 携带 `_scoring` 对象，记录各步骤的分数变化：
+
+- `initial_relevance`: 初始分（hierarchical_score 或 relevance_score）
+- `feedback_adj`: feedback boost 调整量
+- `learned_penalty`: 学习系统惩罚量
+- `rerank.keyword`: 关键词重叠分
+- `rerank.bm25_rank`: BM25 位置分
+- `rerank.embedding`: embedding 相似度分
+- `rerank.doc_scope`: 文档范围匹配加成
+- `rerank.combined`: 加权总分
+
+`retrieval_source` 标签标记每个 chunk 的来源（`['hierarchical']`、`['direct']`、或两者都有）。Trace 的 "Scoring Breakdown" 步骤展示 top-10 chunks 的完整评分明细。
 
 ### 4.9 Step I: 答案生成与后处理
 

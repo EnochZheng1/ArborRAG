@@ -1,6 +1,6 @@
 # ArborRAG — Tree-Based Knowledge Graph
 
-**v3.1.0** · Node.js · SQLite · OpenAI / Gemini
+**v3.1.1** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -85,6 +85,7 @@ INGEST_QUEUE_RETRY_DELAY_MS=5000
 INGEST_CLEANUP_ON_SUCCESS=true
 
 # Ingestion tuning (v3.1)
+INGEST_AUTO_EMBED=true             # Auto-run embedding sync after ingestion batch
 INGEST_SKIP_ALIASES=false          # Skip alias generation during ingestion
 INGEST_ORPHAN_CLEANUP=false        # Merge sparse nodes into parents
 
@@ -164,6 +165,15 @@ docs/
 ---
 
 ## Changelog
+
+### v3.1.1 — Scoring Simplification & Feedback Deferral
+
+- **Retrieval pipeline simplification** — Removed 2 redundant scoring steps from `handleSimpleLookup()`: doc-scope pre-boost (invisible to reranker) and term-overlap re-sort (overrode reranker output). Doc-scope signal folded into the reranker as a 4th heuristic signal alongside keyword, BM25 rank, and embedding. Pipeline reduced from 10+ steps to 8.
+- **Deferred feedback writes** — `recordFeedback()` no longer updates `feedback_score` or `feedback_count` on chunks immediately. Both columns are now written exclusively by the learning cycle's `recomputeFeedbackScores()` (every 6h), eliminating the sawtooth between naive accumulation and periodic decay recomputation. `feedback_count` now reflects events within the active 90-day decay window.
+- **Frontend confidence split** — Execution summary now shows "Retrieval: X%" and "Grounding: Y%" instead of a single "Confidence: Z%". Confidence badge tooltip expanded to include both split values. Combined score remains as the badge text.
+- **Documentation sync** — Updated `INGESTION_AND_RETRIEVAL_GUIDE.txt`, `docs/RETRIEVAL_FLOW.md`, and `README.md` to reflect unified merge (replaces supplement strategy), 10-stage pipeline (added `stageReclassifyGeneral`), 4-signal reranker, deferred feedback, and new env vars (`INGEST_AUTO_EMBED`, `RETRIEVAL_MAX_*`).
+
+**Files changed:** 8 modified (−132 lines, +73 lines)
 
 ### v3.1.0 — Architectural Fixes
 
