@@ -17,6 +17,8 @@ import { stageEnrichNodeKeywords, stageComputeNodeQuality } from '../src/ingest/
 import { getNode, getChildren } from '../src/kg/graphTraversal.js';
 import { searchNodesByName } from '../src/kg/strategies/bm25.js';
 import { rescueExpansion } from '../src/kg/hierarchicalRetrieval.js';
+import { isNodeFirstResultWeak } from '../src/kg/queryHandlers.js';
+import { calculateConfidence } from '../src/query/confidenceScorer.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -367,5 +369,158 @@ describe('rescueExpansion', () => {
   it('returns empty array when no seed nodes', async () => {
     const result = await rescueExpansion('test query', [], [], new Set());
     assert.deepEqual(result, []);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 9. isNodeFirstResultWeak behavioral tests (exported pure function)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('isNodeFirstResultWeak (behavioral)', () => {
+
+  it('is exported from queryHandlers.js', () => {
+    assert.equal(typeof isNodeFirstResultWeak, 'function');
+  });
+
+  it('strong multi-node result is NOT weak', () => {
+    const result = {
+      chunks: [
+        { id: 1, hierarchical_score: 0.8, doc_title: 'Employee Handbook', node_id: 'a' },
+        { id: 2, hierarchical_score: 0.6, doc_title: 'Employee Handbook', node_id: 'b' },
+        { id: 3, hierarchical_score: 0.5, doc_title: 'Employee Handbook', node_id: 'c' },
+        { id: 4, hierarchical_score: 0.4, doc_title: 'Employee Handbook', node_id: 'd' }
+      ],
+      distinct_chunk_node_count: 4
+    };
+    assert.ok(!isNodeFirstResultWeak(result, 'how many vacation days do employees get'));
+  });
+
+  it('too few chunks triggers weak', () => {
+    const result = {
+      chunks: [{ id: 1, hierarchical_score: 0.9, node_id: 'a' }],
+      distinct_chunk_node_count: 1
+    };
+    assert.ok(isNodeFirstResultWeak(result, 'test'));
+  });
+
+  it('single distinct node triggers weak', () => {
+    const result = {
+      chunks: [
+        { id: 1, hierarchical_score: 0.9, node_id: 'a' },
+        { id: 2, hierarchical_score: 0.8, node_id: 'a' },
+        { id: 3, hierarchical_score: 0.7, node_id: 'a' }
+      ],
+      distinct_chunk_node_count: 1
+    };
+    assert.ok(isNodeFirstResultWeak(result, 'vacation'));
+  });
+
+  it('low top score triggers weak', () => {
+    const result = {
+      chunks: [
+        { id: 1, hierarchical_score: 0.10, node_id: 'a' },
+        { id: 2, hierarchical_score: 0.08, node_id: 'b' },
+        { id: 3, hierarchical_score: 0.05, node_id: 'c' }
+      ],
+      distinct_chunk_node_count: 3
+    };
+    assert.ok(isNodeFirstResultWeak(result, 'obscure query'));
+  });
+
+  it('doc-scoped query with misaligned titles triggers weak', () => {
+    const result = {
+      chunks: [
+        { id: 1, hierarchical_score: 0.5, doc_title: 'HR Guide', node_id: 'a' },
+        { id: 2, hierarchical_score: 0.4, doc_title: 'HR Guide', node_id: 'b' },
+        { id: 3, hierarchical_score: 0.3, doc_title: 'HR Guide', node_id: 'c' }
+      ],
+      distinct_chunk_node_count: 3
+    };
+    assert.ok(isNodeFirstResultWeak(result, 'quantum labs employee benefits'));
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 10. calculateConfidence behavioral tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('calculateConfidence (behavioral)', () => {
+
+  it('is exported from confidenceScorer.js', () => {
+    assert.equal(typeof calculateConfidence, 'function');
+  });
+
+  it('returns score, retrieval_confidence, and answer_groundedness', () => {
+    const result = calculateConfidence({
+      chunks: [
+        { content_clean: 'Employees receive 15 days vacation.', authority_level: 'sop', node_id: 'a', relevance_score: 0.8 },
+        { content_clean: 'After 3 years, vacation increases to 20 days.', authority_level: 'sop', node_id: 'a', relevance_score: 0.7 },
+        { content_clean: 'Unused days may be carried over up to 5 days.', authority_level: 'sop', node_id: 'b', relevance_score: 0.6 }
+      ],
+      nodes: [{ node_id: 'a', name: 'Vacation' }],
+      query: 'how many vacation days',
+      answer: 'Employees receive 15 days of vacation. After 3 years, this increases to 20 days.',
+      queryType: 'simple_lookup'
+    });
+
+    assert.ok('score' in result, 'should have score');
+    assert.ok('retrieval_confidence' in result, 'should have retrieval_confidence');
+    assert.ok('answer_groundedness' in result, 'should have answer_groundedness');
+    assert.ok(result.score >= 0.05 && result.score <= 0.95, `score should be in [0.05, 0.95] (got ${result.score})`);
+    assert.ok(result.retrieval_confidence >= 0.05, `retrieval_confidence should be >= 0.05 (got ${result.retrieval_confidence})`);
+    assert.ok(result.answer_groundedness >= 0.05, `answer_groundedness should be >= 0.05 (got ${result.answer_groundedness})`);
+  });
+
+  it('fewer chunks produces lower retrieval confidence', () => {
+    const makeChunks = (n) => Array.from({ length: n }, (_, i) => ({
+      content_clean: `Chunk ${i} about vacation policy with 15 days.`,
+      authority_level: 'sop',
+      node_id: `node_${i % 3}`,
+      relevance_score: 0.7
+    }));
+
+    const few = calculateConfidence({
+      chunks: makeChunks(2),
+      nodes: [{ node_id: 'node_0' }],
+      query: 'vacation days',
+      answer: 'Employees get 15 days vacation.',
+      queryType: 'simple_lookup'
+    });
+
+    const many = calculateConfidence({
+      chunks: makeChunks(8),
+      nodes: [{ node_id: 'node_0' }, { node_id: 'node_1' }, { node_id: 'node_2' }],
+      query: 'vacation days',
+      answer: 'Employees get 15 days vacation.',
+      queryType: 'simple_lookup'
+    });
+
+    assert.ok(many.retrieval_confidence >= few.retrieval_confidence,
+      `more chunks (${many.retrieval_confidence}) should have >= retrieval conf than fewer (${few.retrieval_confidence})`);
+  });
+
+  it('answer with values not in sources gets lower groundedness', () => {
+    const grounded = calculateConfidence({
+      chunks: [
+        { content_clean: 'Salary is $50,000 per year.', authority_level: 'sop', node_id: 'a', relevance_score: 0.8 }
+      ],
+      nodes: [{ node_id: 'a' }],
+      query: 'what is the salary',
+      answer: 'The salary is $50,000 per year.',
+      queryType: 'simple_lookup'
+    });
+
+    const hallucinated = calculateConfidence({
+      chunks: [
+        { content_clean: 'Salary is $50,000 per year.', authority_level: 'sop', node_id: 'a', relevance_score: 0.8 }
+      ],
+      nodes: [{ node_id: 'a' }],
+      query: 'what is the salary',
+      answer: 'The salary is $75,000 per year with a $10,000 bonus and 25 vacation days.',
+      queryType: 'simple_lookup'
+    });
+
+    assert.ok(grounded.answer_groundedness >= hallucinated.answer_groundedness,
+      `grounded (${grounded.answer_groundedness}) should have >= groundedness than hallucinated (${hallucinated.answer_groundedness})`);
   });
 });

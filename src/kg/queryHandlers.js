@@ -755,7 +755,8 @@ export async function handleAggregationQuery(query, classification, queryScope, 
  * Check whether node-first retrieval returned a weak result that needs
  * full direct-search fallback.
  */
-function isNodeFirstResultWeak(nfResult, query) {
+// exported for tests
+export function isNodeFirstResultWeak(nfResult, query) {
   const chunks = nfResult.chunks || [];
   const distinctNodeCount = nfResult.distinct_chunk_node_count || 0;
 
@@ -854,6 +855,10 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       sources: v.sources
     }))
   });
+
+  // ── Timing ─────────────────────────────────────────────────────────────────
+  const _retrievalStartMs = Date.now();
+  let _llmStartMs = 0;
 
   // ── Strategy selection ──────────────────────────────────────────────────────
   let retrievalStrategy = 'node_first';
@@ -1345,6 +1350,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       'Documents';
 
     // Generate answer with inline citations if enabled
+    _llmStartMs = Date.now();
     let llmResponse;
     let citationData = null;
 
@@ -1390,7 +1396,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       nodes: nodesUsed,
       query,
       answer: llmResponse.final_answer,
-      queryType: QUERY_TYPES.SIMPLE_LOOKUP
+      queryType: QUERY_TYPES.SIMPLE_LOOKUP,
+      retrievalStrategy
     });
     trace?.addStep('Confidence Calibration', `Score: ${confidenceResult.score} (${confidenceResult.level}) — retrieval: ${confidenceResult.retrieval_confidence}, groundedness: ${confidenceResult.answer_groundedness}`, {
       factors: confidenceResult.factors,
@@ -1470,6 +1477,11 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         direct: directChunks.length
       },
       retrieval_options: { topK, maxChunks, minConfidence, hybridAlpha, rerankerThreshold, contextWindow, temperature },
+      timing: {
+        retrieval_ms: _llmStartMs - _retrievalStartMs,
+        llm_ms: Date.now() - _llmStartMs,
+        total_ms: Date.now() - _retrievalStartMs
+      },
       ...(usedFallback && { message: "Could not locate an exact node in the current knowledge structure. A global fuzzy search has been performed." })
     };
 }

@@ -29,7 +29,8 @@ export function calculateConfidence(context) {
     query = '',
     answer = '',
     sources = [],
-    queryType = 'simple_lookup'
+    queryType = 'simple_lookup',
+    retrievalStrategy = null
   } = context;
 
   // If no chunks, confidence is very low
@@ -67,8 +68,11 @@ export function calculateConfidence(context) {
   const recencyFactor = calculateRecencyFactor(chunks);
   retrievalConfidence = retrievalConfidence * (1 - CONFIDENCE_RECENCY_WEIGHT) + recencyFactor * CONFIDENCE_RECENCY_WEIGHT;
 
-  if (chunks.length < 3) retrievalConfidence *= CONFIDENCE_FEW_CHUNKS_PENALTY;
-  if (nodes.length <= 1) retrievalConfidence *= CONFIDENCE_SINGLE_NODE_PENALTY;
+  // Node-first intentionally returns fewer chunks from fewer nodes (it found the right
+  // node). Penalizing that is wrong — use softer penalties for node_first strategy.
+  const isNodeFirst = retrievalStrategy === 'node_first';
+  if (chunks.length < 3) retrievalConfidence *= isNodeFirst ? 0.90 : CONFIDENCE_FEW_CHUNKS_PENALTY;
+  if (nodes.length <= 1) retrievalConfidence *= isNodeFirst ? 0.95 : CONFIDENCE_SINGLE_NODE_PENALTY;
 
   retrievalConfidence = Number.isFinite(retrievalConfidence)
     ? Math.max(0.05, Math.min(0.95, retrievalConfidence)) : 0.1;
@@ -90,7 +94,10 @@ export function calculateConfidence(context) {
         if (allContent.includes(val.toLowerCase())) foundCount++;
       }
       const ratio = foundCount / answerValues.length;
-      if (ratio < 0.3) {
+      // Only apply hallucination cap when ≥3 distinct values in answer AND <20% found.
+      // With 0-2 values, paraphrasing (e.g. "about two weeks" vs "15 days") causes
+      // false positives — use neutral score instead.
+      if (answerValues.length >= 3 && ratio < 0.2) {
         answerGroundedness = Math.min(answerGroundedness, GROUNDEDNESS_HALLUCINATION_CAP);
       }
     }

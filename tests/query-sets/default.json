@@ -1,0 +1,57 @@
+[
+  {
+    "query": "How many vacation days do employees get?",
+    "type": "fact",
+    "expect_any": ["15 days", "15 vacation", "fifteen days"]
+  },
+  {
+    "query": "What is the probationary period?",
+    "type": "fact",
+    "expect_any": ["90 days", "90-day", "ninety days", "three months"]
+  },
+  {
+    "query": "What percentage of health insurance does the company cover?",
+    "type": "numeric",
+    "expect_any": ["85%", "85 percent", "eighty-five"]
+  },
+  {
+    "query": "How many days notice during probation?",
+    "type": "numeric",
+    "expect_any": ["7 days", "7-day", "seven days"]
+  },
+  {
+    "query": "What are the core collaboration hours?",
+    "type": "fact",
+    "expect_any": ["10:00 AM", "3:00 PM", "10 AM", "3 PM", "10:00", "15:00"]
+  },
+  {
+    "query": "Who is the CEO?",
+    "type": "entity",
+    "expect_any": ["Sarah Chen"]
+  },
+  {
+    "query": "What products does the company offer?",
+    "type": "entity",
+    "expect_any": ["QuantumVault", "QuantumFlow", "QuantumScan"]
+  },
+  {
+    "query": "How many vacation days after 3 years?",
+    "type": "numeric",
+    "expect_any": ["20 days", "20 vacation", "twenty days"]
+  },
+  {
+    "query": "What is the maximum carry-over days?",
+    "type": "numeric",
+    "expect_any": ["5 days", "five days", "5 carry"]
+  },
+  {
+    "query": "What are all the employee benefits?",
+    "type": "broad",
+    "expect_any": ["vacation", "health insurance", "remote work"]
+  },
+  {
+    "query": "Explain the remote work policy",
+    "type": "fact",
+    "expect_any": ["3 days", "three days", "remote", "manager approval"]
+  }
+]
