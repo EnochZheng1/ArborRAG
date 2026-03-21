@@ -105,7 +105,8 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
     queryVariants          = null,
     maxQueryVariants       = 4,
     maxVectorVariants      = 2,
-    useExpansion           = true
+    useExpansion           = true,
+    classification         = null
   } = options;
 
   const preparedVariants = Array.isArray(queryVariants) && queryVariants.length > 0
@@ -245,7 +246,49 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
     return [];
   }
 
-  return fuseNodeMap(nodeMap, { useRRF, bm25Weight, vectorWeight, limit });
+  const fused = fuseNodeMap(nodeMap, { useRRF, bm25Weight, vectorWeight, limit });
+
+  // Query-type aware seed scoring: boost nodes that match query signals.
+  // Uses classification when available, falls back to regex heuristics.
+  if (fused.length > 1) {
+    const queryType = classification?.query_type || null;
+    const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
+    const entities = query.match(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g) || [];
+
+    for (const r of fused) {
+      const n = r.node;
+      const summary = (n.node_summary || '').toLowerCase();
+      const kws = Array.isArray(n.keywords_json) ? n.keywords_json : (typeof n.keywords_json === 'string' ? (() => { try { return JSON.parse(n.keywords_json); } catch { return []; } })() : []);
+
+      // Numeric boost: nodes whose summary/keywords contain query numbers
+      if (queryNumbers.length > 0 || queryType === 'aggregation') {
+        for (const num of queryNumbers) {
+          if (summary.includes(num) || kws.some(k => String(k).includes(num))) {
+            r.score *= 1.15;
+            break;
+          }
+        }
+      }
+
+      // Entity boost: nodes whose name/aliases contain multi-word entities from query
+      if (entities.length > 0) {
+        const nameLower = (n.name || '').toLowerCase();
+        const aliases = Array.isArray(n.aliases_json) ? n.aliases_json : (typeof n.aliases_json === 'string' ? (() => { try { return JSON.parse(n.aliases_json); } catch { return []; } })() : []);
+        for (const entity of entities) {
+          const eLower = entity.toLowerCase();
+          if (nameLower.includes(eLower) || summary.includes(eLower) ||
+              aliases.some(a => String(a).toLowerCase().includes(eLower))) {
+            r.score *= 1.20;
+            break;
+          }
+        }
+      }
+    }
+
+    fused.sort((a, b) => b.score - a.score);
+  }
+
+  return fused;
 }
 
 export async function hybridRecallChunks(query, limit = 50, options = {}) {

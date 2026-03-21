@@ -796,7 +796,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     useReranking = true,
     useCitations = true,
     includeRelatedQuestions = true,
-    retrievalOptions = {}
+    retrievalOptions = {},
+    classification = null
   } = enhancedOptions;
 
   // Extract retrieval parameters with defaults.
@@ -975,6 +976,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         includeSiblings: true,
         includeDescendants: true,
         queryVariants: retrievalQueryVariants,
+        classification,
         onStep: nfStepHandler
       });
 
@@ -988,7 +990,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     }
 
     // Quality check: is node-first result strong enough?
-    const weak = isNodeFirstResultWeak(nfResult, query);
+    let weak = isNodeFirstResultWeak(nfResult, query);
     trace?.addStep('Quality Check', `Node-first result ${weak ? 'WEAK — running direct fallback' : 'strong — skipping direct search'}`, {
       chunk_count: nfResult.chunks.length,
       distinct_nodes: nfResult.distinct_chunk_node_count,

@@ -207,7 +207,8 @@ export async function ask({ query, queryScope = null, options = {} }) {
     useReranking,
     useCitations,
     includeRelatedQuestions,
-    retrievalOptions
+    retrievalOptions,
+    classification
   });
   const finalResult = { ...result, trace: trace.getTrace() };
   _setCachedResult(query, datasetId, finalResult);

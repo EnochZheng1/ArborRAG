@@ -1017,6 +1017,7 @@ export async function nodeFirstRetrieve(query, options = {}) {
     includeSiblings = true,
     includeDescendants = true,
     queryVariants = null,
+    classification = null,
     onStep = null
   } = options;
 
@@ -1055,7 +1056,8 @@ export async function nodeFirstRetrieve(query, options = {}) {
 
     // Step 1: Find nodes directly (no tree walk)
     const recalledNodes = await hybridRecallNodes(retrievalQuery, nodeLimit, {
-      queryVariants: normalizedVariants
+      queryVariants: normalizedVariants,
+      classification
     });
 
     results.seed_node_count = recalledNodes.length;
