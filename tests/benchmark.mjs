@@ -44,9 +44,10 @@ const DEFAULT_QUERIES = [
 
 async function fetchJson(path, options = {}) {
   const url = `${BASE}${path}`;
+  const { headers: extraHeaders, ...restOptions } = options;
   const resp = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options
+    ...restOptions,
+    headers: { 'Content-Type': 'application/json', ...extraHeaders }
   });
   if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText} — ${url}`);
   return resp.json();
