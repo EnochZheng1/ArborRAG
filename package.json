@@ -9,6 +9,10 @@
     "seed": "node src/kg/seedNodes.js",
     "seed:multilevel": "node src/kg/seedMultilevelTree.js",
     "test": "node test-runner.mjs",
+    "test:unit": "node --test tests/unit-scoring.test.mjs",
+    "test:db": "node --test tests/db-integration.test.mjs",
+    "test:all": "node --test tests/unit-scoring.test.mjs tests/db-integration.test.mjs",
+    "benchmark": "node tests/benchmark.mjs",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix"
   },
