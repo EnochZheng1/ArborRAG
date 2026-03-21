@@ -331,13 +331,14 @@ export const ChunkRepo = {
 
   /** INSERT a Knowledge Point row (includes KP-specific columns). */
   insertKP({ doc_title, content, chunk_type, kp_type, keywords, fields, scope,
-             authority_level, source_excerpt, source_documents_json, nodeId, documentId, index }) {
+             authority_level, source_excerpt, source_documents_json, nodeId, documentId, index,
+             assignment_confidence }) {
     return db.prepare(`
       INSERT INTO chunks
         (doc_title, content_clean, chunk_type, kp_type, keywords_json, fields_json,
          scope_json, authority_level, source_excerpt, source_documents_json,
-         node_id, document_id, chunk_index, uploaded_at, status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),'active')
+         node_id, document_id, chunk_index, assignment_confidence, uploaded_at, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),'active')
     `).run(
       doc_title, content, chunk_type, kp_type,
       JSON.stringify(keywords || []),
@@ -346,7 +347,8 @@ export const ChunkRepo = {
       authority_level,
       source_excerpt || '',
       source_documents_json || '[]',
-      nodeId, documentId, index
+      nodeId, documentId, index,
+      assignment_confidence ?? null
     );
   }
 };

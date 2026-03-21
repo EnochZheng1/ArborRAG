@@ -55,6 +55,7 @@ function runMigrations(conn) {
   ensureColumn(conn, "nodes", "is_schema_node",   "is_schema_node INTEGER DEFAULT 0");
   ensureColumn(conn, "nodes", "keywords_json",    "keywords_json TEXT DEFAULT '[]'");
   ensureColumn(conn, "nodes", "attributes_json",  "attributes_json TEXT DEFAULT '[]'");
+  ensureColumn(conn, "nodes", "quality_score",    "quality_score REAL DEFAULT NULL");
 
   // Chunks
   ensureColumn(conn, "chunks", "doc_title", "doc_title TEXT");
@@ -76,6 +77,7 @@ function runMigrations(conn) {
   ensureColumn(conn, "chunks", "kp_type",              "kp_type TEXT DEFAULT 'legacy_chunk'");
   ensureColumn(conn, "chunks", "source_excerpt",        "source_excerpt TEXT DEFAULT ''");
   ensureColumn(conn, "chunks", "source_documents_json", "source_documents_json TEXT DEFAULT '[]'");
+  ensureColumn(conn, "chunks", "assignment_confidence", "assignment_confidence REAL DEFAULT NULL");
 
   // Documents
   ensureColumn(conn, "documents", "filename", "filename TEXT");

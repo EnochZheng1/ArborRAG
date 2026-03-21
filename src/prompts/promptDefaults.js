@@ -473,11 +473,12 @@ Reply with ONLY a numbered list using the exact schema node name from above or N
 
 New topic: "{{topic}}"
 
-Candidate existing nodes in the graph:
+Candidate existing nodes in the graph (with summaries, keywords, and aliases when available):
 {{candidateList}}
 
 Is the new topic semantically equivalent to any candidate (same concept, possibly different phrasing)?
-- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim)
+Consider the summaries, keywords, and aliases — not just the node name.
+- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim, just the name in quotes)
 - If NO: respond with EXACTLY "{{topic}}"
 
 Respond with ONLY the chosen name, nothing else.`

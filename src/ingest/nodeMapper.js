@@ -377,7 +377,9 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
             break;
 
           case "REPLACE": {
-            const newChunkId = assignKPToNode(kp, targetNodeId, documentId);
+            const newChunkId = assignKPToNode(kp, targetNodeId, documentId, {
+              assignmentConfidence: 0.85
+            });
             ChunkRepo.supersede(decision.chunkId, newChunkId);
             if (kp.keywords?.length > 0) {
               if (!_pendingKeywords.has(targetNodeId)) _pendingKeywords.set(targetNodeId, new Set());
@@ -393,7 +395,14 @@ export async function autoMapChunks(chunks, documentId, options = {}) {
           case "NORMALIZE_THEN_STORE":
           case "STORE":
           default: {
-            const chunkId = assignKPToNode(kp, targetNodeId, documentId);
+            // Assignment confidence: NORMALIZE_THEN_STORE = 0.80 (LLM confirmed),
+            // STORE = scaled from KP extraction confidence (0.5-0.8 range)
+            const assignConf = decision.action === "NORMALIZE_THEN_STORE"
+              ? 0.80
+              : Math.min(0.80, Math.max(0.50, (kp.confidence ?? 0.7) * 0.85));
+            const chunkId = assignKPToNode(kp, targetNodeId, documentId, {
+              assignmentConfidence: assignConf
+            });
             if (kp.keywords?.length > 0) {
               if (!_pendingKeywords.has(targetNodeId)) _pendingKeywords.set(targetNodeId, new Set());
               for (const kw of kp.keywords) _pendingKeywords.get(targetNodeId).add(kw);

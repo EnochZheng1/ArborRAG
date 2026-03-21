@@ -1,4 +1,4 @@
-import { runTransaction, logAudit } from "../db/db.js";
+import { runTransaction, logAudit, safeJson } from "../db/db.js";
 import { NodeRepo } from "../db/repositories/NodeRepo.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { searchNodesByName } from "../kg/recallNodes.js";
@@ -215,24 +215,46 @@ export async function canonicalizeTopicHints(uniqueTopics, useLLM) {
       const candidates = searchNodesByName(topic, 12);
       if (!candidates.length) continue;
 
-      const candidateNames = candidates
-        .map(c => (c.node || c).name)
-        .filter(Boolean)
-        .filter((n, i, arr) => arr.indexOf(n) === i) // deduplicate
-        .slice(0, 12);
+      // Deduplicate candidate names and collect node IDs for enrichment
+      const seen = new Map(); // name → node_id
+      for (const c of candidates) {
+        const raw = c.node || c;
+        const name = raw.name;
+        if (name && !seen.has(name)) seen.set(name, raw.node_id);
+      }
+      const candidateNames = [...seen.keys()].slice(0, 12);
 
-      const candidateList = candidateNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
+      // Build enriched candidate list with summary, keywords, aliases
+      // so the LLM can judge equivalence on semantics, not just names.
+      const candidateLines = candidateNames.map((name, i) => {
+        const nodeId = seen.get(name);
+        const node = nodeId ? NodeRepo.findById(nodeId) : null;
+
+        const parts = [`${i + 1}. "${name}"`];
+        if (node) {
+          const summary = (node.node_summary || '').trim();
+          if (summary) parts.push(`Summary: ${summary.slice(0, 100)}`);
+          const kws = safeJson(node.keywords_json, []).slice(0, 5);
+          if (kws.length) parts.push(`Keywords: ${kws.join(', ')}`);
+          const aliases = safeJson(node.aliases_json, []).slice(0, 3);
+          if (aliases.length) parts.push(`Aliases: ${aliases.join(', ')}`);
+        }
+        return parts.join(' — ');
+      });
+      const candidateList = candidateLines.join('\n');
+
       const prompt = getCustomPrompt('topicCanonicalization', {
         topic, candidateList
       }) ?? `You are organizing a knowledge graph. A new document has a topic category.
 
 New topic: "${topic}"
 
-Candidate existing nodes in the graph:
+Candidate existing nodes in the graph (with summaries, keywords, and aliases when available):
 ${candidateList}
 
 Is the new topic semantically equivalent to any candidate (same concept, possibly different phrasing)?
-- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim)
+Consider the summaries, keywords, and aliases — not just the node name.
+- If YES: respond with EXACTLY the matching candidate name from the list (copy it verbatim, just the name in quotes)
 - If NO: respond with EXACTLY "${topic}"
 
 Respond with ONLY the chosen name, nothing else.`;
@@ -391,7 +413,7 @@ export async function buildTopicalHierarchy(kps, docTitle, documentId, options =
  * Insert a KP into the DB and update the FTS index.
  * @returns {number} new chunk ID
  */
-export function assignKPToNode(kp, nodeId, documentId) {
+export function assignKPToNode(kp, nodeId, documentId, { assignmentConfidence } = {}) {
   return runTransaction(() => {
     const result = ChunkRepo.insertKP({
       doc_title:            kp.doc_title,
@@ -406,7 +428,8 @@ export function assignKPToNode(kp, nodeId, documentId) {
       source_documents_json: kp.source_documents_json || "[]",
       nodeId,
       documentId,
-      index: kp.index
+      index: kp.index,
+      assignment_confidence: assignmentConfidence ?? null
     });
 
     const chunkId = result.lastInsertRowid;

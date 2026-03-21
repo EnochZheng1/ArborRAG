@@ -22,6 +22,7 @@ import { llmScoreNodes } from "./llmTreeRouter.js";
 import { vectorScoreNodes } from "./vectorTreeRouter.js";
 import { generateQueryEmbedding } from "../embedding/embedder.js";
 import { isNumericQuery } from "../utils/queryHelpers.js";
+import { wordDiceSimilarity } from "../ingest/knowledgeExtractor.js";
 
 /**
  * Calculate text similarity score (simple term overlap)
@@ -256,6 +257,9 @@ function getNodeChunks(nodeId, query, limit = 10) {
   const contentTerms = queryTerms.filter(t => !EN_STOP_WORDS.has(t));
   const scoringTerms = contentTerms.length > 0 ? contentTerms : queryTerms;
 
+  // Detect doc-title-like terms in the query (words ≥5 chars that might be document names)
+  const queryDocTerms = scoringTerms.filter(t => t.length >= 5);
+
   const rows = ChunkRepo.getForNodeFull(nodeId, limit * 2); // Get more, then filter by relevance
 
   const chunks = rows.map(r => {
@@ -303,6 +307,19 @@ function getNodeChunks(nodeId, query, limit = 10) {
     }
     relevance += numericBoost;
 
+    // Assignment confidence boost — chunks placed more confidently in this node
+    // are more likely to be relevant. NULL defaults to 0.5 (neutral).
+    const assignConf = r.assignment_confidence ?? 0.5;
+    relevance += (assignConf - 0.5) * 0.3;  // range: -0.15 to +0.15
+
+    // Doc-title alignment — boost chunks from documents that match query terms
+    if (queryDocTerms.length > 0 && r.doc_title) {
+      const titleLower = r.doc_title.toLowerCase();
+      if (queryDocTerms.some(t => titleLower.includes(t))) {
+        relevance += 0.2;
+      }
+    }
+
     return {
       id: r.id,
       content: content,
@@ -314,6 +331,7 @@ function getNodeChunks(nodeId, query, limit = 10) {
       chunk_type: r.chunk_type,
       authority_level: r.authority_level,
       keywords: safeJson(r.keywords_json, []),
+      assignment_confidence: assignConf,
       relevance_score: relevance
     };
   });
@@ -330,6 +348,21 @@ function getNodeChunks(nodeId, query, limit = 10) {
       if (rankA !== rankB) return rankA - rankB;
       return 0;
     });
+
+    // Chunk redundancy penalty — demote near-duplicate chunks so the top-N
+    // set is diverse. Only applied after sorting by relevance so the highest-
+    // scored instance of each concept is kept.
+    for (let i = 1; i < relevant.length; i++) {
+      for (let j = 0; j < i; j++) {
+        if (wordDiceSimilarity(relevant[i].content, relevant[j].content) > 0.70) {
+          relevant[i].relevance_score *= 0.5;
+          break;
+        }
+      }
+    }
+    // Re-sort after redundancy penalty
+    relevant.sort((a, b) => b.relevance_score - a.relevance_score);
+
     return relevant.slice(0, limit);
   }
 
