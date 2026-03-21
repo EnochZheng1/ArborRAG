@@ -859,6 +859,8 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
   // ── Timing ─────────────────────────────────────────────────────────────────
   const _retrievalStartMs = Date.now();
   let _llmStartMs = 0;
+  let _llmEndMs = 0;
+  let _rescueUsed = false;
 
   // ── Strategy selection ──────────────────────────────────────────────────────
   let retrievalStrategy = 'node_first';
@@ -1026,6 +1028,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
           }
           hierarchicalChunks = [...hierarchicalChunks, ...rescued];
           weak = false; // rescue succeeded — skip full direct fallback
+          _rescueUsed = true;
           trace?.addStep('Rescue Expansion', `Rescued ${rescued.length} chunks from node-scoped expansion — skipping direct fallback`);
         } else {
           trace?.addStep('Rescue Expansion', `Rescue found only ${rescued.length} chunks — proceeding to direct fallback`);
@@ -1388,6 +1391,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         has_missing_info: llmResponse.missing_info?.length > 0
       });
     }
+    _llmEndMs = Date.now();
 
     // Calculate calibrated confidence
     const nodesUsed = chosenNode?.node ? [chosenNode.node] : hierarchicalNodes.slice(0, 3);
@@ -1479,9 +1483,14 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       retrieval_options: { topK, maxChunks, minConfidence, hybridAlpha, rerankerThreshold, contextWindow, temperature },
       timing: {
         retrieval_ms: _llmStartMs - _retrievalStartMs,
-        llm_ms: Date.now() - _llmStartMs,
+        llm_ms: _llmEndMs - _llmStartMs,
         total_ms: Date.now() - _retrievalStartMs
       },
+      fallback_used: usedFallback,
+      rescue_used: _rescueUsed,
+      retrieval_path: usedFallback ? 'node_first_plus_fallback'
+        : _rescueUsed ? 'node_first_plus_rescue'
+        : 'node_first_only',
       ...(usedFallback && { message: "Could not locate an exact node in the current knowledge structure. A global fuzzy search has been performed." })
     };
 }

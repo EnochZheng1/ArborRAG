@@ -69,7 +69,15 @@ function extractMetrics(result, querySpec) {
   const trace = result.trace?.steps || [];
   const timing = result.timing || {};
 
-  // Strategy
+  // Use explicit server-side fields when available, fall back to trace parsing
+  const usedFallback = result.fallback_used ?? !!result.message;
+  const rescueUsed = result.rescue_used ?? false;
+  const retrieval_path = result.retrieval_path
+    ?? (usedFallback ? 'node_first_plus_fallback'
+      : rescueUsed ? 'node_first_plus_rescue'
+      : 'node_first_only');
+
+  // Strategy (from trace, for display only)
   const strategyStep = trace.find(s => s.name === 'Strategy');
   const isNodeFirst = strategyStep?.description?.includes('node-first');
 
@@ -77,18 +85,9 @@ function extractMetrics(result, querySpec) {
   const qualityCheck = trace.find(s => s.name === 'Quality Check');
   const wasWeak = qualityCheck?.description?.includes('WEAK');
 
-  // Rescue
+  // Rescue details from trace (for rescue attempt tracking)
   const rescueStep = trace.find(s => s.name === 'Rescue Expansion');
   const rescueAttempted = !!rescueStep;
-  const rescueSucceeded = rescueStep?.description?.includes('skipping direct fallback');
-
-  // Fallback
-  const usedFallback = !!result.message; // message field only set when usedFallback=true
-
-  // Retrieval path (normalized)
-  const retrieval_path = usedFallback ? 'node_first_plus_fallback'
-    : rescueSucceeded ? 'node_first_plus_rescue'
-    : 'node_first_only';
 
   // Confidence
   const confidence = result.confidence ?? null;
@@ -121,7 +120,7 @@ function extractMetrics(result, querySpec) {
     isNodeFirst,
     wasWeak,
     rescueAttempted,
-    rescueSucceeded,
+    rescueUsed,
     usedFallback,
     confidence,
     retrieval_confidence,
@@ -195,7 +194,7 @@ async function runBenchmark(datasetId, queries) {
 
   const fallbacks = valid.filter(r => r.usedFallback).length;
   const rescueAttempts = valid.filter(r => r.rescueAttempted).length;
-  const rescueSuccesses = valid.filter(r => r.rescueSucceeded).length;
+  const rescueSuccesses = valid.filter(r => r.rescueUsed).length;
   const nodeFirstOnly = valid.filter(r => r.retrieval_path === 'node_first_only').length;
   const assertable = valid.filter(r => r.answerPass !== null);
   const passed = assertable.filter(r => r.answerPass).length;
