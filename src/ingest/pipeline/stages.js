@@ -14,7 +14,7 @@
  *   → (stageFinalize)     [results.success = true]
  */
 
-import { db, logAudit, runTransaction } from "../../db/db.js";
+import { db, logAudit, runTransaction, safeJson } from "../../db/db.js";
 import { DocumentRepo } from "../../db/repositories/DocumentRepo.js";
 import { DatasetConfigRepo } from "../../db/repositories/DatasetConfigRepo.js";
 import { parseFile, isSupportedFileType } from "../fileParser.js";
@@ -304,6 +304,117 @@ export async function stageNodeSummaries(ctx) {
   if (generated > 0) {
     logger.info(`Generated summaries for ${generated}/${newNodeIds.length} new nodes`);
     ctx.setStep(documentId, "node_summaries", `Generated ${generated} node summaries.`, 88);
+  }
+}
+
+// ── Stage 5b-enrich: Extract structured keywords from chunk content (zero LLM) ─
+
+// Common English stopwords / acronym false-positives to filter out
+const ACRONYM_STOP = new Set([
+  'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HER',
+  'WAS', 'ONE', 'OUR', 'OUT', 'HAS', 'HIS', 'HOW', 'ITS', 'MAY', 'NEW',
+  'NOW', 'OLD', 'SEE', 'WAY', 'WHO', 'DID', 'GET', 'HIM', 'LET', 'SAY',
+  'SHE', 'TOO', 'USE', 'THIS', 'THAT', 'WITH', 'HAVE', 'FROM', 'THEY',
+  'BEEN', 'SAID', 'EACH', 'THAN', 'THEM', 'THEN', 'WHEN', 'WILL', 'INTO',
+  'TEXT', 'NULL', 'TRUE', 'ALSO', 'JUST', 'ONLY', 'VERY', 'EVEN', 'MOST',
+  'II', 'III', 'IV'
+]);
+
+export async function stageEnrichNodeKeywords(ctx) {
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+  if (newNodeIds.length === 0) return;
+
+  ctx.setStep(documentId, "enrich_keywords", "Extracting structured keywords…", 87);
+
+  let enriched = 0;
+  for (const nodeId of newNodeIds) {
+    const chunks = ChunkRepo.getForNodeLimited(nodeId, 10);
+    if (chunks.length === 0) continue;
+
+    const allText = chunks.map(c => c.content_clean || c.content || '').join('\n');
+    const freq = new Map(); // keyword → count
+
+    const addKw = (kw) => {
+      const trimmed = kw.trim();
+      if (trimmed.length < 2 || trimmed.length > 60) return;
+      const key = trimmed.toLowerCase();
+      freq.set(key, (freq.get(key) || 0) + 1);
+    };
+
+    // Multi-word proper nouns: "Human Resources", "Paid Time Off"
+    for (const m of allText.matchAll(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g)) addKw(m[0]);
+
+    // Acronyms: "HR", "PTO", "SLA" (filter stopword false-positives)
+    for (const m of allText.matchAll(/\b[A-Z]{2,6}\b/g)) {
+      if (!ACRONYM_STOP.has(m[0])) addKw(m[0]);
+    }
+
+    // Numeric thresholds: "15 days", "30%", "3.5 hours", "500 USD"
+    // Note: % is non-word so \b after it won't match; use lookahead instead
+    for (const m of allText.matchAll(/\b\d+(?:\.\d+)?\s*(?:%|(?:days?|hours?|months?|years?|weeks?|USD|RMB|yuan|dollars?)\b)/gi)) addKw(m[0]);
+
+    // CJK quantities: "30天", "12个月"
+    for (const m of allText.matchAll(/\d+\s*[天月年小时周个]+/g)) addKw(m[0]);
+
+    if (freq.size === 0) continue;
+
+    // Take top 15 by frequency
+    const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+    const keywords = sorted.map(([kw]) => kw);
+
+    NodeRepo.mergeKeywords(nodeId, keywords);
+    NodeRepo.rebuildFts(nodeId);
+    enriched++;
+  }
+
+  if (enriched > 0) {
+    logger.info(`Enriched keywords for ${enriched}/${newNodeIds.length} new nodes`);
+  }
+}
+
+// ── Stage 5b-quality: Compute heuristic node quality score (zero LLM) ────────
+
+export async function stageComputeNodeQuality(ctx) {
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+  if (newNodeIds.length === 0) return;
+
+  ctx.setStep(documentId, "node_quality", "Computing node quality scores…", 87);
+
+  let scored = 0;
+  for (const nodeId of newNodeIds) {
+    const node = NodeRepo.findById(nodeId);
+    if (!node) continue;
+
+    let quality = 0.0;
+    const summary = (node.node_summary || '').trim();
+    if (summary.length > 20) quality += 0.25;
+
+    const chunkCount = ChunkRepo.getForNodeLimited(nodeId, 4).length;
+    if (chunkCount >= 3) quality += 0.25;
+
+    const aliases = safeJson(node.aliases_json, []);
+    if (aliases.length >= 3) quality += 0.20;
+
+    const keywords = safeJson(node.keywords_json, []);
+    if (keywords.length >= 3) quality += 0.15;
+
+    const desc = (node.node_description || '').trim();
+    if (desc.length > 0) quality += 0.15;
+
+    // General node penalty
+    if (node.name === 'General' || node.name.startsWith('General —')) {
+      quality *= 0.7;
+    }
+
+    quality = Math.min(quality, 1.0);
+    NodeRepo.updateQualityScore(nodeId, quality);
+    scored++;
+  }
+
+  if (scored > 0) {
+    logger.info(`Computed quality scores for ${scored}/${newNodeIds.length} new nodes`);
   }
 }
 

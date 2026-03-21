@@ -24,7 +24,7 @@ import { getSuggestions, recordQuery } from "../query/suggestions.js";
 import { recordFeedback, applyFeedbackBoost, applyLearnedPenalties } from "../query/feedback.js";
 import { getFactsForQuestion, retrieveFactsForQuery } from "../extraction/entityFactRetriever.js";
 import { enhancedRetrieval, buildEnhancedContext } from "./enhancedRetrieval.js";
-import { hierarchicalRetrieve, nodeFirstRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
+import { hierarchicalRetrieve, nodeFirstRetrieve, rescueExpansion, getTreeContextSummary } from "./hierarchicalRetrieval.js";
 import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { detectLanguage as detectLang, isChineseLang } from "../utils/langDetect.js";
 import { getDatasetLang, getEffectiveLang } from "../utils/datasetLang.js";
@@ -978,6 +978,7 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         onStep: nfStepHandler
       });
 
+      hierarchicalChunks = nfResult.chunks || [];
       hierarchicalNodes = nfResult.nodes || [];
       treePaths = nfResult.paths || [];
       _routingMode = nfResult.routing_mode || 'keyword';
@@ -1004,7 +1005,31 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       }
     }
 
-    // If weak: run full direct chunk search and merge
+    // If weak: try node-scoped rescue before full direct fallback
+    if (weak) {
+      try {
+        const rescueSeenIds = new Set(nfResult.chunks.map(c => c.id));
+        const rescued = await rescueExpansion(query, nfResult.nodes, nfResult.chunks, rescueSeenIds);
+        if (rescued.length >= 3) {
+          for (const chunk of rescued) {
+            if (!seenChunkIds.has(chunk.id)) {
+              seenChunkIds.set(chunk.id, allChunks.length);
+              allChunks.push({ ...chunk, retrieval_source: ['rescue'] });
+            }
+          }
+          hierarchicalChunks = [...hierarchicalChunks, ...rescued];
+          weak = false; // rescue succeeded — skip full direct fallback
+          trace?.addStep('Rescue Expansion', `Rescued ${rescued.length} chunks from node-scoped expansion — skipping direct fallback`);
+        } else {
+          trace?.addStep('Rescue Expansion', `Rescue found only ${rescued.length} chunks — proceeding to direct fallback`);
+        }
+      } catch (err) {
+        logger.warn("Rescue expansion failed:", err.message);
+        trace?.addStep('Rescue Expansion', `Failed: ${err.message}`, null, 'error');
+      }
+    }
+
+    // If still weak after rescue: run full direct chunk search and merge
     if (weak) {
       usedFallback = true;
       try {

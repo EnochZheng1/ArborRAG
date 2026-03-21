@@ -225,6 +225,11 @@ function scoreNodeRelevance(node, query, queryTerms) {
   // Text similarity with summary
   score += calculateSimilarity(query, node.node_summary) * 0.4;
 
+  // Node quality multiplier — dampens low-quality nodes by up to 30%.
+  // NULL/missing quality_score defaults to 0.5 (neutral).
+  const quality = node.quality_score ?? 0.5;
+  score *= (0.7 + 0.3 * quality);  // maps [0,1] → [0.7, 1.0]
+
   return Math.min(score, 2.0); // Cap at 2.0
 }
 
@@ -241,6 +246,7 @@ function getRootNodes() {
     level: r.level,
     node_summary: r.node_summary,
     node_description: r.node_description || '',
+    quality_score: r.quality_score ?? null,
     aliases: safeJson(r.aliases_json, []),
     keywords: safeJson(r.keywords_json, []),
     scope: safeJson(r.scope_json, {})
@@ -917,6 +923,82 @@ function _exploreDescendants(seedNodes, query, seenChunkIds, options = {}) {
   }
 
   return { chunks, stats: { descendantNodes, chunksAdded } };
+}
+
+/**
+ * Rescue expansion: a lightweight, node-scoped expansion run before full
+ * direct fallback. Widens the scope of descendants and siblings from the
+ * existing seed nodes without launching a new global search.
+ *
+ * @param {string} query - The user's query
+ * @param {Array} seedNodes - Calibrated seed nodes from nodeFirstRetrieve
+ * @param {Array} existingChunks - Already-found chunks
+ * @param {Set} seenIds - Chunk IDs already seen (to deduplicate)
+ * @returns {Array} New chunks found (not in seenIds)
+ */
+export async function rescueExpansion(query, seedNodes, existingChunks, seenIds) {
+  const rescued = [];
+  if (!seedNodes || seedNodes.length === 0) return rescued;
+
+  const queryTerms = extractQueryTerms(query);
+
+  // 1. Wider sibling expansion: 6 siblings (vs normal 3), 4 chunks each
+  for (const seed of seedNodes.slice(0, 5)) {
+    const nodeId = seed.node_id || seed;
+    if (!nodeId) continue;
+
+    const siblings = getSiblings(nodeId, false);
+    const unscored = siblings.filter(s => !seenIds.has(s.node_id));
+
+    const scored = unscored.map(s => ({
+      ...s,
+      score: scoreNodeRelevance(s, query, queryTerms)
+    }));
+    scored.sort((a, b) => b.score - a.score);
+
+    for (const sib of scored.slice(0, 6)) {
+      if (sib.score < 0.10) break;
+      const chunks = getNodeChunks(sib.node_id, query, 4);
+      for (const chunk of chunks) {
+        if (!seenIds.has(chunk.id)) {
+          seenIds.add(chunk.id);
+          rescued.push({
+            ...chunk,
+            relevance_score: (chunk.relevance_score || 0) * 0.78 * Math.min(1, sib.score),
+            source: 'rescue_sibling',
+            hierarchy_relation: 'sibling',
+            hierarchy_hops: 1
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Deeper descendant exploration: depth 4 (vs normal 2), 3 chunks each
+  for (const seed of seedNodes.slice(0, 3)) {
+    const nodeId = seed.node_id || seed;
+    if (!nodeId) continue;
+
+    const descendants = getDescendants(nodeId, 4);
+    for (const desc of descendants.slice(0, 8)) {
+      const chunks = getNodeChunks(desc.node_id, query, 3);
+      for (const chunk of chunks) {
+        if (!seenIds.has(chunk.id)) {
+          seenIds.add(chunk.id);
+          const depthDecay = Math.pow(0.82, desc.depth || 1);
+          rescued.push({
+            ...chunk,
+            relevance_score: (chunk.relevance_score || 0) * depthDecay,
+            source: 'rescue_descendant',
+            hierarchy_relation: 'child',
+            hierarchy_hops: desc.depth || 1
+          });
+        }
+      }
+    }
+  }
+
+  return rescued;
 }
 
 /**

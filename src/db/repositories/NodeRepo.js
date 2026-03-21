@@ -265,6 +265,11 @@ export const NodeRepo = {
     return db.prepare("UPDATE nodes SET updated_at = datetime('now') WHERE node_id = ?").run(nodeId);
   },
 
+  /** Set heuristic quality score for a node. */
+  updateQualityScore(nodeId, score) {
+    return db.prepare("UPDATE nodes SET quality_score = ? WHERE node_id = ?").run(score, nodeId);
+  },
+
   /** First root node (parent_id IS NULL), or null if none exists. */
   findAnyRoot() {
     return db.prepare("SELECT * FROM nodes WHERE parent_id IS NULL LIMIT 1").get() ?? null;
