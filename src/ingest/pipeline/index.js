@@ -24,6 +24,7 @@ import {
   stageComputeNodeQuality,
   stageReclassifyGeneral,
   stageTopicCanonicalization,
+  stageNodeConsolidation,
   stageOrphanCleanup,
   stageEmbeddingSync,
   stageFinalize,
@@ -142,6 +143,7 @@ const STAGES = [
   { name: "nodeQuality",      fn: stageComputeNodeQuality,     skip: ctx => ctx.isDuplicate },
   { name: "reclassify",       fn: stageReclassifyGeneral,      skip: ctx => ctx.isDuplicate },
   { name: "canonicalize",     fn: stageTopicCanonicalization,   skip: ctx => ctx.isDuplicate },
+  { name: "consolidation",   fn: stageNodeConsolidation,       skip: ctx => ctx.isDuplicate },
   { name: "orphanCleanup",    fn: stageOrphanCleanup,          skip: ctx => ctx.isDuplicate },
   { name: "finalize",         fn: stageFinalize,               skip: ctx => ctx.isDuplicate }
 ];

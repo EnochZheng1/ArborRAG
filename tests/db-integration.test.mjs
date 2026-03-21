@@ -13,7 +13,7 @@ import { initDatasetDb } from '../src/db/initDatasetDb.js';
 import { ChunkRepo } from '../src/db/repositories/ChunkRepo.js';
 import { NodeRepo } from '../src/db/repositories/NodeRepo.js';
 import { safeJson } from '../src/db/db.js';
-import { stageEnrichNodeKeywords, stageComputeNodeQuality } from '../src/ingest/pipeline/stages.js';
+import { stageEnrichNodeKeywords, stageComputeNodeQuality, stageNodeConsolidation } from '../src/ingest/pipeline/stages.js';
 import { getNode, getChildren } from '../src/kg/graphTraversal.js';
 import { searchNodesByName } from '../src/kg/strategies/bm25.js';
 import { rescueExpansion } from '../src/kg/hierarchicalRetrieval.js';
@@ -522,5 +522,38 @@ describe('calculateConfidence (behavioral)', () => {
 
     assert.ok(grounded.answer_groundedness >= hallucinated.answer_groundedness,
       `grounded (${grounded.answer_groundedness}) should have >= groundedness than hallucinated (${hallucinated.answer_groundedness})`);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 11. stageNodeConsolidation — feature-flagged, skips when disabled
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('stageNodeConsolidation', () => {
+
+  it('is exported from stages.js', () => {
+    assert.equal(typeof stageNodeConsolidation, 'function');
+  });
+
+  it('skips when no new nodes', async () => {
+    const ctx = { documentId: 1, createdNodeIds: [], setStep: () => {} };
+    // Should not throw
+    await stageNodeConsolidation(ctx);
+  });
+
+  it('pipeline STAGES array includes consolidation', () => {
+    const indexPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../src/ingest/pipeline/index.js'
+    );
+    const source = readFileSync(indexPath, 'utf-8');
+    assert.ok(source.includes('"consolidation"'), 'STAGES should include consolidation');
+
+    // Verify order: canonicalize < consolidation < orphanCleanup
+    const canonPos = source.indexOf('"canonicalize"');
+    const consolPos = source.indexOf('"consolidation"');
+    const orphanPos = source.indexOf('"orphanCleanup"');
+    assert.ok(canonPos < consolPos, 'consolidation should come after canonicalize');
+    assert.ok(consolPos < orphanPos, 'consolidation should come before orphanCleanup');
   });
 });

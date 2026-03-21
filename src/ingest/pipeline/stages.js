@@ -32,6 +32,8 @@ import { findMergeCandidates, queueNodeMergeSuggestion } from "../nodeMerger.js"
 import { reclassifyGeneralKPs } from "../kpNormaliser.js";
 import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
+import { DecisionRepo } from "../../db/repositories/DecisionRepo.js";
+import { wordDiceSimilarity } from "../knowledgeExtractor.js";
 import { ingestLogger as logger } from "../../utils/logger.js";
 import crypto from "crypto";
 import fs from "fs";
@@ -476,6 +478,117 @@ export async function stageTopicCanonicalization(ctx) {
   if (queued > 0) {
     logger.info(`Queued ${queued} node merge suggestion(s) from topic canonicalization`);
     ctx.setStep(documentId, "topic_canonicalization", `Found ${queued} potential merge(s).`, 90);
+  }
+}
+
+// ── Stage 5c2: Node consolidation — move outlier chunks, flag mixed nodes ─────
+// Controlled by INGEST_NODE_CONSOLIDATION env var:
+//   disabled (default) — stage skipped entirely
+//   dry_run            — logs what it would do, no actual chunk moves
+//   enabled            — moves outlier chunks and queues split suggestions
+
+const NODE_CONSOLIDATION_MODE = (process.env.INGEST_NODE_CONSOLIDATION || 'disabled').toLowerCase();
+
+export async function stageNodeConsolidation(ctx) {
+  if (NODE_CONSOLIDATION_MODE === 'disabled') return;
+
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+  if (newNodeIds.length === 0) return;
+
+  const isDryRun = NODE_CONSOLIDATION_MODE === 'dry_run';
+  ctx.setStep(documentId, "node_consolidation",
+    `${isDryRun ? '[DRY RUN] ' : ''}Consolidating nodes…`, 90);
+
+  let outliersMoved = 0;
+  let splitsFlagged = 0;
+
+  for (const nodeId of newNodeIds) {
+    const node = NodeRepo.findById(nodeId);
+    if (!node) continue;
+    if (node.is_schema_node) continue;
+
+    const chunks = ChunkRepo.getForNodeLimited(nodeId, 50);
+    if (chunks.length < 5) continue;    // skip small nodes
+    if (chunks.length > 50) continue;   // skip huge nodes — flag for manual review
+
+    const nodeText = [node.name, node.node_summary || ''].join(' ').toLowerCase();
+
+    // ── 1. Move outlier chunks ────────────────────────────────────────────
+    // Sample up to 8 chunks, check Dice vs node summary+name
+    const sample = chunks.slice(0, 8);
+    for (const chunk of sample) {
+      const content = (chunk.content_clean || '').toLowerCase();
+      const diceSim = wordDiceSimilarity(content, nodeText);
+
+      if (diceSim >= 0.15) continue; // not an outlier
+
+      // Check if any sibling node is a better home
+      const siblings = node.parent_id
+        ? NodeRepo.findSiblings(node.parent_id, nodeId)
+        : NodeRepo.findRootSiblings(nodeId);
+
+      let bestSibling = null;
+      let bestSibScore = 0;
+      for (const sib of siblings.slice(0, 10)) {
+        const sibText = [sib.name, sib.node_summary || ''].join(' ').toLowerCase();
+        const sibScore = wordDiceSimilarity(content, sibText);
+        if (sibScore > bestSibScore) {
+          bestSibScore = sibScore;
+          bestSibling = sib;
+        }
+      }
+
+      if (bestSibling && bestSibScore > 0.40) {
+        if (isDryRun) {
+          logger.info(`[DRY RUN] Would move chunk ${chunk.id} from "${node.name}" to "${bestSibling.name}" (dice=${bestSibScore.toFixed(2)})`);
+        } else {
+          ChunkRepo.moveToNode(chunk.id, bestSibling.node_id);
+          NodeRepo.touch(bestSibling.node_id);
+          logAudit("consolidation_move", "chunks", chunk.id, { from_node: nodeId }, { to_node: bestSibling.node_id, dice: bestSibScore });
+        }
+        outliersMoved++;
+      }
+    }
+
+    // ── 2. Flag oversized mixed nodes ─────────────────────────────────────
+    // Only check nodes with >20 chunks; sample 10 random pairs for Dice avg
+    if (chunks.length > 20) {
+      let totalDice = 0;
+      let pairs = 0;
+      const sampleSize = Math.min(chunks.length, 10);
+      for (let i = 0; i < sampleSize && pairs < 10; i++) {
+        const j = (i + 1) % sampleSize;
+        if (i === j) continue;
+        totalDice += wordDiceSimilarity(
+          (chunks[i].content_clean || '').toLowerCase(),
+          (chunks[j].content_clean || '').toLowerCase()
+        );
+        pairs++;
+      }
+      const avgDice = pairs > 0 ? totalDice / pairs : 0;
+
+      if (avgDice < 0.30) {
+        if (isDryRun) {
+          logger.info(`[DRY RUN] Would flag node "${node.name}" (${chunks.length} chunks, avg dice=${avgDice.toFixed(2)}) for split`);
+        } else {
+          DecisionRepo.insert({
+            action: 'node_split_suggestion',
+            node_id: nodeId,
+            confidence: 1 - avgDice,
+            reason: `Node "${node.name}" has ${chunks.length} chunks with low internal coherence (avg dice=${avgDice.toFixed(2)})`
+          });
+        }
+        splitsFlagged++;
+      }
+    }
+  }
+
+  if (outliersMoved > 0 || splitsFlagged > 0) {
+    const prefix = isDryRun ? '[DRY RUN] ' : '';
+    logger.info(`${prefix}Node consolidation: ${outliersMoved} outlier chunks moved, ${splitsFlagged} split suggestions`);
+    ctx.setStep(documentId, "node_consolidation",
+      `${prefix}${outliersMoved} outliers moved, ${splitsFlagged} splits flagged.`, 91);
   }
 }
 
