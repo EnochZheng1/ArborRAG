@@ -10,9 +10,10 @@ import { initTree, initGraphView, initMobileSidebar, initTreeSearch, initTreeCon
 import { initIngest } from './modules/ingest.js';
 import { initDatasets } from './modules/datasets.js';
 import {
-  initDecisions, initTests, initSettings, initPrompts,
+  initDecisions, initSettings, initPrompts,
   initSchemaPanel
 } from './modules/settings.js';
+import { initTests } from './modules/tests.js';
 import { initManageTab } from './modules/manage.js';
 
 // ── Theme Management ─────────────────────────────────────────────────────────

@@ -104,13 +104,6 @@ export const state = {
   treeDiagramSvg: null,
   treeDiagramG: null,
 
-  // Tests state
-  testResults: {},
-  allTests: [],
-  isRunning: false,
-  accuracyState: { jobId: null, docId: null, chunkCount: 0, ingested: false },
-  multidocState: { jobId: null, docId: null, chunkCount: 0, ingested: false },
-
   // Settings state
   PROVIDER_DEFAULTS: {
     openai: { model: 'gpt-4o-mini',       embeddingModel: 'text-embedding-3-large' },

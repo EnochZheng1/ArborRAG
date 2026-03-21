@@ -1,6 +1,6 @@
 # ArborRAG — Tree-Based Knowledge Graph
 
-**v3.1.2** · Node.js · SQLite · OpenAI / Gemini
+**v3.2.0** · Node.js · SQLite · OpenAI / Gemini
 
 A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
 
@@ -25,12 +25,12 @@ A local knowledge management system that ingests documents into a hierarchical k
 - **Knowledge Point (KP) extraction** — LLM decomposes documents into atomic, typed statements (fact, rule, definition, procedure, example, context) and places them into a topical hierarchy
 - **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; LLM-confirmed value conflicts queued for human review in the Decisions tab with diff view
 - **Multi-dataset support** — separate SQLite databases per dataset, switched via `X-Dataset-ID` header or the Datasets tab
-- **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall
+- **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall; two retrieval strategies: Node First (direct node recall + local expansion, faster) and Top Down (beam-search tree walk, legacy)
 - **Tree Management** — lazy-rendered tree for 500+ nodes, drag-and-drop reparenting, batch operations (move/delete), content search across chunks, tree health dashboard; undo for tree mutations
 - **Accessibility** — ARIA roles/labels on all interactive elements, focus-visible outlines, confidence badge text indicators, focus trap in modals, keyboard shortcuts (Ctrl+K search, Ctrl+Enter submit, Escape close)
 - **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events; reconnection banner with manual reconnect
 - **Entity & fact extraction** — named entities and relational facts extracted and stored for graph queries
-- **Test case management** — save and replay Q&A pairs to track retrieval quality over time
+- **Test case management** — save and replay Q&A pairs to track retrieval quality over time; persistent test runs with per-item metrics (confidence, latency, citations); run history with baseline comparison; runner/history/manage UI tabs
 - **Dark mode UI** — fully themed web interface with embedding coverage indicator, query favorites, WebSocket status; mobile-responsive with 480px breakpoint
 
 ---
@@ -166,6 +166,29 @@ docs/
 ---
 
 ## Changelog
+
+### v3.2.0 — Node-First Retrieval & Test Run Persistence
+
+**Node-First Retrieval Strategy**
+- **New default retrieval strategy** — `nodeFirstRetrieve()` finds the best nodes directly via hybrid recall (BM25 + vector + alias + doc-title, one pass), then expands locally (ancestors, siblings, descendants). Replaces the top-down beam-search tree walk as the default, avoiding error propagation at each depth level.
+- **Rank-based score calibration** — `hybridRecallNodes()` RRF scores (0-0.1 range) normalized to 0-2.0 via rank decay (`1.0 - rank * 0.12`), compatible with downstream `applyHierarchicalScoring()`.
+- **Tiered chunk limits** — top seed node gets 15 chunks, ranks 1-4 get 8, ranks 5-7 get 5. Balances depth on best matches with breadth across weaker ones.
+- **Quality-aware fallback** — compound rule (`isNodeFirstResultWeak()`) checks chunk count, distinct node diversity, top score strength, and doc-title alignment. When weak, falls back to full direct search (doc-title + BM25 + keyword-tags + LIKE). When strong, skips direct search entirely.
+- **Strategy toggle** — `retrieval_strategy` setting (`node_first` | `top_down`) in schema settings API and frontend UI. Top-down preserved as user-selectable option.
+- **`seed_node` source type** — new source boost (1.0) in `applyHierarchicalScoring()` for node-first chunks, with `hierarchy_relation: 'direct'` tagging.
+- **Extracted `_exploreDescendants()` helper** — shared by both `hierarchicalRetrieve()` and `nodeFirstRetrieve()`, no behavior change to existing code.
+
+**Test Run Persistence**
+- **Persistent test runs** — new `test_runs` and `test_run_items` tables store execution history with per-item metrics (confidence, latency, citation count, pass/fail).
+- **9 new test endpoints** — `GET/POST/DELETE /tests/runs`, `GET /tests/runs/:id`, `PUT /tests/runs/:id/finish`, `POST /tests/runs/:id/items`, `PUT /tests/runs/:id/items/:itemId`, `PUT /tests/runs/:id/baseline`, `GET /tests/env`.
+- **Test UI redesign** — 3-section tabs (Runner, History, Manage) with progress bar, dashboard stat cards, filter toolbar, and run history cards with pass-rate visualization.
+- **Tests module extraction** — ~1,900 lines moved from `settings.js` to dedicated `modules/tests.js` for maintainability.
+
+**Other**
+- **NodeRepo fix** — `MAX(uploaded_at)` replaces `MAX(created_at)` in chunk aggregation for correct node last-updated timestamps.
+- **Schema version bump** — v3 adds `suite`, `tags_json`, `priority` columns to `test_cases` table.
+
+**Files changed:** 12 modified + 1 new (`public/modules/tests.js`)
 
 ### v3.1.2 — Retrieval Pipeline Bug Fixes
 

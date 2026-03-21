@@ -23,24 +23,28 @@ export const TestCaseRepo = {
     return db.prepare("SELECT * FROM test_cases ORDER BY id").all();
   },
 
+  getEnabled() {
+    return db.prepare("SELECT * FROM test_cases WHERE enabled = 1 ORDER BY id").all();
+  },
+
   getById(id) {
     return db.prepare("SELECT * FROM test_cases WHERE id = ?").get(id);
   },
 
-  insert({ name, description = '', query, assertion_type, assertion_value = '' }) {
+  insert({ name, description = '', query, assertion_type, assertion_value = '', suite = '', tags_json = '[]', priority = 2 }) {
     if (!VALID_ASSERTION_TYPES.has(assertion_type))
       throw Object.assign(new Error(`Invalid assertion_type '${assertion_type}'`), { status: 400 });
     const r = db.prepare(
-      `INSERT INTO test_cases (name, description, query, assertion_type, assertion_value)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(name, description, query, assertion_type, assertion_value);
+      `INSERT INTO test_cases (name, description, query, assertion_type, assertion_value, suite, tags_json, priority)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(name, description, query, assertion_type, assertion_value, suite, tags_json, priority);
     return TestCaseRepo.getById(r.lastInsertRowid);
   },
 
   update(id, fields) {
     if (fields.assertion_type && !VALID_ASSERTION_TYPES.has(fields.assertion_type))
       throw Object.assign(new Error(`Invalid assertion_type '${fields.assertion_type}'`), { status: 400 });
-    const { name, description, query, assertion_type, assertion_value, enabled } = fields;
+    const { name, description, query, assertion_type, assertion_value, enabled, suite, tags_json, priority } = fields;
     db.prepare(
       `UPDATE test_cases
        SET name           = COALESCE(?, name),
@@ -49,15 +53,21 @@ export const TestCaseRepo = {
            assertion_type  = COALESCE(?, assertion_type),
            assertion_value = COALESCE(?, assertion_value),
            enabled        = COALESCE(?, enabled),
+           suite          = COALESCE(?, suite),
+           tags_json      = COALESCE(?, tags_json),
+           priority       = COALESCE(?, priority),
            updated_at     = datetime('now')
        WHERE id = ?`
     ).run(
-      name          ?? null,
-      description   ?? null,
-      query         ?? null,
+      name            ?? null,
+      description     ?? null,
+      query           ?? null,
       assertion_type  ?? null,
       assertion_value ?? null,
       enabled        != null ? (enabled ? 1 : 0) : null,
+      suite           ?? null,
+      tags_json       ?? null,
+      priority        ?? null,
       id
     );
     return TestCaseRepo.getById(id);

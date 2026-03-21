@@ -24,7 +24,8 @@ import { getSuggestions, recordQuery } from "../query/suggestions.js";
 import { recordFeedback, applyFeedbackBoost, applyLearnedPenalties } from "../query/feedback.js";
 import { getFactsForQuestion, retrieveFactsForQuery } from "../extraction/entityFactRetriever.js";
 import { enhancedRetrieval, buildEnhancedContext } from "./enhancedRetrieval.js";
-import { hierarchicalRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
+import { hierarchicalRetrieve, nodeFirstRetrieve, getTreeContextSummary } from "./hierarchicalRetrieval.js";
+import { DatasetConfigRepo } from "../db/repositories/DatasetConfigRepo.js";
 import { detectLanguage as detectLang, isChineseLang } from "../utils/langDetect.js";
 import { getDatasetLang, getEffectiveLang } from "../utils/datasetLang.js";
 
@@ -750,6 +751,45 @@ export async function handleAggregationQuery(query, classification, queryScope, 
   };
 }
 
+/**
+ * Check whether node-first retrieval returned a weak result that needs
+ * full direct-search fallback.
+ */
+function isNodeFirstResultWeak(nfResult, query) {
+  const chunks = nfResult.chunks || [];
+  const distinctNodeCount = nfResult.distinct_chunk_node_count || 0;
+
+  // Rule 1: Too few chunks
+  if (chunks.length < 3) return true;
+
+  // Rule 2: Too few distinct nodes in returned chunks
+  if (distinctNodeCount < 2) return true;
+
+  // Rule 3: Top chunk scores are weak after hierarchical scoring
+  const topScore = chunks[0]?.hierarchical_score || chunks[0]?.relevance_score || 0;
+  if (topScore < 0.15) return true;
+
+  // Rule 4: Doc-scoped query with no doc-title-aligned chunks
+  const docTitles = [...new Set(chunks.map(c => c.doc_title).filter(Boolean))];
+  const qLower = query.toLowerCase();
+  const qWords = qLower.split(/\s+/).filter(w => w.length >= 4);
+
+  if (docTitles.length > 0) {
+    const hasDocMatch = docTitles.some(t => {
+      const tLower = t.toLowerCase();
+      return tLower.split(/\s+/).some(word => word.length >= 4 && qLower.includes(word)) ||
+             qWords.some(word => tLower.includes(word));
+    });
+    if (!hasDocMatch && docTitles.length === 1) return true;
+  } else {
+    const DOC_CUES = /\b(document|doc|file|pdf|deck|slide|spec|manual|handbook|catalog|policy|report|guide)\b/i;
+    const hasQuotedPhrase = /["'].{3,}["']/.test(query);
+    if (DOC_CUES.test(query) || hasQuotedPhrase) return true;
+  }
+
+  return false;
+}
+
 // Standard simple lookup handling
 export async function handleSimpleLookup(query, queryScope, useHybridSearch, trace, enhancedOptions = {}) {
   const {
@@ -814,19 +854,29 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     }))
   });
 
-  // STEP 0: Direct chunk retrieval (do this FIRST, before node-based search)
-  // This ensures we find document content even if node matching fails
-  let directChunks = [];
+  // ── Strategy selection ──────────────────────────────────────────────────────
+  let retrievalStrategy = 'node_first';
   try {
-    trace?.addStep('Direct Chunk Search', 'Searching chunks directly by content');
+    retrievalStrategy = DatasetConfigRepo.get('retrieval_strategy') || 'node_first';
+  } catch (_) {}
 
+  let directChunks = [];
+  let hierarchicalChunks = [];
+  let hierarchicalNodes = [];
+  let treePaths = [];
+  let _routingMode = 'keyword';
+  let usedFallback = false;
+  const allChunks = [];
+  const seenChunkIds = new Map(); // id → index in allChunks
+
+  // ── Helper: run full direct chunk search (doc-title + BM25 + keyword-tags + LIKE) ─
+  const runDirectChunkSearch = () => {
     const directChunkMap = new Map();
     const variantQueries = retrievalQueryVariants.slice(0, 5);
     const sourceStats = { doc_title: 0, bm25: 0, simple: 0, keywords: 0 };
 
     const upsertDirectChunk = (chunk, source, score, variant) => {
       if (!chunk?.id) return;
-
       const weightedScore = Math.max(0, (score || 0) * (variant.weight || 1));
       const existing = directChunkMap.get(chunk.id);
       if (existing) {
@@ -835,7 +885,6 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
         if (!existing.query_variants.includes(variant.text)) existing.query_variants.push(variant.text);
         return;
       }
-
       directChunkMap.set(chunk.id, {
         id: chunk.id,
         content: chunk.content,
@@ -854,34 +903,26 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
     for (const variant of variantQueries) {
       const perVariantLimit = Math.max(8, Math.ceil(maxChunks / Math.min(variantQueries.length, 3)));
 
-      // Search by document title
       const docTitleChunks = searchChunksByDocTitle(variant.text, perVariantLimit);
       sourceStats.doc_title += docTitleChunks.length;
       for (const r of docTitleChunks) {
         upsertDirectChunk(r.chunk, 'doc_title', Math.max(0, Math.min(1, r.score || 0)), variant);
       }
 
-      // BM25 FTS search on chunk content
       const bm25Chunks = bm25RecallChunks(variant.text, perVariantLimit);
       sourceStats.bm25 += bm25Chunks.length;
-      // Absolute normalisation — avoids inflating the "best of a bad batch" to 1.0
-      // when all BM25 scores are weak (same fix as nodeScoring.js MAX_EXPECTED_BM25).
       const MAX_EXPECTED_BM25 = 15.0;
       for (const r of bm25Chunks) {
         const normalizedBm25 = Math.min(1.0, (r.bm25 || 0) / MAX_EXPECTED_BM25);
         upsertDirectChunk(r.chunk, 'bm25_content', normalizedBm25, variant);
       }
 
-      // Simple LIKE-based content search (most reliable fallback)
       const simpleChunks = simpleContentSearch(variant.text, perVariantLimit);
       sourceStats.simple += simpleChunks.length;
       for (const r of simpleChunks) {
         upsertDirectChunk(r.chunk, 'simple_content', r.score || 0, variant);
       }
 
-      // Keyword tag search — finds chunks whose LLM-extracted semantic tags match
-      // query terms. Bypasses BM25 IDF weighting, so short numeric values and
-      // domain-specific labels surface even when they score low in FTS5.
       const kwChunks = keywordTagSearch(variant.text, perVariantLimit);
       sourceStats.keywords += kwChunks.length;
       for (const r of kwChunks) {
@@ -889,12 +930,9 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       }
     }
 
-    // Numeric-fact boost — queries seeking specific numbers ("how many days",
-    // "what percentage") need chunks containing those numbers to rank higher.
-    // BM25 IDF down-weights short numbers; this post-hoc pass compensates.
+    // Numeric-fact boost
     const queryNumbers = query.match(/\b\d+(?:\.\d+)?\b/g) || [];
     const numericQuery = isNumericQuery(query);
-
     if (queryNumbers.length > 0 || numericQuery) {
       for (const [, chunk] of directChunkMap) {
         const content = (chunk.content || chunk.content_clean || '').toLowerCase();
@@ -911,124 +949,190 @@ export async function handleSimpleLookup(query, queryScope, useHybridSearch, tra
       }
     }
 
-    directChunks = [...directChunkMap.values()];
-    directChunks.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
+    const results = [...directChunkMap.values()];
+    results.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
+    return { chunks: results, sourceStats };
+  };
 
-    trace?.addStep('Direct Chunk Search Complete', `Found ${directChunks.length} chunks directly`, {
-      variants_used: variantQueries.length,
-      doc_title: sourceStats.doc_title,
-      bm25: sourceStats.bm25,
-      simple: sourceStats.simple,
-      keywords: sourceStats.keywords
-    });
-  } catch (err) {
-    logger.warn("Direct chunk search failed:", err.message);
-    trace?.addStep('Direct Chunk Search', `Failed: ${err.message}`, null, 'error');
-  }
+  if (retrievalStrategy === 'node_first') {
+    // ── NODE-FIRST STRATEGY ───────────────────────────────────────────────────
+    trace?.addStep('Strategy', 'Using node-first retrieval strategy');
 
-  // STEP 1: Hierarchical tree retrieval (smart tree navigation)
-  // This leverages the tree structure with beam search, ancestor context, and sibling expansion
-  let hierarchicalChunks = [];
-  let hierarchicalNodes = [];
-  let treePaths = [];
-  let _routingMode = 'keyword';
-  try {
-    trace?.addStep('Hierarchical Tree Retrieval', 'Navigating tree structure with beam search');
+    // STEP 1: Node-first retrieval
+    let nfResult = { chunks: [], nodes: [], paths: [], sources: [], seed_node_count: 0, distinct_chunk_node_count: 0 };
+    try {
+      const nfStepHandler = trace
+        ? (step) => trace.addStep(step.name, step.description, step.result, step.status)
+        : null;
 
-    const hierarchyStepHandler = trace
-      ? (step) => trace.addStep(step.name, step.description, step.result, step.status)
-      : null;
+      nfResult = await nodeFirstRetrieve(query, {
+        maxChunks,
+        nodeLimit: 8,
+        topNodeChunks: 15,
+        midNodeChunks: 8,
+        tailNodeChunks: 5,
+        includeAncestors: true,
+        includeSiblings: true,
+        includeDescendants: true,
+        queryVariants: retrievalQueryVariants,
+        onStep: nfStepHandler
+      });
 
-    const hierarchicalResult = await hierarchicalRetrieve(query, {
-      maxChunks: maxChunks,
-      beamWidth: 3,
-      maxDepth: 5,
-      includeAncestors: true,
-      includeSiblings: true,
-      includeDescendants: true,
-      queryVariants: retrievalQueryVariants,
-      ancestorLevels: 2,
-      siblingNodesPerSeed: 3,
-      descendantDepth: 2,
-      descendantNodesPerSeed: 5,
-      onStep: hierarchyStepHandler
-    });
-
-    hierarchicalChunks = hierarchicalResult.chunks || [];
-    hierarchicalNodes = hierarchicalResult.nodes || [];
-    treePaths = hierarchicalResult.paths || [];
-    // Capture routing mode for the query result indicator
-    _routingMode = hierarchicalResult.routing_mode || 'keyword';
-
-    // Get tree context summary
-    const treeContext = getTreeContextSummary(hierarchicalChunks);
-
-    trace?.addStep('Hierarchical Retrieval Complete', `Found ${hierarchicalChunks.length} chunks via tree navigation`, {
-      nodes_explored: hierarchicalNodes.length,
-      paths: treePaths.slice(0, 3),
-      tree_breadth: treeContext.breadth,
-      tree_depth: treeContext.depth,
-      common_ancestor: treeContext.commonAncestor,
-      sources: hierarchicalResult.sources
-    });
-  } catch (err) {
-    logger.warn("Hierarchical retrieval failed:", err.message);
-    trace?.addStep('Hierarchical Retrieval', `Failed: ${err.message}`, null, 'error');
-  }
-
-  // STEP 2: Unified merge — direct and hierarchical are EQUAL peers.
-  //
-  // Both sources contribute to a shared candidate pool. The reranker determines
-  // final ranking. Per-source caps prevent either from flooding the pool.
-  // Dedup collision: keep max score, union source tags for provenance.
-  let usedFallback = false;
-  const allChunks = [];
-  const seenChunkIds = new Map(); // id → index in allChunks
-
-  // Cap hierarchical contributions
-  const cappedHierarchical = hierarchicalChunks.slice(0, RETRIEVAL_MAX_HIERARCHICAL);
-  for (const chunk of cappedHierarchical) {
-    if (!seenChunkIds.has(chunk.id)) {
-      const idx = allChunks.length;
-      seenChunkIds.set(chunk.id, idx);
-      allChunks.push({ ...chunk, retrieval_source: ['hierarchical'] });
+      hierarchicalNodes = nfResult.nodes || [];
+      treePaths = nfResult.paths || [];
+      _routingMode = nfResult.routing_mode || 'keyword';
+    } catch (err) {
+      logger.warn("Node-first retrieval failed:", err.message);
+      trace?.addStep('Node-First Retrieval', `Failed: ${err.message}`, null, 'error');
     }
-  }
 
-  // Cap direct contributions — merge with dedup
-  const cappedDirect = directChunks.slice(0, RETRIEVAL_MAX_DIRECT);
-  for (const chunk of cappedDirect) {
-    if (seenChunkIds.has(chunk.id)) {
-      // Overlap: keep max score, union source tags
-      const existing = allChunks[seenChunkIds.get(chunk.id)];
-      const existScore = existing.hierarchical_score || existing.relevance_score || 0;
-      const newScore = chunk.relevance_score || 0;
-      if (newScore > existScore) {
-        existing.relevance_score = newScore;
+    // Quality check: is node-first result strong enough?
+    const weak = isNodeFirstResultWeak(nfResult, query);
+    trace?.addStep('Quality Check', `Node-first result ${weak ? 'WEAK — running direct fallback' : 'strong — skipping direct search'}`, {
+      chunk_count: nfResult.chunks.length,
+      distinct_nodes: nfResult.distinct_chunk_node_count,
+      seed_nodes: nfResult.seed_node_count,
+      top_score: Number((nfResult.chunks[0]?.hierarchical_score || nfResult.chunks[0]?.relevance_score || 0).toFixed(3))
+    });
+
+    // Add node-first chunks to pool
+    for (const chunk of nfResult.chunks) {
+      if (!seenChunkIds.has(chunk.id)) {
+        const idx = allChunks.length;
+        seenChunkIds.set(chunk.id, idx);
+        allChunks.push({ ...chunk, retrieval_source: ['hierarchical'] });
       }
-      if (!existing.retrieval_source.includes('direct')) {
-        existing.retrieval_source.push('direct');
-      }
-    } else {
-      const idx = allChunks.length;
-      seenChunkIds.set(chunk.id, idx);
-      allChunks.push({ ...chunk, retrieval_source: ['direct'] });
     }
+
+    // If weak: run full direct chunk search and merge
+    if (weak) {
+      usedFallback = true;
+      try {
+        trace?.addStep('Direct Chunk Fallback', 'Running full direct search (node-first was weak)');
+        const directResult = runDirectChunkSearch();
+        directChunks = directResult.chunks;
+
+        const cappedDirect = directChunks.slice(0, RETRIEVAL_MAX_DIRECT);
+        for (const chunk of cappedDirect) {
+          if (seenChunkIds.has(chunk.id)) {
+            const existing = allChunks[seenChunkIds.get(chunk.id)];
+            const existScore = existing.hierarchical_score || existing.relevance_score || 0;
+            const newScore = chunk.relevance_score || 0;
+            if (newScore > existScore) existing.relevance_score = newScore;
+            if (!existing.retrieval_source.includes('direct')) existing.retrieval_source.push('direct');
+          } else {
+            const idx = allChunks.length;
+            seenChunkIds.set(chunk.id, idx);
+            allChunks.push({ ...chunk, retrieval_source: ['direct'] });
+          }
+        }
+
+        trace?.addStep('Direct Chunk Fallback Complete', `Added ${directChunks.length} direct chunks, pool now ${allChunks.length}`, {
+          doc_title: directResult.sourceStats.doc_title,
+          bm25: directResult.sourceStats.bm25,
+          simple: directResult.sourceStats.simple,
+          keywords: directResult.sourceStats.keywords
+        });
+      } catch (err) {
+        logger.warn("Direct chunk fallback failed:", err.message);
+        trace?.addStep('Direct Chunk Fallback', `Failed: ${err.message}`, null, 'error');
+      }
+    }
+
+  } else {
+    // ── TOP-DOWN STRATEGY (original behavior) ────────────────────────────────
+    trace?.addStep('Strategy', 'Using top-down retrieval strategy');
+
+    // STEP 0: Direct chunk retrieval
+    try {
+      trace?.addStep('Direct Chunk Search', 'Searching chunks directly by content');
+      const directResult = runDirectChunkSearch();
+      directChunks = directResult.chunks;
+      trace?.addStep('Direct Chunk Search Complete', `Found ${directChunks.length} chunks directly`, {
+        variants_used: retrievalQueryVariants.slice(0, 5).length,
+        ...directResult.sourceStats
+      });
+    } catch (err) {
+      logger.warn("Direct chunk search failed:", err.message);
+      trace?.addStep('Direct Chunk Search', `Failed: ${err.message}`, null, 'error');
+    }
+
+    // STEP 1: Hierarchical tree retrieval
+    try {
+      trace?.addStep('Hierarchical Tree Retrieval', 'Navigating tree structure with beam search');
+      const hierarchyStepHandler = trace
+        ? (step) => trace.addStep(step.name, step.description, step.result, step.status)
+        : null;
+
+      const hierarchicalResult = await hierarchicalRetrieve(query, {
+        maxChunks,
+        beamWidth: 3,
+        maxDepth: 5,
+        includeAncestors: true,
+        includeSiblings: true,
+        includeDescendants: true,
+        queryVariants: retrievalQueryVariants,
+        ancestorLevels: 2,
+        siblingNodesPerSeed: 3,
+        descendantDepth: 2,
+        descendantNodesPerSeed: 5,
+        onStep: hierarchyStepHandler
+      });
+
+      hierarchicalChunks = hierarchicalResult.chunks || [];
+      hierarchicalNodes = hierarchicalResult.nodes || [];
+      treePaths = hierarchicalResult.paths || [];
+      _routingMode = hierarchicalResult.routing_mode || 'keyword';
+
+      const treeContext = getTreeContextSummary(hierarchicalChunks);
+      trace?.addStep('Hierarchical Retrieval Complete', `Found ${hierarchicalChunks.length} chunks via tree navigation`, {
+        nodes_explored: hierarchicalNodes.length,
+        paths: treePaths.slice(0, 3),
+        tree_breadth: treeContext.breadth,
+        tree_depth: treeContext.depth,
+        common_ancestor: treeContext.commonAncestor,
+        sources: hierarchicalResult.sources
+      });
+    } catch (err) {
+      logger.warn("Hierarchical retrieval failed:", err.message);
+      trace?.addStep('Hierarchical Retrieval', `Failed: ${err.message}`, null, 'error');
+    }
+
+    // STEP 2: Unified merge — direct and hierarchical as equal peers
+    const cappedHierarchical = hierarchicalChunks.slice(0, RETRIEVAL_MAX_HIERARCHICAL);
+    for (const chunk of cappedHierarchical) {
+      if (!seenChunkIds.has(chunk.id)) {
+        const idx = allChunks.length;
+        seenChunkIds.set(chunk.id, idx);
+        allChunks.push({ ...chunk, retrieval_source: ['hierarchical'] });
+      }
+    }
+
+    const cappedDirect = directChunks.slice(0, RETRIEVAL_MAX_DIRECT);
+    for (const chunk of cappedDirect) {
+      if (seenChunkIds.has(chunk.id)) {
+        const existing = allChunks[seenChunkIds.get(chunk.id)];
+        const existScore = existing.hierarchical_score || existing.relevance_score || 0;
+        const newScore = chunk.relevance_score || 0;
+        if (newScore > existScore) existing.relevance_score = newScore;
+        if (!existing.retrieval_source.includes('direct')) existing.retrieval_source.push('direct');
+      } else {
+        const idx = allChunks.length;
+        seenChunkIds.set(chunk.id, idx);
+        allChunks.push({ ...chunk, retrieval_source: ['direct'] });
+      }
+    }
+
+    if (allChunks.length === 0) usedFallback = true;
+
+    const overlapCount = allChunks.filter(c => c.retrieval_source.length > 1).length;
+    trace?.addStep('Retrieval Sources', `Merged pool: ${allChunks.length} chunks (hierarchical: ${cappedHierarchical.length}, direct: ${cappedDirect.length}, overlap: ${overlapCount})`, {
+      hierarchical: cappedHierarchical.length,
+      direct: cappedDirect.length,
+      overlap: overlapCount,
+      pool_size: allChunks.length
+    });
   }
-
-  if (allChunks.length === 0) {
-    usedFallback = true;
-  }
-
-  // Count overlaps for trace
-  const overlapCount = allChunks.filter(c => c.retrieval_source.length > 1).length;
-
-  trace?.addStep('Retrieval Sources', `Merged pool: ${allChunks.length} chunks (hierarchical: ${cappedHierarchical.length}, direct: ${cappedDirect.length}, overlap: ${overlapCount})`, {
-    hierarchical: cappedHierarchical.length,
-    direct: cappedDirect.length,
-    overlap: overlapCount,
-    pool_size: allChunks.length
-  });
 
   // If no chunks found at all
   if (allChunks.length === 0) {

@@ -492,6 +492,14 @@
                   <p class="option-hint" id="vector-coverage-hint" style="display:none; color: var(--warning);">Low embedding coverage — run Sync Embeddings first for best results.</p>
                 </div>
                 <div class="form-group">
+                  <label>Retrieval Strategy</label>
+                  <div class="toggle-group" id="retrieval-strategy-toggle">
+                    <button class="toggle-btn active" data-value="node_first">Node First</button>
+                    <button class="toggle-btn" data-value="top_down">Top Down</button>
+                  </div>
+                  <p class="option-hint">Node First: finds best nodes directly, expands locally (faster). Top Down: beam-search tree walk from root (slower, may miss branches).</p>
+                </div>
+                <div class="form-group">
                   <label>Entity/Fact Extraction</label>
                   <div class="toggle-group" id="entity-extraction-toggle">
                     <button class="toggle-btn active" data-value="false">Off</button>
@@ -800,7 +808,7 @@
       <section class="tab-content" id="tab-tests" role="tabpanel">
         <div class="tab-header">
           <h2>Test Suite</h2>
-          <div class="header-actions">
+          <div class="header-actions" id="tests-header-actions">
             <button class="btn btn-primary" id="run-all-tests-btn">Run All</button>
             <button class="btn btn-secondary" id="run-selected-tests-btn">Run Selected</button>
             <button class="btn btn-secondary" id="download-report-btn" style="display:none">&#8595; Report</button>
@@ -808,59 +816,105 @@
           </div>
         </div>
 
-        <div id="test-report" class="hidden"></div>
+        <!-- Sub-navigation -->
+        <nav class="settings-nav" id="tests-nav">
+          <button class="settings-nav-btn active" data-section="tests-section-runner">Runner</button>
+          <button class="settings-nav-btn" data-section="tests-section-history">History</button>
+          <button class="settings-nav-btn" data-section="tests-section-manage">Manage</button>
+        </nav>
 
-        <div class="test-summary" id="test-summary">
-          <div class="test-summary-counts">
-            <span id="tc-total">0 tests</span>
-            <span class="tc-passed" id="tc-passed">✓ 0</span>
-            <span class="tc-failed" id="tc-failed">✗ 0</span>
-            <span id="tc-pending">● 0 pending</span>
+        <!-- Section: Runner (default active) -->
+        <div class="settings-section active" id="tests-section-runner">
+          <!-- Run progress bar (hidden until running) -->
+          <div class="test-run-progress hidden" id="test-run-progress">
+            <div class="test-run-progress-label" id="test-run-progress-label">Running tests…</div>
+            <div class="test-run-progress-current" id="test-run-progress-current"></div>
+            <div class="test-run-progress-track">
+              <div class="test-run-progress-fill" id="test-run-progress-fill" style="width:0%"></div>
+            </div>
+            <div class="test-run-progress-meta">
+              <span id="test-run-progress-count">0 / 0</span>
+              <span id="test-run-progress-elapsed">0s</span>
+              <button class="btn btn-secondary btn-small" id="test-run-cancel-btn">Cancel</button>
+            </div>
           </div>
-          <div class="test-progress-bar">
-            <div class="test-progress-fill" id="test-progress-fill" style="width:0%"></div>
+
+          <!-- Dashboard (JS-rendered stat cards + pass rate ring) -->
+          <div id="test-dashboard" class="test-dashboard"></div>
+
+          <!-- Report (hidden, same as before) -->
+          <div id="test-report" class="hidden"></div>
+
+          <!-- Filter toolbar -->
+          <div class="test-filter-toolbar" id="test-filter-toolbar">
+            <select class="filter-select" id="test-status-filter">
+              <option value="">All statuses</option>
+              <option value="passed">Passed</option>
+              <option value="failed">Failed</option>
+              <option value="pending">Pending</option>
+              <option value="running">Running</option>
+            </select>
+            <select class="filter-select" id="test-category-filter">
+              <option value="">All categories</option>
+            </select>
+            <input type="text" class="test-search-input" id="test-search-input" placeholder="Search tests…">
           </div>
+
+          <!-- Test suites container -->
+          <div id="tests-container"></div>
         </div>
 
-        <div id="tests-container"></div>
+        <!-- Section: History -->
+        <div class="settings-section" id="tests-section-history">
+          <div id="tests-history-container"></div>
+        </div>
 
-        <div class="test-add-section">
-          <button class="btn btn-secondary" id="show-add-test-btn">+ Add Custom Test</button>
-          <div class="test-add-form hidden" id="test-add-form">
-            <div class="form-group">
-              <label for="tc-name">Test Name</label>
-              <input type="text" id="tc-name" placeholder="e.g. Verify vacation policy answer">
+        <!-- Section: Manage -->
+        <div class="settings-section" id="tests-section-manage">
+          <div class="test-manage-layout">
+            <div class="settings-card">
+              <h3>Add Custom Test</h3>
+              <div class="test-add-form" id="test-add-form">
+                <div class="form-group">
+                  <label for="tc-name">Test Name</label>
+                  <input type="text" id="tc-name" placeholder="e.g. Verify vacation policy answer">
+                </div>
+                <div class="form-group">
+                  <label for="tc-query" id="tc-query-label">Query</label>
+                  <input type="text" id="tc-query" placeholder="Question to send to the knowledge base">
+                </div>
+                <div class="form-group">
+                  <label for="tc-assertion-type">Assertion</label>
+                  <select id="tc-assertion-type" class="form-select">
+                    <optgroup label="Q&amp;A Tests">
+                      <option value="answer_not_empty">Answer is not empty</option>
+                      <option value="answer_contains">Answer contains text…</option>
+                      <option value="confidence_gte">Confidence ≥ threshold…</option>
+                      <option value="query_type_is">Query classified as…</option>
+                      <option value="has_citations">Has at least one citation</option>
+                    </optgroup>
+                    <optgroup label="Manage Chatbot Tests">
+                      <option value="manage_intent_is">Manage: intent equals…</option>
+                      <option value="manage_response_contains">Manage: response contains…</option>
+                      <option value="manage_adds_content">Manage: adds content (has changes)</option>
+                      <option value="manage_no_changes">Manage: no changes made</option>
+                      <option value="manage_status_ok">Manage: no error</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="form-group" id="tc-value-group" style="display:none">
+                  <label id="tc-value-label" for="tc-assertion-value">Value</label>
+                  <input type="text" id="tc-assertion-value" placeholder="Expected value">
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-secondary" id="cancel-test-btn">Clear</button>
+                  <button class="btn btn-primary" id="save-test-btn">Save Test</button>
+                </div>
+              </div>
             </div>
-            <div class="form-group">
-              <label for="tc-query" id="tc-query-label">Query</label>
-              <input type="text" id="tc-query" placeholder="Question to send to the knowledge base">
-            </div>
-            <div class="form-group">
-              <label for="tc-assertion-type">Assertion</label>
-              <select id="tc-assertion-type" class="form-select">
-                <optgroup label="Q&amp;A Tests">
-                  <option value="answer_not_empty">Answer is not empty</option>
-                  <option value="answer_contains">Answer contains text…</option>
-                  <option value="confidence_gte">Confidence ≥ threshold…</option>
-                  <option value="query_type_is">Query classified as…</option>
-                  <option value="has_citations">Has at least one citation</option>
-                </optgroup>
-                <optgroup label="Manage Chatbot Tests">
-                  <option value="manage_intent_is">Manage: intent equals…</option>
-                  <option value="manage_response_contains">Manage: response contains…</option>
-                  <option value="manage_adds_content">Manage: adds content (has changes)</option>
-                  <option value="manage_no_changes">Manage: no changes made</option>
-                  <option value="manage_status_ok">Manage: no error</option>
-                </optgroup>
-              </select>
-            </div>
-            <div class="form-group" id="tc-value-group" style="display:none">
-              <label id="tc-value-label" for="tc-assertion-value">Value</label>
-              <input type="text" id="tc-assertion-value" placeholder="Expected value">
-            </div>
-            <div class="form-actions">
-              <button class="btn btn-secondary" id="cancel-test-btn">Cancel</button>
-              <button class="btn btn-primary" id="save-test-btn">Save Test</button>
+            <div class="settings-card">
+              <h3>Custom Tests</h3>
+              <div id="custom-tests-list"></div>
             </div>
           </div>
         </div>

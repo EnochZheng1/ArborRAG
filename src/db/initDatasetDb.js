@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
  * Read the current schema version from the dataset_config table.
@@ -132,6 +132,11 @@ function runMigrations(conn) {
   ensureColumn(conn, "audit_log", "old_value_json", "old_value_json TEXT");
   ensureColumn(conn, "audit_log", "new_value_json", "new_value_json TEXT");
   ensureColumn(conn, "audit_log", "created_at", "created_at TEXT");
+
+  // Test cases — additive columns for Phase 1 test suite
+  ensureColumn(conn, "test_cases", "suite",     "suite TEXT DEFAULT ''");
+  ensureColumn(conn, "test_cases", "tags_json",  "tags_json TEXT DEFAULT '[]'");
+  ensureColumn(conn, "test_cases", "priority",   "priority INTEGER DEFAULT 2");
 }
 
 function ensureIndexes(conn) {
@@ -357,6 +362,7 @@ export function initDatasetDb(connection) {
   initDecisionTable(connection);
   initDatasetConfigTable(connection);
   initTestCasesTable(connection);
+  initTestRunTables(connection);
   initLearningTables(connection);
 
   // ── Schema version tracking + migrations ──────────────────────────────────
@@ -370,6 +376,11 @@ export function initDatasetDb(connection) {
     `);
     ensureColumn(connection, "feedback", "confidence_at_answer", "confidence_at_answer REAL");
     console.log(`[initDatasetDb] Migration v2: clamped feedback_score, added confidence_at_answer`);
+  }
+
+  // v3: Test run history tables (created via initTestRunTables above — idempotent)
+  if (currentVersion < 3) {
+    console.log(`[initDatasetDb] Migration v3: test_runs + test_run_items tables`);
   }
 
   if (currentVersion < SCHEMA_VERSION) {
@@ -409,6 +420,58 @@ function initLearningTables(conn) {
     );
     CREATE INDEX IF NOT EXISTS idx_ingestion_metrics_doc ON ingestion_metrics(document_id);
     CREATE INDEX IF NOT EXISTS idx_ingestion_metrics_ts ON ingestion_metrics(created_at);
+  `);
+}
+
+function initTestRunTables(conn) {
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS test_runs (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      name          TEXT DEFAULT '',
+      status        TEXT DEFAULT 'running',
+      trigger_type  TEXT DEFAULT 'manual',
+      mode          TEXT DEFAULT 'isolated',
+      test_count    INTEGER DEFAULT 0,
+      passed_count  INTEGER DEFAULT 0,
+      failed_count  INTEGER DEFAULT 0,
+      skipped_count INTEGER DEFAULT 0,
+      error_count   INTEGER DEFAULT 0,
+      duration_ms   INTEGER DEFAULT 0,
+      is_baseline   INTEGER DEFAULT 0,
+      cancel_reason TEXT DEFAULT '',
+      env_json      TEXT DEFAULT '{}',
+      started_at    TEXT DEFAULT (datetime('now')),
+      finished_at   TEXT,
+      created_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_test_runs_status ON test_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_test_runs_created ON test_runs(created_at);
+
+    CREATE TABLE IF NOT EXISTS test_run_items (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id          INTEGER NOT NULL,
+      test_id         TEXT NOT NULL,
+      test_name       TEXT NOT NULL,
+      category        TEXT DEFAULT '',
+      status          TEXT DEFAULT 'pending',
+      detail          TEXT DEFAULT '',
+      assertion_type  TEXT DEFAULT '',
+      assertion_value TEXT DEFAULT '',
+      query           TEXT DEFAULT '',
+      confidence      REAL,
+      retrieval_confidence REAL,
+      answer_groundedness  REAL,
+      query_type      TEXT DEFAULT '',
+      citations_count INTEGER DEFAULT 0,
+      chunks_used     INTEGER DEFAULT 0,
+      duration_ms     INTEGER DEFAULT 0,
+      run_order       INTEGER DEFAULT 0,
+      response_json   TEXT,
+      created_at      TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (run_id) REFERENCES test_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_test_run_items_run ON test_run_items(run_id);
+    CREATE INDEX IF NOT EXISTS idx_test_run_items_test ON test_run_items(test_id);
   `);
 }
 

@@ -750,6 +750,7 @@ export function applyHierarchicalScoring(chunks, relevantNodes, query, options =
     // Boost based on source type
     const sourceBoosts = {
       'direct': 1.0,
+      'seed_node': 1.0,
       'ancestor_context': 0.72,
       'sibling_expansion': 0.66,
       'child_context': 0.82,
@@ -835,6 +836,329 @@ export function applyHierarchicalScoring(chunks, relevantNodes, query, options =
       structural_hops: hops
     };
   });
+}
+
+/**
+ * Explore descendants of seed nodes, collecting scored chunks.
+ * Shared by hierarchicalRetrieve() and nodeFirstRetrieve().
+ */
+function _exploreDescendants(seedNodes, query, seenChunkIds, options = {}) {
+  const {
+    descendantDepth = 2,
+    descendantNodesPerSeed = 5,
+    descendantScoreDecay = 0.82,
+    chunksPerDescendant = 2,
+    minScore = 0.08
+  } = options;
+
+  const chunks = [];
+  let descendantNodes = 0;
+  let chunksAdded = 0;
+
+  for (const node of seedNodes) {
+    const nodeId = node.node_id || node;
+    const descendants = getDescendants(nodeId, descendantDepth);
+    descendantNodes += descendants.length;
+
+    for (const desc of descendants.slice(0, descendantNodesPerSeed)) {
+      const descChunks = getNodeChunks(desc.node_id, query, chunksPerDescendant);
+
+      for (const chunk of descChunks) {
+        const descDepth = Math.max(1, desc.depth || 1);
+        const depthAdjustedScore = (chunk.relevance_score || 0) * Math.pow(descendantScoreDecay, descDepth);
+
+        if (!seenChunkIds.has(chunk.id) && depthAdjustedScore > minScore) {
+          seenChunkIds.add(chunk.id);
+          chunks.push({
+            ...chunk,
+            relevance_score: depthAdjustedScore,
+            source: 'child_context',
+            parent_node: nodeId,
+            hierarchy_relation: 'child',
+            hierarchy_hops: descDepth
+          });
+          chunksAdded++;
+        }
+      }
+    }
+  }
+
+  return { chunks, stats: { descendantNodes, chunksAdded } };
+}
+
+/**
+ * Node-first retrieval: finds best nodes directly via hybrid recall,
+ * then expands locally (ancestors, siblings, descendants).
+ * Faster and avoids beam-search error propagation.
+ */
+export async function nodeFirstRetrieve(query, options = {}) {
+  const {
+    maxChunks = 30,
+    nodeLimit = 8,
+    topNodeChunks = 15,
+    midNodeChunks = 8,
+    tailNodeChunks = 5,
+    includeAncestors = true,
+    includeSiblings = true,
+    includeDescendants = true,
+    queryVariants = null,
+    onStep = null
+  } = options;
+
+  const traceState = {
+    steps: [],
+    onStep: typeof onStep === "function" ? onStep : null
+  };
+
+  function emitStep(name, description, result = null, status = "success") {
+    const step = { name, description, result, status };
+    traceState.steps.push(step);
+    if (traceState.onStep) traceState.onStep(step);
+  }
+
+  const normalizedVariants = normalizeQueryVariants(query, queryVariants, 6);
+  const retrievalQuery = buildWeightedQuery(normalizedVariants);
+
+  const results = {
+    chunks: [],
+    nodes: [],
+    paths: [],
+    sources: new Set(),
+    seed_node_count: 0,
+    distinct_chunk_node_count: 0
+  };
+
+  try {
+    // Lazy-import to avoid circular dependency
+    const { hybridRecallNodes } = await import("./recallNodes.js");
+
+    emitStep(
+      "Node-First: Start",
+      `Finding best nodes directly (limit=${nodeLimit})`,
+      { max_chunks: maxChunks, node_limit: nodeLimit }
+    );
+
+    // Step 1: Find nodes directly (no tree walk)
+    const recalledNodes = await hybridRecallNodes(retrievalQuery, nodeLimit, {
+      queryVariants: normalizedVariants
+    });
+
+    results.seed_node_count = recalledNodes.length;
+
+    if (recalledNodes.length === 0) {
+      emitStep("Node-First: Seed Nodes", "No nodes found via hybrid recall", null, "skipped");
+      results.sources = [...results.sources];
+      results.trace_steps = traceState.steps;
+      return results;
+    }
+
+    // Step 2: Rank-based score calibration
+    // hybridRecallNodes returns RRF scores (0-0.1 range); applyHierarchicalScoring expects 0-2.0.
+    // Use rank-based normalization for stability.
+    const calibratedNodes = recalledNodes.map((r, rank) => ({
+      ...r.node,
+      relevance_score: Math.max(0.2, 1.0 - (rank * 0.12)),
+      path: [r.node.node_id],
+      depth: 0,
+      sources: r.sources || [],
+      _rrf_score: r.score
+    }));
+
+    results.nodes = calibratedNodes;
+    results.paths = calibratedNodes.slice(0, 5).map(n => [n.node_id]);
+
+    emitStep(
+      "Node-First: Seed Nodes",
+      `Found ${calibratedNodes.length} seed nodes via hybrid recall`,
+      {
+        nodes: calibratedNodes.slice(0, 8).map(n => ({
+          name: n.name,
+          node_id: n.node_id,
+          rrf_score: Number((n._rrf_score || 0).toFixed(4)),
+          calibrated_score: Number(n.relevance_score.toFixed(3)),
+          sources: n.sources
+        }))
+      }
+    );
+
+    // Step 3: Get chunks from found nodes with tiered limits
+    const seenChunkIds = new Set();
+    const nodeChunkStats = [];
+
+    for (let rank = 0; rank < calibratedNodes.length; rank++) {
+      const node = calibratedNodes[rank];
+      const chunkLimit = rank === 0 ? topNodeChunks : rank <= 4 ? midNodeChunks : tailNodeChunks;
+      const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, chunkLimit);
+      let added = 0;
+
+      for (const chunk of nodeChunks) {
+        if (!seenChunkIds.has(chunk.id)) {
+          seenChunkIds.add(chunk.id);
+          results.chunks.push({
+            ...chunk,
+            source: 'seed_node',
+            node_relevance: node.relevance_score,
+            hierarchy_relation: 'direct',
+            hierarchy_hops: 0
+          });
+          added++;
+        }
+      }
+      if (added > 0) {
+        nodeChunkStats.push({
+          name: node.name,
+          chunks_added: added,
+          node_score: Number(node.relevance_score.toFixed(3))
+        });
+      }
+    }
+
+    results.sources.add('seed_nodes');
+    emitStep(
+      "Node-First: Chunk Retrieval",
+      `Added ${results.chunks.length} chunks from ${nodeChunkStats.length} seed nodes`,
+      { nodes: nodeChunkStats.slice(0, 5) }
+    );
+
+    // Step 4: Ancestor enrichment
+    if (includeAncestors && results.chunks.length > 0) {
+      const enriched = enrichWithAncestorContext(results.chunks, {
+        maxAncestors: 2,
+        ancestorChunksPerLevel: 4,
+        ancestorDecay: 0.82,
+        query: retrievalQuery
+      });
+      const newChunks = enriched.filter(c => !seenChunkIds.has(c.id));
+      for (const chunk of newChunks) {
+        seenChunkIds.add(chunk.id);
+        results.chunks.push(chunk);
+      }
+      if (newChunks.length > 0) {
+        results.sources.add('ancestor_enrichment');
+      }
+      emitStep(
+        "Node-First: Ancestor Enrichment",
+        `Added ${newChunks.length} ancestor chunks`,
+        { added: newChunks.length }
+      );
+    }
+
+    // Step 5: Sibling expansion (the one place where vector/LLM routing optionally applies)
+    if (includeSiblings && calibratedNodes.length > 0) {
+      let useLlmRouting = false;
+      let useVectorRouting = false;
+      let queryEmbedding = null;
+      try {
+        const routingMode = DatasetConfigRepo.get('tree_routing_mode');
+        useLlmRouting = routingMode === 'llm';
+        useVectorRouting = routingMode === 'vector';
+      } catch (_) {}
+
+      if (useVectorRouting) {
+        try {
+          queryEmbedding = await generateQueryEmbedding(retrievalQuery);
+        } catch (err) {
+          logger.warn(`[node_first] Failed to generate query embedding for siblings: ${err.message}`);
+        }
+      }
+
+      const seedNodes = calibratedNodes.slice(0, 5);
+      const siblingChunks = await expandWithSiblings(seedNodes, retrievalQuery, {
+        maxSiblings: 3,
+        chunksPerSibling: 3,
+        minSiblingScore: 0.15,
+        siblingDecay: 0.78,
+        useLlmRouting,
+        useVectorRouting,
+        queryEmbedding
+      });
+
+      for (const chunk of siblingChunks) {
+        if (!seenChunkIds.has(chunk.id)) {
+          seenChunkIds.add(chunk.id);
+          results.chunks.push(chunk);
+        }
+      }
+      if (siblingChunks.length > 0) {
+        results.sources.add('sibling_expansion');
+      }
+      emitStep(
+        "Node-First: Sibling Expansion",
+        `Added ${siblingChunks.length} sibling chunks`,
+        { routing: useLlmRouting ? 'llm' : useVectorRouting ? 'vector' : 'keyword' }
+      );
+    }
+
+    // Step 6: Descendant exploration (top 3 nodes, keyword-only)
+    if (includeDescendants && calibratedNodes.length > 0) {
+      const topForDesc = calibratedNodes.slice(0, 3);
+      const descResult = _exploreDescendants(topForDesc, retrievalQuery, seenChunkIds, {
+        descendantDepth: 2,
+        descendantNodesPerSeed: 5,
+        descendantScoreDecay: 0.82,
+        chunksPerDescendant: 2,
+        minScore: 0.08
+      });
+
+      for (const chunk of descResult.chunks) {
+        results.chunks.push(chunk);
+      }
+      if (descResult.chunks.length > 0) {
+        results.sources.add('descendant_exploration');
+      }
+      emitStep(
+        "Node-First: Descendant Exploration",
+        `Added ${descResult.stats.chunksAdded} chunks from ${descResult.stats.descendantNodes} descendants`
+      );
+    }
+
+    // Step 7: Hierarchical scoring
+    results.chunks = applyHierarchicalScoring(results.chunks, calibratedNodes, retrievalQuery, {
+      structuralDecayBase: 0.88,
+      proximityBoost: 0.22
+    });
+
+    // Sort and limit
+    results.chunks.sort((a, b) => b.hierarchical_score - a.hierarchical_score);
+    results.chunks = results.chunks.slice(0, maxChunks);
+
+    // Compute diversity metadata
+    const distinctNodeIds = new Set(results.chunks.map(c => c.node_id).filter(Boolean));
+    results.distinct_chunk_node_count = distinctNodeIds.size;
+
+    // Determine routing mode for the result
+    let routingMode = 'keyword';
+    try {
+      const rm = DatasetConfigRepo.get('tree_routing_mode');
+      if (rm === 'llm' || rm === 'vector') routingMode = rm;
+    } catch (_) {}
+    results.routing_mode = routingMode;
+
+    results.sources = [...results.sources];
+    emitStep(
+      "Node-First: Scoring",
+      `Applied hierarchical scoring; kept ${results.chunks.length} chunks (${results.distinct_chunk_node_count} distinct nodes)`,
+      {
+        top_chunks: results.chunks.slice(0, 5).map(c => ({
+          id: c.id,
+          node: c.node_name,
+          score: Number((c.hierarchical_score || 0).toFixed(3)),
+          source: c.source
+        }))
+      }
+    );
+
+    results.trace_steps = traceState.steps;
+    logger.info(`Node-first retrieval complete: ${results.chunks.length} chunks from ${results.seed_node_count} seed nodes (${results.distinct_chunk_node_count} distinct)`);
+    return results;
+
+  } catch (err) {
+    logger.error(`Node-first retrieval failed: ${err.message}`);
+    emitStep("Node-First: Error", err.message, null, "error");
+    results.sources = [...(results.sources || [])];
+    results.trace_steps = traceState.steps;
+    return results;
+  }
 }
 
 /**
@@ -1091,40 +1415,22 @@ export async function hierarchicalRetrieve(query, options = {}) {
   // Step 5: Descendant exploration (go deeper in most relevant branches)
   if (includeDescendants && relevantNodes.length > 0) {
     const topNodes = relevantNodes.slice(0, 3);
-    let descendantNodes = 0;
-    let descendantChunksAdded = 0;
+    const descResult = _exploreDescendants(topNodes, retrievalQuery, seenChunkIds, {
+      descendantDepth,
+      descendantNodesPerSeed,
+      descendantScoreDecay,
+      chunksPerDescendant: 2,
+      minScore: 0.08
+    });
 
-    for (const node of topNodes) {
-      const descendants = getDescendants(node.node_id, descendantDepth);
-      descendantNodes += descendants.length;
-
-      for (const desc of descendants.slice(0, descendantNodesPerSeed)) {
-        const descChunks = getNodeChunks(desc.node_id, retrievalQuery, 2);
-
-        for (const chunk of descChunks) {
-          const descDepth = Math.max(1, desc.depth || 1);
-          const depthAdjustedScore = (chunk.relevance_score || 0) * Math.pow(descendantScoreDecay, descDepth);
-
-          if (!seenChunkIds.has(chunk.id) && depthAdjustedScore > 0.08) {
-            seenChunkIds.add(chunk.id);
-            results.chunks.push({
-              ...chunk,
-              relevance_score: depthAdjustedScore,
-              source: 'child_context',
-              parent_node: node.node_id,
-              hierarchy_relation: 'child',
-              hierarchy_hops: descDepth
-            });
-            descendantChunksAdded++;
-          }
-        }
-      }
+    for (const chunk of descResult.chunks) {
+      results.chunks.push(chunk);
     }
 
     results.sources.add('descendant_exploration');
     emitStep(
       "Hierarchy: Descendant Exploration",
-      `Added ${descendantChunksAdded} chunks from ${descendantNodes} descendant nodes`,
+      `Added ${descResult.stats.chunksAdded} chunks from ${descResult.stats.descendantNodes} descendant nodes`,
       { top_nodes: topNodes.map(n => ({ id: n.node_id, name: n.name })) }
     );
   } else if (!includeDescendants) {
@@ -1198,6 +1504,7 @@ export function getTreeContextSummary(chunks) {
 
 export default {
   hierarchicalRetrieve,
+  nodeFirstRetrieve,
   navigateTreeTopDown,
   enrichWithAncestorContext,
   expandWithSiblings,

@@ -193,7 +193,8 @@ router.get('/settings', (req, res) => {
       mapping_strictness:         DatasetConfigRepo.get('mapping_strictness')         ?? 'soft',
       schema_template_id:         DatasetConfigRepo.get('schema_template_id')         ?? null,
       tree_routing_mode:          DatasetConfigRepo.get('tree_routing_mode')          ?? 'keyword',
-      entity_extraction_enabled:  DatasetConfigRepo.get('entity_extraction_enabled')  ?? 'false'
+      entity_extraction_enabled:  DatasetConfigRepo.get('entity_extraction_enabled')  ?? 'false',
+      retrieval_strategy:         DatasetConfigRepo.get('retrieval_strategy')         ?? 'node_first'
     });
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
@@ -229,7 +230,15 @@ router.patch('/settings', (req, res) => {
       DatasetConfigRepo.set('tree_routing_mode', tree_routing_mode);
     }
 
-    const { entity_extraction_enabled } = req.body;
+    const { entity_extraction_enabled, retrieval_strategy } = req.body;
+
+    if (retrieval_strategy !== undefined) {
+      if (!['node_first', 'top_down'].includes(retrieval_strategy)) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`retrieval_strategy` must be "node_first" or "top_down"' } });
+      }
+      DatasetConfigRepo.set('retrieval_strategy', retrieval_strategy);
+    }
+
     if (entity_extraction_enabled !== undefined) {
       if (!['true', 'false'].includes(String(entity_extraction_enabled))) {
         return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '`entity_extraction_enabled` must be "true" or "false"' } });
@@ -241,8 +250,9 @@ router.patch('/settings', (req, res) => {
     const newStrictness  = DatasetConfigRepo.get('mapping_strictness')        ?? 'soft';
     const newRouting     = DatasetConfigRepo.get('tree_routing_mode')         ?? 'keyword';
     const newEntityExt   = DatasetConfigRepo.get('entity_extraction_enabled') ?? 'false';
-    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting} entityExtraction=${newEntityExt}`);
-    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting, entity_extraction_enabled: newEntityExt });
+    const newStrategy    = DatasetConfigRepo.get('retrieval_strategy')        ?? 'node_first';
+    logger.info(`Schema settings updated: mode=${newMode} strictness=${newStrictness} routing=${newRouting} entityExtraction=${newEntityExt} strategy=${newStrategy}`);
+    res.json({ ok: true, mapping_mode: newMode, mapping_strictness: newStrictness, tree_routing_mode: newRouting, entity_extraction_enabled: newEntityExt, retrieval_strategy: newStrategy });
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json(err.toJSON());
     logger.error("PATCH /schema/settings error:", err.message);

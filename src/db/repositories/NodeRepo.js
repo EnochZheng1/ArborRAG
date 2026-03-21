@@ -102,7 +102,7 @@ export const NodeRepo = {
         c.last_updated
       FROM nodes n
       LEFT JOIN (
-        SELECT node_id, COUNT(*) AS chunk_count, MAX(created_at) AS last_updated
+        SELECT node_id, COUNT(*) AS chunk_count, MAX(uploaded_at) AS last_updated
         FROM chunks WHERE superseded_by IS NULL
         GROUP BY node_id
       ) c ON c.node_id = n.node_id
