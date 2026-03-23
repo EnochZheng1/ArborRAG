@@ -325,12 +325,26 @@ const ACRONYM_STOP = new Set([
 export async function stageEnrichNodeKeywords(ctx) {
   const { documentId } = ctx;
   const newNodeIds = ctx.createdNodeIds || [];
-  if (newNodeIds.length === 0) return;
+
+  // Enrich both newly created nodes AND reused nodes that received chunks from this document.
+  // This ensures keyword enrichment runs even for existing nodes that got new content.
+  // Note: enrichment reads ALL chunks in the node (not just this document's), so historical
+  // chunks from other documents may influence keywords — this is intended behavior.
+  const nodeIdsToEnrich = new Set(newNodeIds);
+  if (documentId) {
+    try {
+      for (const c of ChunkRepo.getForDoc(documentId)) {
+        if (c.node_id) nodeIdsToEnrich.add(c.node_id);
+      }
+    } catch { /* non-fatal: getForDoc may fail if doc not yet registered */ }
+  }
+
+  if (nodeIdsToEnrich.size === 0) return;
 
   ctx.setStep(documentId, "enrich_keywords", "Extracting structured keywords…", 87);
 
   let enriched = 0;
-  for (const nodeId of newNodeIds) {
+  for (const nodeId of nodeIdsToEnrich) {
     const chunks = ChunkRepo.getForNodeLimited(nodeId, 10);
     if (chunks.length === 0) continue;
 
@@ -359,6 +373,12 @@ export async function stageEnrichNodeKeywords(ctx) {
     // CJK quantities: "30天", "12个月"
     for (const m of allText.matchAll(/\d+\s*[天月年小时周个]+/g)) addKw(m[0]);
 
+    // Temperature with degree symbol: "35°C", "37°F"
+    for (const m of allText.matchAll(/\d+(?:\.\d+)?\s*°[CF]/g)) addKw(m[0]);
+
+    // "X degrees" patterns: "35 degrees"
+    for (const m of allText.matchAll(/\b\d+(?:\.\d+)?\s*degrees?\b/gi)) addKw(m[0]);
+
     if (freq.size === 0) continue;
 
     // Take top 15 by frequency
@@ -371,7 +391,7 @@ export async function stageEnrichNodeKeywords(ctx) {
   }
 
   if (enriched > 0) {
-    logger.info(`Enriched keywords for ${enriched}/${newNodeIds.length} new nodes`);
+    logger.info(`Enriched keywords for ${enriched}/${nodeIdsToEnrich.size} nodes (${newNodeIds.length} new + ${nodeIdsToEnrich.size - newNodeIds.length} reused)`);
   }
 }
 

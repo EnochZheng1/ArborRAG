@@ -673,6 +673,7 @@ Rules:
 - Extract and quote specific numbers, dates, and names exactly as written.
 - Add [1], [2] etc. after each claim to indicate the source.
 - Answer directly and concisely.
+- If the sources describe the same step or condition using different terminology than the question (e.g., question says "docking" and sources describe "dilator insertion into the psoas muscle"), answer based on the closest matching source. Note any terminology difference briefly if the mapping is indirect.
 
 Answer:`
   },
@@ -706,6 +707,8 @@ Answer:`
     description: "Retry prompt when first answer falsely claims info is not found",
     variables: ["query", "sourceList"],
     default: `Re-read ALL sources carefully and answer the question. Do NOT say information is missing — extract any relevant facts, numbers, or descriptions present in the sources.
+
+If the sources use different terminology than the question (e.g., "hypothermia" instead of "temperature", or "dilator insertion" instead of "docking"), answer based on the closest matching source content.
 
 Question: {{query}}
 

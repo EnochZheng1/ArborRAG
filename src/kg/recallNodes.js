@@ -98,7 +98,7 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
   const {
     bm25Weight             = 0.4,
     vectorWeight           = 0.6,
-    vectorThreshold        = 0.25,
+    vectorThreshold,       // no default — computed below with env fallback
     useRRF                 = true,
     includeChunkSearch     = true,
     useMultilingualVariants = true,
@@ -108,6 +108,13 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
     useExpansion           = true,
     classification         = null
   } = options;
+
+  // Precedence: option → env var → hardcoded default
+  const _envThreshold = Number(process.env.VECTOR_RECALL_THRESHOLD);
+  const effectiveVectorThreshold =
+    Number.isFinite(vectorThreshold) ? vectorThreshold :
+    Number.isFinite(_envThreshold) ? _envThreshold :
+    0.25;
 
   const preparedVariants = Array.isArray(queryVariants) && queryVariants.length > 0
     ? queryVariants
@@ -144,7 +151,7 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
   let vectorCount = 0;
   for (const v of vectorVariants) {
     try {
-      const results = await vectorRecallNodes(v.text, limit * 2, vectorThreshold);
+      const results = await vectorRecallNodes(v.text, limit * 2, effectiveVectorThreshold);
       vectorCount += results.length;
       for (const r of results) addToNodeMap(r.node, "vector_node", (r.similarity || 0) * v.weight, v.text);
     } catch (err) {
@@ -203,7 +210,7 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
     try {
       const chunkVector = [];
       for (const v of vectorVariants) {
-        const results = await vectorRecallChunks(v.text, limit, vectorThreshold);
+        const results = await vectorRecallChunks(v.text, limit, effectiveVectorThreshold);
         chunkVector.push(...results.map(r => ({ ...r, _vw: v.weight })));
       }
       const maxSim = chunkVector.reduce((m, r) => Math.max(m, r.similarity || 0), 0);

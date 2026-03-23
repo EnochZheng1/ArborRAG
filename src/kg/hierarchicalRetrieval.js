@@ -276,23 +276,22 @@ function getNodeChunks(nodeId, query, limit = 10) {
     const content = r.content_clean || '';
     const contentLower = content.toLowerCase();
 
-    // Calculate content relevance using only non-stop-word query terms
+    // Calculate content + keyword relevance — mutually exclusive per term.
+    // Content match → +0.3 (+ occurrence bonus, + optional keyword co-match +0.4).
+    // Keyword-exclusive match → +0.5 (term tagged by LLM but not in body text).
     let relevance = 0;
-    for (const term of scoringTerms) {
-      if (contentLower.includes(term)) {
-        relevance += 0.3;
-        // Bonus for multiple occurrences
-        const matches = (contentLower.match(new RegExp(term, 'g')) || []).length;
-        relevance += Math.min(matches * 0.05, 0.2);
-      }
-    }
-
-    // Keyword-tag match bonus — LLM-extracted tags are semantically precise;
-    // matching them is more reliable than raw content text overlap.
     const chunkKeywords = safeJson(r.keywords_json, []).map(k => String(k).toLowerCase());
     for (const term of scoringTerms) {
-      if (chunkKeywords.some(kw => kw.includes(term) || term.includes(kw))) {
-        relevance += 0.4;
+      const inContent = contentLower.includes(term);
+      const inKeywords = chunkKeywords.some(kw => kw.includes(term) || term.includes(kw));
+
+      if (inContent) {
+        relevance += 0.3;
+        const matches = (contentLower.match(new RegExp(term, 'g')) || []).length;
+        relevance += Math.min(matches * 0.05, 0.2);
+        if (inKeywords) relevance += 0.4; // content + keyword = strong signal
+      } else if (inKeywords) {
+        relevance += 0.5; // keyword-exclusive: LLM tagged this concept
       }
     }
 
