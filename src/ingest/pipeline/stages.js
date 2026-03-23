@@ -379,10 +379,49 @@ export async function stageEnrichNodeKeywords(ctx) {
     // "X degrees" patterns: "35 degrees"
     for (const m of allText.matchAll(/\b\d+(?:\.\d+)?\s*degrees?\b/gi)) addKw(m[0]);
 
+    // Content-frequency pass: domain terms appearing in many chunks are node-defining.
+    // Catches "threshold", "retractor", "fixation" etc. that regex patterns miss.
+    const CONTENT_STOP = new Set([
+      'the','a','an','to','of','for','in','on','at','by','with','from','and','or',
+      'is','are','was','were','be','been','being','do','does','did','has','have','had',
+      'will','shall','should','would','could','may','might','must','can','not','no',
+      'this','that','these','those','it','its','he','she','they','we','you','his','her',
+      'their','our','your','all','each','every','any','some','such','than','then','so',
+      'if','but','as','up','out','about','into','over','after','before','between','under',
+      'during','through','above','below','also','more','most','other','only','very',
+      'just','well','back','even','still','already','use','used','using','per',
+      'new','first','one','two','three','see','set','get','make','know','may','must',
+      'based','include','includes','required','following','case','cases','within','upon',
+      'however','therefore','need','needs','note','ensure','refer','via','unless'
+    ]);
+    const chunkWordSets = chunks.map(c => {
+      const words = (c.content_clean || '').toLowerCase().match(/[a-z]{4,}/g) || [];
+      return new Set(words);
+    });
+    const wordChunkCount = new Map();
+    for (const wordSet of chunkWordSets) {
+      for (const word of wordSet) {
+        if (!CONTENT_STOP.has(word)) {
+          wordChunkCount.set(word, (wordChunkCount.get(word) || 0) + 1);
+        }
+      }
+    }
+    // Proportional threshold: max(3, 25% of chunks) — larger nodes need higher frequency
+    const minChunkFreq = Math.max(3, Math.ceil(chunkWordSets.length * 0.25));
+    const freqDerived = [];
+    for (const [word, count] of wordChunkCount) {
+      if (count >= minChunkFreq && word.length >= 4) {
+        freqDerived.push({ word, count });
+      }
+    }
+    // Top 10 frequency-derived terms only (prevent bland accumulation)
+    freqDerived.sort((a, b) => b.count - a.count);
+    for (const { word } of freqDerived.slice(0, 10)) addKw(word);
+
     if (freq.size === 0) continue;
 
-    // Take top 15 by frequency
-    const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+    // Take top 20 by frequency (raised from 15 to accommodate freq-derived terms)
+    const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
     const keywords = sorted.map(([kw]) => kw);
 
     NodeRepo.mergeKeywords(nodeId, keywords);
