@@ -50,12 +50,12 @@ export function normalizeTopicHint(hint) {
   // Strip trailing punctuation (sentence fragments)
   clean = clean.replace(/[.,:;!?]+$/, '').trim();
 
-  // If >8 words, likely a sentence — extract leading noun-phrase head.
+  // If >7 words, likely a sentence — extract leading noun-phrase head.
   // Lossy by design: may truncate useful detail, but prevents sentence-length
   // node names. "C7 Pedicle Screw Entry Point and Trajectory Verification"
   // becomes "C7 Pedicle Screw Entry Point" — acceptable.
   const words = clean.split(/\s+/);
-  if (words.length > 8) {
+  if (words.length > 7) {
     const skip = new Set([
       'the','a','an','to','of','for','in','on','at','by','with','from',
       'and','or','is','are','was','were','be','do','does','has','have','will',
