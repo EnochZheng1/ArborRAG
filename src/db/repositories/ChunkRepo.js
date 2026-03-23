@@ -204,6 +204,12 @@ export const ChunkRepo = {
     return db.prepare("SELECT COUNT(*) as total FROM chunks WHERE status = 'active'").get().total ?? 0;
   },
 
+  /** Count active chunks for a specific node. */
+  countForNode(nodeId) {
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM chunks WHERE node_id = ? AND status = 'active'").get(nodeId);
+    return row?.cnt || 0;
+  },
+
   // ── Writes (ingest pipeline) ──────────────────────────────────────────────────
 
   /** INSERT a new chunk row. Returns the better-sqlite3 run() result (has lastInsertRowid). */

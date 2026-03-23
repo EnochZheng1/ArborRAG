@@ -44,7 +44,28 @@ export function normalizeTopicHint(hint) {
   if (GENERIC_TOPIC_HINTS.has(trimmed) || GENERIC_TOPIC_HINTS.has(trimmed.toLowerCase())) {
     return 'General';
   }
-  return trimmed;
+
+  let clean = trimmed;
+
+  // Strip trailing punctuation (sentence fragments)
+  clean = clean.replace(/[.,:;!?]+$/, '').trim();
+
+  // If >8 words, likely a sentence — extract leading noun-phrase head.
+  // Lossy by design: may truncate useful detail, but prevents sentence-length
+  // node names. "C7 Pedicle Screw Entry Point and Trajectory Verification"
+  // becomes "C7 Pedicle Screw Entry Point" — acceptable.
+  const words = clean.split(/\s+/);
+  if (words.length > 8) {
+    const skip = new Set([
+      'the','a','an','to','of','for','in','on','at','by','with','from',
+      'and','or','is','are','was','were','be','do','does','has','have','will',
+      'shall','should','must','can','may','not','this','that','these','those'
+    ]);
+    const content = words.filter(w => !skip.has(w.toLowerCase()));
+    clean = content.slice(0, 5).join(' ');
+  }
+
+  return clean.slice(0, 60);
 }
 
 /**

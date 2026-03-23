@@ -24,6 +24,10 @@ import { generateQueryEmbedding } from "../embedding/embedder.js";
 import { isNumericQuery } from "../utils/queryHelpers.js";
 import { wordDiceSimilarity } from "../ingest/knowledgeExtractor.js";
 
+// ── Tunable constants ─────────────────────────────────────────────────────────
+const TOP_NODE_COVERAGE = 0.6;   // retrieve at least 60% of rank-0 node's chunks
+const TOP_NODE_CHUNK_CAP = 40;   // hard cap to prevent context overload
+
 /**
  * Calculate text similarity score (simple term overlap)
  */
@@ -266,7 +270,7 @@ function getNodeChunks(nodeId, query, limit = 10) {
   // Detect doc-title-like terms in the query (words ≥5 chars that might be document names)
   const queryDocTerms = scoringTerms.filter(t => t.length >= 5);
 
-  const rows = ChunkRepo.getForNodeFull(nodeId, limit * 2); // Get more, then filter by relevance
+  const rows = ChunkRepo.getForNodeFull(nodeId, limit * 3); // Fetch 3x to survive redundancy penalty
 
   const chunks = rows.map(r => {
     const content = r.content_clean || '';
@@ -325,6 +329,27 @@ function getNodeChunks(nodeId, query, limit = 10) {
         relevance += 0.2;
       }
     }
+
+    // Bigram phrase boost — "retractor blade" is a stronger signal than
+    // matching "retractor" and "blade" individually in different contexts.
+    // Filter function words first to avoid weak bigrams like "threshold during".
+    const FUNC_WORDS = new Set(['the','a','an','to','of','for','in','on','at','by','with','from',
+      'and','or','is','are','was','were','be','do','does','has','have','will','shall',
+      'what','how','when','where','which','that','this','during','after','before','about']);
+    const contentWords = scoringTerms.filter(t => t.length >= 3 && !FUNC_WORDS.has(t));
+    let phraseBonus = 0;
+    for (let i = 0; i < contentWords.length - 1; i++) {
+      const bigram = contentWords[i] + ' ' + contentWords[i + 1];
+      if (contentLower.includes(bigram)) phraseBonus += 0.35;
+    }
+    // Keyword phrase fallback — only if content bigram didn't fire
+    if (phraseBonus === 0) {
+      for (let i = 0; i < contentWords.length - 1; i++) {
+        const bigram = contentWords[i] + ' ' + contentWords[i + 1];
+        if (chunkKeywords.some(kw => kw.includes(bigram))) phraseBonus += 0.3;
+      }
+    }
+    relevance += Math.min(phraseBonus, 0.70); // cap combined phrase bonus
 
     return {
       id: r.id,
@@ -1104,7 +1129,18 @@ export async function nodeFirstRetrieve(query, options = {}) {
 
     for (let rank = 0; rank < calibratedNodes.length; rank++) {
       const node = calibratedNodes[rank];
-      const chunkLimit = rank === 0 ? topNodeChunks : rank <= 4 ? midNodeChunks : tailNodeChunks;
+      let chunkLimit;
+      if (rank === 0) {
+        // Adaptive: cover at least TOP_NODE_COVERAGE of the node's content
+        const nodeSize = ChunkRepo.countForNode(node.node_id);
+        chunkLimit = Math.max(topNodeChunks, Math.ceil(nodeSize * TOP_NODE_COVERAGE));
+        chunkLimit = Math.min(chunkLimit, TOP_NODE_CHUNK_CAP);
+        emitStep("Node-First: Adaptive Limit",
+          `Node "${node.name}" has ${nodeSize} chunks → chunkLimit=${chunkLimit}`,
+          { node_id: node.node_id, nodeSize, chunkLimit });
+      } else {
+        chunkLimit = rank <= 4 ? midNodeChunks : tailNodeChunks;
+      }
       const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, chunkLimit);
       let added = 0;
 

@@ -37,8 +37,10 @@ Rules:
 2. Granularity: exactly one fact, rule, definition, procedure step, or example per KP.
 3. Preserve exact numbers, conditions, and qualifiers from the source.
 4. source_excerpt is a verbatim quote from the original text (max 200 chars).
-5. topic_hint and subtopic_hint: short topic labels (2-5 words) representing the SPECIFIC subject area of each KP.
-   - topic_hint should reflect the actual subject (e.g., "Mars Geology", "Employee Benefits", "Network Security"), NOT generic labels like "General", "Information", "Content", or "Document".
+5. topic_hint and subtopic_hint: SHORT topic labels (2-5 words, noun phrase only) representing the SPECIFIC subject area of each KP.
+   - topic_hint examples: "Patient Selection", "Alert Thresholds", "Cage Sizing", "Screw Placement", "Network Security".
+   - topic_hint must NOT be a sentence, instruction, or procedure step description. NOT "Select the appropriate cage size" — use "Cage Selection" instead.
+   - topic_hint should reflect the actual subject, NOT generic labels like "General", "Information", "Content", or "Document".
    - Different KPs covering different subjects MUST use different topic_hints.
    - subtopic_hint should be a narrower sub-category within the topic_hint (e.g., topic_hint="Mars Geology", subtopic_hint="Volcanic Activity").
 6. kp_type must be one of: fact | rule | definition | procedure | example | context
