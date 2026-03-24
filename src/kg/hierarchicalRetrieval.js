@@ -20,13 +20,15 @@ import {
 } from "./graphTraversal.js";
 import { llmScoreNodes } from "./llmTreeRouter.js";
 import { vectorScoreNodes } from "./vectorTreeRouter.js";
-import { generateQueryEmbedding } from "../embedding/embedder.js";
+import { generateQueryEmbedding, cosineSimilarity } from "../embedding/embedder.js";
+import { EmbeddingRepo } from "../db/repositories/EmbeddingRepo.js";
 import { isNumericQuery } from "../utils/queryHelpers.js";
 import { wordDiceSimilarity } from "../ingest/knowledgeExtractor.js";
 
 // ── Tunable constants ─────────────────────────────────────────────────────────
-const TOP_NODE_COVERAGE = 0.6;   // retrieve at least 60% of rank-0 node's chunks
-const TOP_NODE_CHUNK_CAP = 40;   // hard cap to prevent context overload
+const TOP_NODE_COVERAGE = 0.6;      // retrieve at least 60% of rank-0 node's chunks
+const TOP_NODE_CHUNK_CAP = 40;      // hard cap to prevent context overload
+const VECTOR_RERANK_BLEND = 0.4;    // weight of vector similarity in rank-0 reranking
 
 /**
  * Calculate text similarity score (simple term overlap)
@@ -1140,7 +1142,35 @@ export async function nodeFirstRetrieve(query, options = {}) {
       } else {
         chunkLimit = rank <= 4 ? midNodeChunks : tailNodeChunks;
       }
-      const nodeChunks = getNodeChunks(node.node_id, retrievalQuery, chunkLimit);
+      let nodeChunks = getNodeChunks(node.node_id, retrievalQuery, chunkLimit);
+
+      // Vector reranking post-pass for rank-0 node: blend embedding similarity
+      // into lexical scores to catch semantic matches that BM25 misses.
+      // Only one embedding API call (query embedding); chunk embeddings are pre-computed.
+      if (rank === 0 && nodeChunks.length > 5) {
+        try {
+          const queryEmb = await generateQueryEmbedding(retrievalQuery);
+          let reranked = 0;
+          for (const chunk of nodeChunks) {
+            const row = EmbeddingRepo.getJson('chunk', String(chunk.id));
+            if (row?.embedding_json) {
+              const sim = cosineSimilarity(queryEmb, JSON.parse(row.embedding_json));
+              chunk.relevance_score += sim * VECTOR_RERANK_BLEND;
+              reranked++;
+            }
+          }
+          if (reranked > 0) {
+            nodeChunks.sort((a, b) => b.relevance_score - a.relevance_score);
+            emitStep("Node-First: Vector Rerank",
+              `Reranked ${reranked}/${nodeChunks.length} chunks in rank-0 node with vector similarity`,
+              { reranked, blend: VECTOR_RERANK_BLEND });
+          }
+        } catch (err) {
+          // Non-fatal — vector reranking is best-effort
+          logger.debug(`Vector reranking skipped for rank-0: ${err.message}`);
+        }
+      }
+
       let added = 0;
 
       for (const chunk of nodeChunks) {
