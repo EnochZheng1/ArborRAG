@@ -30,6 +30,7 @@ import { callLLM, isLlmConfigured } from "../../utils/llm.js";
 import { getCustomPrompt } from "../../prompts/promptManager.js";
 import { findMergeCandidates, queueNodeMergeSuggestion } from "../nodeMerger.js";
 import { reclassifyGeneralKPs } from "../kpNormaliser.js";
+import { enrichNodeKeywords, computeNodeQuality } from "../nodeEnrichment.js";
 import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { DecisionRepo } from "../../db/repositories/DecisionRepo.js";
@@ -326,111 +327,27 @@ export async function stageEnrichNodeKeywords(ctx) {
   const { documentId } = ctx;
   const newNodeIds = ctx.createdNodeIds || [];
 
-  // Enrich both newly created nodes AND reused nodes that received chunks from this document.
-  // This ensures keyword enrichment runs even for existing nodes that got new content.
-  // Note: enrichment reads ALL chunks in the node (not just this document's), so historical
-  // chunks from other documents may influence keywords — this is intended behavior.
+  // Enrich newly created nodes + reused nodes that received chunks from this document.
   const nodeIdsToEnrich = new Set(newNodeIds);
   if (documentId) {
     try {
       for (const c of ChunkRepo.getForDoc(documentId)) {
         if (c.node_id) nodeIdsToEnrich.add(c.node_id);
       }
-    } catch { /* non-fatal: getForDoc may fail if doc not yet registered */ }
+    } catch { /* non-fatal */ }
   }
-
   if (nodeIdsToEnrich.size === 0) return;
 
   ctx.setStep(documentId, "enrich_keywords", "Extracting structured keywords…", 87);
 
   let enriched = 0;
   for (const nodeId of nodeIdsToEnrich) {
-    const chunks = ChunkRepo.getForNodeLimited(nodeId, 10);
-    if (chunks.length === 0) continue;
-
-    const allText = chunks.map(c => c.content_clean || c.content || '').join('\n');
-    const freq = new Map(); // keyword → count
-
-    const addKw = (kw) => {
-      const trimmed = kw.trim();
-      if (trimmed.length < 2 || trimmed.length > 60) return;
-      const key = trimmed.toLowerCase();
-      freq.set(key, (freq.get(key) || 0) + 1);
-    };
-
-    // Multi-word proper nouns: "Human Resources", "Paid Time Off"
-    for (const m of allText.matchAll(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/g)) addKw(m[0]);
-
-    // Acronyms: "HR", "PTO", "SLA" (filter stopword false-positives)
-    for (const m of allText.matchAll(/\b[A-Z]{2,6}\b/g)) {
-      if (!ACRONYM_STOP.has(m[0])) addKw(m[0]);
-    }
-
-    // Numeric thresholds: "15 days", "30%", "3.5 hours", "500 USD"
-    // Note: % is non-word so \b after it won't match; use lookahead instead
-    for (const m of allText.matchAll(/\b\d+(?:\.\d+)?\s*(?:%|(?:days?|hours?|months?|years?|weeks?|USD|RMB|yuan|dollars?)\b)/gi)) addKw(m[0]);
-
-    // CJK quantities: "30天", "12个月"
-    for (const m of allText.matchAll(/\d+\s*[天月年小时周个]+/g)) addKw(m[0]);
-
-    // Temperature with degree symbol: "35°C", "37°F"
-    for (const m of allText.matchAll(/\d+(?:\.\d+)?\s*°[CF]/g)) addKw(m[0]);
-
-    // "X degrees" patterns: "35 degrees"
-    for (const m of allText.matchAll(/\b\d+(?:\.\d+)?\s*degrees?\b/gi)) addKw(m[0]);
-
-    // Content-frequency pass: domain terms appearing in many chunks are node-defining.
-    // Catches "threshold", "retractor", "fixation" etc. that regex patterns miss.
-    const CONTENT_STOP = new Set([
-      'the','a','an','to','of','for','in','on','at','by','with','from','and','or',
-      'is','are','was','were','be','been','being','do','does','did','has','have','had',
-      'will','shall','should','would','could','may','might','must','can','not','no',
-      'this','that','these','those','it','its','he','she','they','we','you','his','her',
-      'their','our','your','all','each','every','any','some','such','than','then','so',
-      'if','but','as','up','out','about','into','over','after','before','between','under',
-      'during','through','above','below','also','more','most','other','only','very',
-      'just','well','back','even','still','already','use','used','using','per',
-      'new','first','one','two','three','see','set','get','make','know','may','must',
-      'based','include','includes','required','following','case','cases','within','upon',
-      'however','therefore','need','needs','note','ensure','refer','via','unless'
-    ]);
-    const chunkWordSets = chunks.map(c => {
-      const words = (c.content_clean || '').toLowerCase().match(/[a-z]{4,}/g) || [];
-      return new Set(words);
-    });
-    const wordChunkCount = new Map();
-    for (const wordSet of chunkWordSets) {
-      for (const word of wordSet) {
-        if (!CONTENT_STOP.has(word)) {
-          wordChunkCount.set(word, (wordChunkCount.get(word) || 0) + 1);
-        }
-      }
-    }
-    // Proportional threshold: max(3, 25% of chunks) — larger nodes need higher frequency
-    const minChunkFreq = Math.max(3, Math.ceil(chunkWordSets.length * 0.25));
-    const freqDerived = [];
-    for (const [word, count] of wordChunkCount) {
-      if (count >= minChunkFreq && word.length >= 4) {
-        freqDerived.push({ word, count });
-      }
-    }
-    // Top 10 frequency-derived terms only (prevent bland accumulation)
-    freqDerived.sort((a, b) => b.count - a.count);
-    for (const { word } of freqDerived.slice(0, 10)) addKw(word);
-
-    if (freq.size === 0) continue;
-
-    // Take top 20 by frequency (raised from 15 to accommodate freq-derived terms)
-    const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
-    const keywords = sorted.map(([kw]) => kw);
-
-    NodeRepo.mergeKeywords(nodeId, keywords);
-    NodeRepo.rebuildFts(nodeId);
-    enriched++;
+    const result = enrichNodeKeywords(nodeId);
+    if (result.added > 0) enriched++;
   }
 
   if (enriched > 0) {
-    logger.info(`Enriched keywords for ${enriched}/${nodeIdsToEnrich.size} nodes (${newNodeIds.length} new + ${nodeIdsToEnrich.size - newNodeIds.length} reused)`);
+    logger.info(`Enriched keywords for ${enriched}/${nodeIdsToEnrich.size} nodes`);
   }
 }
 
@@ -445,33 +362,8 @@ export async function stageComputeNodeQuality(ctx) {
 
   let scored = 0;
   for (const nodeId of newNodeIds) {
-    const node = NodeRepo.findById(nodeId);
-    if (!node) continue;
-
-    let quality = 0.0;
-    const summary = (node.node_summary || '').trim();
-    if (summary.length > 20) quality += 0.25;
-
-    const chunkCount = ChunkRepo.getForNodeLimited(nodeId, 4).length;
-    if (chunkCount >= 3) quality += 0.25;
-
-    const aliases = safeJson(node.aliases_json, []);
-    if (aliases.length >= 3) quality += 0.20;
-
-    const keywords = safeJson(node.keywords_json, []);
-    if (keywords.length >= 3) quality += 0.15;
-
-    const desc = (node.node_description || '').trim();
-    if (desc.length > 0) quality += 0.15;
-
-    // General node penalty
-    if (node.name === 'General' || node.name.startsWith('General —')) {
-      quality *= 0.7;
-    }
-
-    quality = Math.min(quality, 1.0);
-    NodeRepo.updateQualityScore(nodeId, quality);
-    scored++;
+    const q = computeNodeQuality(nodeId);
+    if (q !== null) scored++;
   }
 
   if (scored > 0) {
