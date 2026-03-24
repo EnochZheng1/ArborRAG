@@ -12,6 +12,8 @@ import { searchByAliases } from "./aliases.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { safeJson } from "../../db/db.js";
 import { getCustomPrompt } from "../../prompts/promptManager.js";
+import { getActiveDatasetId } from "../../db/activeDb.js";
+import { createHash } from "crypto";
 
 // LRU-style cache for LLM expansion results
 const queryExpansionCache = new Map();
@@ -96,7 +98,16 @@ export function expandAcronyms(query) {
 }
 
 export async function expandQuery(query) {
-  if (queryExpansionCache.has(query)) return queryExpansionCache.get(query);
+  // Cache key includes dataset + prompt signature to avoid cross-dataset/cross-override staleness.
+  // Probe prompt with empty query to get the template text (selection doesn't branch on query content).
+  const datasetId = getActiveDatasetId() || '_';
+  const customPrompt = getCustomPrompt('queryExpansion', { query: '' });
+  const promptSig = customPrompt
+    ? createHash('sha1').update(customPrompt).digest('hex').slice(0, 8)
+    : 'default';
+  const cacheKey = `${datasetId}:${promptSig}:${query}`;
+
+  if (queryExpansionCache.has(cacheKey)) return queryExpansionCache.get(cacheKey);
 
   if (!isLlmConfigured()) return [query];
 
@@ -121,7 +132,7 @@ Return ONLY a JSON array of strings:
     if (queryExpansionCache.size >= EXPANSION_CACHE_MAX) {
       queryExpansionCache.delete(queryExpansionCache.keys().next().value);
     }
-    queryExpansionCache.set(query, uniqueTerms);
+    queryExpansionCache.set(cacheKey, uniqueTerms);
     logger.debug(`Query expansion: "${query}" -> ${JSON.stringify(uniqueTerms)}`);
     return uniqueTerms;
   } catch (err) {
