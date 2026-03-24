@@ -114,7 +114,7 @@ export async function hybridRecallNodes(query, limit = 30, options = {}) {
   const effectiveVectorThreshold =
     Number.isFinite(vectorThreshold) ? vectorThreshold :
     Number.isFinite(_envThreshold) ? _envThreshold :
-    0.25;
+    0.20;  // lowered from 0.25 to catch semantic gaps (e.g., temperature→hypothermia)
 
   const preparedVariants = Array.isArray(queryVariants) && queryVariants.length > 0
     ? queryVariants

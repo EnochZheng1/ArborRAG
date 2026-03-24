@@ -9,10 +9,91 @@ import { detectLanguage } from "../../utils/langDetect.js";
 import { getNode } from "../graphTraversal.js";
 import { normalizeVariantText, addQueryVariant } from "./utils.js";
 import { searchByAliases } from "./aliases.js";
+import { NodeRepo } from "../../db/repositories/NodeRepo.js";
+import { safeJson } from "../../db/db.js";
+import { getCustomPrompt } from "../../prompts/promptManager.js";
 
 // LRU-style cache for LLM expansion results
 const queryExpansionCache = new Map();
 const EXPANSION_CACHE_MAX = 500;
+
+// ── Acronym resolution ───────────────────────────────────────────────────────
+// Cached index of uppercase acronyms → node names, built from aliases + keywords.
+// Invalidated when node count/updated_at changes.
+
+let _acronymCache = null;
+let _acronymCacheKey = null;
+
+function getAcronymIndex() {
+  try {
+    const countAndUpdate = NodeRepo.getCountAndMaxUpdatedAt();
+    const cacheKey = `${countAndUpdate.count}:${countAndUpdate.max_updated_at}`;
+    if (_acronymCache && _acronymCacheKey === cacheKey) return _acronymCache;
+
+    const index = new Map();
+    const allNodes = NodeRepo.getAllForAcronymIndex();
+    for (const node of allNodes) {
+      const aliases = safeJson(node.aliases_json, []);
+      const keywords = safeJson(node.keywords_json, []);
+      const sources = [...aliases, ...keywords];
+      for (const term of sources) {
+        const upper = String(term).trim().toUpperCase();
+        if (/^[A-Z]{2,5}$/.test(upper)) {
+          if (!index.has(upper)) index.set(upper, []);
+          if (!index.get(upper).some(e => e.nodeId === node.node_id)) {
+            index.get(upper).push({
+              nodeName: node.name, nodeId: node.node_id,
+              quality: node.quality_score ?? 0.5
+            });
+          }
+        }
+      }
+    }
+    _acronymCache = index;
+    _acronymCacheKey = cacheKey;
+    return index;
+  } catch (err) {
+    logger.warn("Acronym index build failed:", err.message);
+    return new Map();
+  }
+}
+
+export function expandAcronyms(query) {
+  // Match short alpha tokens case-insensitively ("hpi" and "HPI" both resolve)
+  const tokens = query.match(/\b[a-zA-Z]{2,5}\b/g) || [];
+  const acronyms = [...new Set(tokens.map(t => t.toUpperCase()))].filter(t => /^[A-Z]{2,5}$/.test(t));
+  if (acronyms.length === 0) return [];
+
+  const index = getAcronymIndex();
+  const expansions = [];
+  for (const acronym of acronyms) {
+    const matches = index.get(acronym);
+    if (!matches || matches.length === 0) continue;
+
+    if (matches.length === 1) {
+      expansions.push({ acronym, expansion: matches[0].nodeName, source: 'acronym' });
+      // Also add longest descriptive alias if available
+      try {
+        const aliasesJson = NodeRepo.getAliasesJson?.(matches[0].nodeId);
+        const nodeAliases = safeJson(aliasesJson || '[]', []);
+        const longestAlias = nodeAliases
+          .filter(a => a.length > matches[0].nodeName.length + 3)
+          .sort((a, b) => b.length - a.length)[0];
+        if (longestAlias) {
+          expansions.push({ acronym, expansion: longestAlias, source: 'acronym_alias' });
+        }
+      } catch { /* non-fatal */ }
+    } else {
+      // Multiple matches — pick highest quality only if clearly dominant
+      const sorted = [...matches].sort((a, b) => b.quality - a.quality);
+      if (sorted[0].quality - (sorted[1]?.quality ?? 0) >= 0.15) {
+        expansions.push({ acronym, expansion: sorted[0].nodeName, source: 'acronym' });
+      }
+      // Otherwise skip — ambiguous acronym
+    }
+  }
+  return expansions;
+}
 
 export async function expandQuery(query) {
   if (queryExpansionCache.has(query)) return queryExpansionCache.get(query);
@@ -20,11 +101,16 @@ export async function expandQuery(query) {
   if (!isLlmConfigured()) return [query];
 
   try {
-    const prompt = `Given this search query, generate 3-5 related search terms or synonyms that might help find relevant content. Include both the original language and translations if applicable.
+    const prompt = getCustomPrompt('queryExpansion', { query }) ??
+      `Given this search query for a knowledge base, generate 3-5 alternative search terms that would find the same information. Include:
+- Synonyms and paraphrases (e.g., "temperature" → "hypothermia", "thermal")
+- Acronym expansions if the query contains acronyms (e.g., "PTO" → "paid time off")
+- Related technical/domain terms (e.g., "docking" → "dilator insertion")
+- Both formal and informal variants
 
 Query: "${query}"
 
-Return ONLY a JSON array of strings, no explanation:
+Return ONLY a JSON array of strings:
 ["term1", "term2", "term3"]`;
 
     const text = await callLLM({ prompt, taskName: 'query_expansion' }) ?? "[]";
@@ -103,6 +189,19 @@ export async function buildRetrievalQueryVariants(query, options = {}) {
     } catch (err) {
       logger.warn("Alias pivot for query variants failed:", err.message);
     }
+  }
+
+  // Acronym resolution — deterministic, no LLM
+  try {
+    const acronymExpansions = expandAcronyms(baseQuery);
+    for (const { expansion } of acronymExpansions) {
+      addQueryVariant(variants, seen, expansion, 0.85, "acronym_expansion");
+    }
+    if (acronymExpansions.length > 0) {
+      logger.debug(`Acronym expansion: ${acronymExpansions.map(e => `${e.acronym}→${e.expansion}`).join(', ')}`);
+    }
+  } catch (err) {
+    logger.warn("Acronym expansion failed:", err.message);
   }
 
   variants.sort((a, b) => b.weight - a.weight || a.text.length - b.text.length);

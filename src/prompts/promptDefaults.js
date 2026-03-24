@@ -486,6 +486,25 @@ Consider the summaries, keywords, and aliases — not just the node name.
 Respond with ONLY the chosen name, nothing else.`
   },
 
+  // ── Query Expansion ─────────────────────────────────────────────────────────
+
+  queryExpansion: {
+    label: "Query Expansion",
+    category: QUERY,
+    description: "Generates synonym and related terms for retrieval",
+    variables: ["query"],
+    default: `Given this search query for a knowledge base, generate 3-5 alternative search terms that would find the same information. Include:
+- Synonyms and paraphrases (e.g., "temperature" → "hypothermia", "thermal")
+- Acronym expansions if the query contains acronyms (e.g., "PTO" → "paid time off")
+- Related technical/domain terms (e.g., "docking" → "dilator insertion")
+- Both formal and informal variants
+
+Query: "{{query}}"
+
+Return ONLY a JSON array of strings:
+["term1", "term2", "term3"]`
+  },
+
   // ── Query Classification ───────────────────────────────────────────────────
 
   queryClassification_en: {

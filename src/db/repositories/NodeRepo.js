@@ -235,6 +235,16 @@ export const NodeRepo = {
     `).all();
   },
 
+  /** All nodes with aliases + keywords + quality for acronym index building. */
+  getAllForAcronymIndex() {
+    return db.prepare(`
+      SELECT node_id, name, aliases_json, keywords_json, quality_score
+      FROM nodes
+      WHERE (aliases_json IS NOT NULL AND aliases_json != '[]' AND aliases_json != 'null')
+         OR (keywords_json IS NOT NULL AND keywords_json != '[]' AND keywords_json != 'null')
+    `).all();
+  },
+
   // ── Point reads used by ingest / embedding ───────────────────────────────────
 
   /** Node level for a given node_id, or null if not found. */
