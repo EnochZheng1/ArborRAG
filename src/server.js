@@ -198,7 +198,7 @@ wss.on("connection", (ws, req) => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
-  logger.info(`TreeKB server running on http://localhost:${PORT}`);
+  logger.info(`ArborKB server running on http://localhost:${PORT}`);
   cleanupOrphanedUploads(); // Run once at startup
   setInterval(cleanupOrphanedUploads, 6 * 60 * 60 * 1000); // Every 6 hours
 

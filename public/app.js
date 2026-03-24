@@ -1,4 +1,4 @@
-// TreeKB Frontend Application — ES Module Entry Point
+// ArborKB Frontend Application — ES Module Entry Point
 // All feature code lives in public/modules/. This file orchestrates initialization.
 
 import { state, THEME_KEY, _tabDirty } from './modules/state.js';

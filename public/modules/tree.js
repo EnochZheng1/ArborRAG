@@ -973,7 +973,7 @@ function initGraphView() {
           if (treeView) treeView.classList.remove('hidden');
         }
       } catch (err) {
-        console.error('[TreeKB] View switch error:', err);
+        console.error('[ArborKB] View switch error:', err);
       }
     });
   });
