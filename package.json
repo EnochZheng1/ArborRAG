@@ -1,7 +1,7 @@
 {
-  "name": "kg-mvp",
-  "version": "3.1.0",
-  "description": "Tree-based Knowledge Graph with intelligent retrieval and reasoning",
+  "name": "arborkb",
+  "version": "3.3.0",
+  "description": "ArborKB — Tree-based Knowledge Graph with intelligent retrieval and reasoning",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

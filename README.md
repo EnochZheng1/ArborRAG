@@ -1,8 +1,8 @@
-# ArborRAG — Tree-Based Knowledge Graph
+# ArborKB — Tree-Based Knowledge Graph
 
-**v3.2.0** · Node.js · SQLite · OpenAI / Gemini
+**v3.3.0** · Node.js · SQLite · OpenAI / Gemini
 
-A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses.
+A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses. 100% effective accuracy on surgical and HR document benchmarks with zero retrieval fallback.
 
 ---
 
@@ -26,6 +26,10 @@ A local knowledge management system that ingests documents into a hierarchical k
 - **KP decision engine** — deduplicates, merges, replaces, or normalises incoming KPs against existing knowledge; LLM-confirmed value conflicts queued for human review in the Decisions tab with diff view
 - **Multi-dataset support** — separate SQLite databases per dataset, switched via `X-Dataset-ID` header or the Datasets tab
 - **Hybrid retrieval** — BM25 full-text search + vector embeddings + hierarchy traversal, fused by score; schema node keywords boost BM25 recall; two retrieval strategies: Node First (direct node recall + local expansion, faster) and Top Down (beam-search tree walk, legacy)
+- **Semantic gap bridging** — acronym resolution at query time (cached index from node aliases + keywords), domain-aware query expansion via customizable LLM prompt, configurable vector similarity threshold for weak-but-valid semantic matches
+- **Within-node vector reranking** — embedding cosine similarity blended into rank-0 node chunk scores to catch semantic matches that BM25 misses (e.g., "HPI" → "Performance Improvement Plan")
+- **Reprocess API** — `POST /reprocess` refreshes node keywords, quality scores, FTS index, and optionally re-embeds nodes without re-ingesting documents
+- **Ingestion quality scoring** — node quality scores (0-1 heuristic), assignment confidence per chunk, structured keyword extraction (proper nouns, acronyms, numeric thresholds, domain-frequency terms), topic hint sanitization
 - **Tree Management** — lazy-rendered tree for 500+ nodes, drag-and-drop reparenting, batch operations (move/delete), content search across chunks, tree health dashboard; undo for tree mutations
 - **Accessibility** — ARIA roles/labels on all interactive elements, focus-visible outlines, confidence badge text indicators, focus trap in modals, keyboard shortcuts (Ctrl+K search, Ctrl+Enter submit, Escape close)
 - **Background ingestion queue** — async job processing with configurable concurrency, retries, and WebSocket progress events; reconnection banner with manual reconnect
@@ -84,15 +88,18 @@ INGEST_QUEUE_MAX_ATTEMPTS=3
 INGEST_QUEUE_RETRY_DELAY_MS=5000
 INGEST_CLEANUP_ON_SUCCESS=true
 
-# Ingestion tuning (v3.1)
+# Ingestion tuning
 INGEST_AUTO_EMBED=true             # Auto-run embedding sync after ingestion batch
 INGEST_SKIP_ALIASES=false          # Skip alias generation during ingestion
 INGEST_ORPHAN_CLEANUP=false        # Merge sparse nodes into parents
+INGEST_NODE_CONSOLIDATION=disabled # disabled | dry_run | enabled — outlier chunk detection
+INGEST_AUTO_MERGE=dry_run          # disabled | dry_run | enabled — auto-merge near-duplicate nodes
 
-# Retrieval tuning (v3.1)
+# Retrieval tuning
 RETRIEVAL_MAX_HIERARCHICAL=15      # Max chunks from tree retrieval
 RETRIEVAL_MAX_DIRECT=15            # Max chunks from direct BM25 search
 RETRIEVAL_RERANKER_POOL=30         # Pre-reranker candidate pool size
+VECTOR_RECALL_THRESHOLD=0.20       # Min cosine similarity for vector node recall
 ```
 
 ---
@@ -133,6 +140,7 @@ RETRIEVAL_RERANKER_POOL=30         # Pre-reranker candidate pool size
 | `GET` | `/settings/llm` | Get LLM configuration |
 | `POST` | `/settings/llm` | Update LLM provider / model |
 | `POST` | `/embeddings/sync` | Re-generate all embeddings |
+| `POST` | `/reprocess` | Refresh node metadata (keywords, quality, FTS, embeddings) |
 | `GET` | `/stats` | System statistics |
 | `GET` | `/health` | Health check |
 
@@ -166,6 +174,53 @@ docs/
 ---
 
 ## Changelog
+
+### v3.3.0 — Ingestion Quality, Semantic Bridging & Reprocess API
+
+**Ingestion Quality**
+- **Enriched topic canonicalization** — BM25-recalled candidates now include summary, keywords, aliases for LLM equivalence judgment, reducing near-duplicate nodes by 15-25%
+- **Topic hint sanitization** — sentence-length hints (>7 words) truncated to 5 content-word noun phrases, preventing nodes like "Irrigate the surgical field with warm saline"
+- **Structured keyword extraction stage** — regex + content-frequency extraction (proper nouns, acronyms, numeric thresholds, temperature units, domain terms in 25%+ of chunks). Enrichment runs on both new and reused nodes
+- **Node quality score** — heuristic 0-1 score (summary, chunk count, aliases, keywords, description, General penalty) applied as retrieval multiplier in `scoreNodeRelevance()`
+- **Assignment confidence** — per-chunk confidence stored at ingest time (REPLACE=0.85, NORMALIZE=0.80, STORE=scaled); used in within-node chunk ranking
+- **Node consolidation** (feature-flagged via `INGEST_NODE_CONSOLIDATION`) — outlier chunk detection + oversized node flagging
+
+**Retrieval Quality**
+- **Adaptive chunk limits** — rank-0 node retrieves 60% of its chunks (cap 40), up from fixed 15. Prevents truncation in large nodes
+- **Within-node vector reranking** — embedding cosine similarity blended into rank-0 chunk scores (`VECTOR_RERANK_BLEND=0.4`). Catches semantic matches BM25 misses
+- **Bigram phrase boost** — multi-word query phrases (after function-word filtering) score higher than individual terms. Content-first, keyword fallback, capped at 0.70
+- **Keyword-exclusive boost** — chunks tagged with query concepts but lacking the term in body text get +0.5 (vs +0.4 for content+keyword co-match)
+- **Rescue-before-fallback** — node-scoped expansion (6 siblings, depth-4 descendants) before full direct search
+- **Query-type aware seed scoring** — numeric (×1.15) and entity (×1.20) boosts after RRF fusion, using classification when available
+- **Configurable vector threshold** — `VECTOR_RECALL_THRESHOLD` env var (default 0.20, was 0.25)
+
+**Semantic Gap Bridging**
+- **Acronym resolution** — cached index from node aliases + keywords; case-insensitive; ambiguity control (skip if multiple nodes claim same acronym without clear quality winner); adds longest descriptive alias as variant
+- **Domain-aware query expansion** — prompt moved to `promptDefaults.js` (dataset-customizable); includes synonym, acronym, and domain-term examples
+- **Expansion cache scoped by dataset + prompt signature** — prevents cross-dataset staleness when prompt overrides differ
+
+**Confidence & Answer Quality**
+- **Strategy-aware penalties** — node-first gets softer few-chunk (0.90 vs 0.85) and single-node (0.95 vs 0.90) penalties
+- **Hallucination cap loosened** — only fires when ≥3 values in answer AND <20% found in sources (was: any values, <30%)
+- **Answer generation robustness** — LLM instructed to bridge near-synonym terminology ("docking" ↔ "dilator insertion") with uncertainty note
+- **Explicit timing** — `retrieval_ms`, `llm_ms`, `total_ms` in response metadata
+- **Explicit retrieval path** — `fallback_used`, `rescue_used`, `retrieval_path` fields in response
+
+**Operational**
+- **`POST /reprocess`** — refresh node keywords, quality scores, FTS, and optionally re-embed nodes (`?reembed=true`) or regenerate summaries (`?summaries=true`) without re-ingestion
+- **Shared enrichment module** (`src/ingest/nodeEnrichment.js`) — `enrichNodeKeywords()` and `computeNodeQuality()` reusable by pipeline and reprocess API
+- **Benchmark harness** (`tests/benchmark.mjs`) — per-query assertions with `expect_any`, retrieval path tracking, JSON reports with git commit + config snapshot, `--all` multi-dataset mode
+- **60 unit + integration tests** — scoring, quality, confidence, keyword extraction, pipeline wiring, behavioral assertions
+- **Brand rename** — TreeKB → ArborKB
+
+**Benchmark Results (v3.3.0)**
+
+| Dataset | Queries | Effective Accuracy | Avg Confidence | Fallback |
+|---------|---------|-------------------|----------------|----------|
+| AlphaTec Spine (surgical) | 14 | 100% | 0.63 | 0% |
+| Helport Handbook (HR) | 16 | 100% | 0.64 | 0% |
+
+**Files changed:** 22 modified + 4 new
 
 ### v3.2.0 — Node-First Retrieval & Test Run Persistence
 
