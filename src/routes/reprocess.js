@@ -15,6 +15,7 @@ import { invalidateVectorCache } from "../kg/vectorTreeRouter.js";
 import { callLLM, isLlmConfigured } from "../utils/llm.js";
 import { ChunkRepo } from "../db/repositories/ChunkRepo.js";
 import { getCustomPrompt } from "../prompts/promptManager.js";
+import { findSplitCandidates, clusterChunksByKeywords, executeSplit } from "../ingest/nodeSplitter.js";
 import { ingestLogger as logger } from "../utils/logger.js";
 
 const router = express.Router();
@@ -22,9 +23,28 @@ const router = express.Router();
 router.post("/reprocess", async (req, res) => {
   const reembed = req.query.reembed === "true";
   const summaries = req.query.summaries === "true";
+  const split = req.query.split === "true";
   const startTime = Date.now();
 
   try {
+    let nodesSplit = 0;
+
+    // Phase 0: Split oversized nodes FIRST (before taking allNodes snapshot)
+    if (split) {
+      const candidates = findSplitCandidates();
+      for (const { nodeId, name, chunkCount } of candidates) {
+        const chunks = ChunkRepo.getForNodeFull(nodeId, 100);
+        const targetClusters = Math.min(5, Math.max(3, Math.ceil(chunkCount / 10)));
+        const clusters = clusterChunksByKeywords(chunks, targetClusters);
+        if (clusters) {
+          executeSplit(nodeId, clusters);
+          nodesSplit++;
+          logger.info(`Reprocess: split "${name}" (${chunkCount} chunks) into ${clusters.length} children`);
+        }
+      }
+    }
+
+    // Take snapshot AFTER splits so new children are included
     const allNodes = NodeRepo.getAllSortedByLevel();
     const total = allNodes.length;
 
@@ -101,6 +121,7 @@ router.post("/reprocess", async (req, res) => {
     res.json({
       success: true,
       nodes_processed: total,
+      nodes_split: nodesSplit,
       keywords_added: keywordsAdded,
       quality_scores_set: qualityScored,
       summaries_generated: summariesGenerated,

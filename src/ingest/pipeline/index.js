@@ -25,6 +25,7 @@ import {
   stageReclassifyGeneral,
   stageTopicCanonicalization,
   stageNodeConsolidation,
+  stageNodeSplitting,
   stageOrphanCleanup,
   stageEmbeddingSync,
   stageFinalize,
@@ -144,6 +145,7 @@ const STAGES = [
   { name: "reclassify",       fn: stageReclassifyGeneral,      skip: ctx => ctx.isDuplicate },
   { name: "canonicalize",     fn: stageTopicCanonicalization,   skip: ctx => ctx.isDuplicate },
   { name: "consolidation",   fn: stageNodeConsolidation,       skip: ctx => ctx.isDuplicate },
+  { name: "splitting",       fn: stageNodeSplitting,           skip: ctx => ctx.isDuplicate },
   { name: "orphanCleanup",    fn: stageOrphanCleanup,          skip: ctx => ctx.isDuplicate },
   { name: "finalize",         fn: stageFinalize,               skip: ctx => ctx.isDuplicate }
 ];

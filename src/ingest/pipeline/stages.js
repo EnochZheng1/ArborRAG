@@ -31,6 +31,7 @@ import { getCustomPrompt } from "../../prompts/promptManager.js";
 import { findMergeCandidates, queueNodeMergeSuggestion } from "../nodeMerger.js";
 import { reclassifyGeneralKPs } from "../kpNormaliser.js";
 import { enrichNodeKeywords, computeNodeQuality } from "../nodeEnrichment.js";
+import { findSplitCandidates, clusterChunksByKeywords, executeSplit } from "../nodeSplitter.js";
 import { ChunkRepo } from "../../db/repositories/ChunkRepo.js";
 import { NodeRepo } from "../../db/repositories/NodeRepo.js";
 import { DecisionRepo } from "../../db/repositories/DecisionRepo.js";
@@ -540,6 +541,55 @@ export async function stageNodeConsolidation(ctx) {
     logger.info(`${prefix}Node consolidation: ${outliersMoved} outlier chunks moved, ${splitsFlagged} split suggestions`);
     ctx.setStep(documentId, "node_consolidation",
       `${prefix}${outliersMoved} outliers moved, ${splitsFlagged} splits flagged.`, 91);
+  }
+}
+
+// ── Stage 5c3: Node splitting — break oversized nodes into keyword clusters ───
+
+const NODE_SPLIT_MODE = (process.env.INGEST_NODE_SPLIT || 'disabled').toLowerCase();
+
+export async function stageNodeSplitting(ctx) {
+  if (NODE_SPLIT_MODE === 'disabled') return;
+
+  const { documentId } = ctx;
+  const newNodeIds = ctx.createdNodeIds || [];
+  if (newNodeIds.length === 0) return;
+
+  const isDryRun = NODE_SPLIT_MODE === 'dry_run';
+  ctx.setStep(documentId, "node_splitting",
+    `${isDryRun ? '[DRY RUN] ' : ''}Splitting oversized nodes…`, 92);
+
+  const candidates = findSplitCandidates(newNodeIds);
+  let splitCount = 0;
+
+  for (const { nodeId, name, chunkCount } of candidates) {
+    const chunks = ChunkRepo.getForNodeFull(nodeId, 100);
+    const targetClusters = Math.min(5, Math.max(3, Math.ceil(chunkCount / 10)));
+    const clusters = clusterChunksByKeywords(chunks, targetClusters);
+
+    if (!clusters) {
+      logger.info(`Node "${name}" (${chunkCount} chunks): clustering returned null, skipping split`);
+      continue;
+    }
+
+    if (isDryRun) {
+      logger.info(`[DRY RUN] Would split "${name}" (${chunkCount} chunks) into ${clusters.length} clusters:`);
+      for (let i = 0; i < clusters.length; i++) {
+        const c = clusters[i];
+        const kws = c.seed ? [...c.seed.kws].slice(0, 5).join(', ') : 'misc';
+        logger.info(`  Cluster ${i + 1}: ${c.chunks.length} chunks (seeds: ${kws})`);
+      }
+    } else {
+      const result = executeSplit(nodeId, clusters);
+      // Append new child IDs so downstream stages (embedding sync, finalize) see them
+      ctx.createdNodeIds.push(...result.childNodeIds);
+      splitCount++;
+    }
+  }
+
+  if (splitCount > 0 || (isDryRun && candidates.length > 0)) {
+    const prefix = isDryRun ? '[DRY RUN] ' : '';
+    logger.info(`${prefix}Node splitting: ${isDryRun ? candidates.length + ' candidates found' : splitCount + ' nodes split'}`);
   }
 }
 
