@@ -15,7 +15,8 @@ import { ingestLogger as logger } from "../utils/logger.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIN_CHUNKS_TO_SPLIT = 25;
-const MIN_CLUSTER_SIM = 0.15;  // calibrate against real oversized nodes
+const MIN_CLUSTER_SIM = 0.08;  // must be very low — diverse multi-topic nodes have near-zero keyword overlap
+const MAX_MISC_RATIO = 0.40;   // abort if more than 40% of chunks are unassignable
 
 const CLUSTER_STOP_KEYWORDS = new Set([
   'general', 'information', 'document', 'content', 'section', 'overview',
@@ -82,6 +83,34 @@ export function clusterChunksByKeywords(chunks, targetClusters = 3) {
     assigned.add(chunk.id);
   }
 
+  // Second pass: try to assign misc chunks by content similarity to cluster content
+  // (not just seed keywords). Uses aggregated keyword pool of each cluster.
+  if (misc.length > 0) {
+    const clusterKwPools = clusters.map(c => {
+      const pool = new Set();
+      for (const ch of c.chunks) { for (const kw of ch.kws) pool.add(kw); }
+      return pool;
+    });
+
+    const stillMisc = [];
+    for (const chunk of misc) {
+      let bestIdx = -1, bestSim = -1;
+      for (let i = 0; i < clusters.length; i++) {
+        const sim = keywordSetDice(chunk.kws, clusterKwPools[i]);
+        if (sim > bestSim) { bestSim = sim; bestIdx = i; }
+      }
+      if (bestSim > 0) {
+        clusters[bestIdx].chunks.push(chunk);
+        // Update pool
+        for (const kw of chunk.kws) clusterKwPools[bestIdx].add(kw);
+      } else {
+        stillMisc.push(chunk);
+      }
+    }
+    misc.length = 0;
+    misc.push(...stillMisc);
+  }
+
   // Post-validation: merge tiny clusters into nearest
   for (let i = clusters.length - 1; i >= 0; i--) {
     if (clusters[i].chunks.length < 3 && clusters.length > 1) {
@@ -104,7 +133,7 @@ export function clusterChunksByKeywords(chunks, targetClusters = 3) {
   // Abort if misc dominates or only 1 cluster
   if (clusters.length < 2) return null;
   const miscCluster = clusters.find(c => c.seed === null);
-  if (miscCluster && miscCluster.chunks.length > chunks.length * 0.5) return null;
+  if (miscCluster && miscCluster.chunks.length > chunks.length * MAX_MISC_RATIO) return null;
 
   return clusters;
 }

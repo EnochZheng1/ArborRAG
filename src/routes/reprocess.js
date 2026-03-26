@@ -32,11 +32,15 @@ router.post("/reprocess", async (req, res) => {
     // Phase 0: Split oversized nodes FIRST (before taking allNodes snapshot)
     if (split) {
       const candidates = findSplitCandidates();
+      logger.info(`Reprocess split: found ${candidates.length} candidates`);
+      for (const c of candidates) logger.info(`  Candidate: "${c.name}" (${c.chunkCount} chunks)`);
       for (const { nodeId, name, chunkCount } of candidates) {
         const chunks = ChunkRepo.getForNodeFull(nodeId, 100);
-        const targetClusters = Math.min(5, Math.max(3, Math.ceil(chunkCount / 10)));
+        const targetClusters = Math.min(7, Math.max(3, Math.ceil(chunkCount / 8)));
         const clusters = clusterChunksByKeywords(chunks, targetClusters);
+        logger.info(`  clusterChunksByKeywords returned: ${clusters ? clusters.length + ' clusters' : 'null (split aborted)'}`);
         if (clusters) {
+          logger.info(`  Clustering produced ${clusters.length} clusters: ${clusters.map(c => c.chunks.length + ' chunks').join(', ')}`);
           executeSplit(nodeId, clusters);
           nodesSplit++;
           logger.info(`Reprocess: split "${name}" (${chunkCount} chunks) into ${clusters.length} children`);

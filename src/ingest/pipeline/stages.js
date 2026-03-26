@@ -564,7 +564,7 @@ export async function stageNodeSplitting(ctx) {
 
   for (const { nodeId, name, chunkCount } of candidates) {
     const chunks = ChunkRepo.getForNodeFull(nodeId, 100);
-    const targetClusters = Math.min(5, Math.max(3, Math.ceil(chunkCount / 10)));
+    const targetClusters = Math.min(7, Math.max(3, Math.ceil(chunkCount / 8)));
     const clusters = clusterChunksByKeywords(chunks, targetClusters);
 
     if (!clusters) {
