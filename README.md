@@ -2,14 +2,14 @@
 
 **v3.3.0** · Node.js · SQLite · OpenAI / Gemini
 
-A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses. 100% effective accuracy on surgical and HR document benchmarks with zero retrieval fallback.
+A local knowledge management system that ingests documents into a hierarchical knowledge graph, then answers questions with cited, reasoned responses. The v3.3.0 results below report 100% effective accuracy on two small local query sets; they do not establish general accuracy.
 
 ---
 
 ## Features
 
 - **Modular ES Module Frontend** — 8,200-line monolith split into 10 focused ES modules; thin entry point; shared state via module imports; function registry for cross-module calls
-- **Security Hardening** — helmet security headers (HSTS, X-Frame-Options, CSP); express-rate-limit (120 req/min general, 20 req/min for LLM); file magic byte validation; orphaned upload cleanup; sanitized error messages in production
+- **Security Hardening** — selected helmet security headers (CSP is disabled for the current frontend); express-rate-limit (120 req/min general, 20 req/min for LLM); file magic byte validation; orphaned upload cleanup; sanitized error messages in production
 - **Structured API Errors** — all endpoints return `{ error: { code, message, details? } }` with typed error codes (VALIDATION_ERROR, NOT_FOUND, CONFLICT, RATE_LIMITED); request ID on every response via `X-Request-ID` header
 - **Retrieval Quality** — result caching (5-min TTL); skip LLM classification on high-confidence patterns; consolidated citation LLM calls (4→2 max); early cross-doc filtering; query-specific confidence scoring; recency signal in confidence; centralized query helpers
 - **Ingestion Quality** — paragraph fallback cap; fuzzy match in node creation recovery; batched keyword merging; sibling scan limit (50); improved CJK heading detection; checkpoint-before-processing; table KP cross-dedup
@@ -49,11 +49,13 @@ npm install
 cp .env.example .env
 
 # Start the server
-npm start          # production
+npm start          # run the server
 npm run dev        # auto-restart on file changes
 ```
 
 Open `http://localhost:3000` in your browser.
+
+This is a local, single-operator setup. The server routes do not implement user authentication or per-user dataset authorization; separate SQLite datasets are not an access-control boundary. Keep API credentials in the ignored `.env` file, review provider data handling before uploading sensitive documents, and add deployment-specific access controls before exposing the server beyond a trusted local environment.
 
 ---
 
@@ -213,12 +215,14 @@ docs/
 - **60 unit + integration tests** — scoring, quality, confidence, keyword extraction, pipeline wiring, behavioral assertions
 - **Brand rename** — TreeKB → ArborKB
 
-**Benchmark Results (v3.3.0)**
+**Reported local benchmark results (v3.3.0)**
 
 | Dataset | Queries | Effective Accuracy | Avg Confidence | Fallback |
 |---------|---------|-------------------|----------------|----------|
 | AlphaTec Spine (surgical) | 14 | 100% | 0.63 | 0% |
 | Helport Handbook (HR) | 16 | 100% | 0.64 | 0% |
+
+These project-reported runs cover only the named query sets and were not rerun for this README. They are not an independently replicated or held-out performance claim. Confirm permission to use any source documents or benchmark material before sharing them outside their approved context.
 
 **Files changed:** 22 modified + 4 new
 
