@@ -1,121 +1,82 @@
+<div align="center">
+
 # ArborKB
 
-**v3.3.0 · Node.js · SQLite · OpenAI or Google Gemini**
+### Give your documents a structure you can explore.
 
-ArborKB turns a set of documents into a navigable topic tree and answers questions with citations to the stored material. It is a local, single-operator application with a web UI and REST API. Each dataset has its own SQLite database; ingestion and queries use a selected LLM provider.
+Turn scattered material into a topic tree, ask questions, and follow the answer back to its sources.
 
-## What it does
+**Knowledge trees** · **Source-linked answers** · **Separate local datasets**
 
-1. Create or select a dataset in the web UI. Optionally import a guided tree schema before ingesting documents.
-2. Upload documents. A background queue parses them, extracts knowledge points, assigns them to tree nodes, and records decisions for potential conflicts.
-3. Inspect the tree and pending decisions. Adjust nodes, review source chunks, and regenerate embeddings or node metadata when needed.
-4. Ask questions. Retrieval combines SQLite full-text search, optional vector embeddings, and the hierarchy; the answer includes source citations and confidence signals.
-5. Save test questions and compare local runs when changing data, prompts, or retrieval settings.
+[Why ArborKB](#find-the-context-behind-the-answer) · [Product tour](#product-tour) · [Try it locally](#try-it-locally)
 
-Supported inputs in `src/ingest/fileParser.js`: `.txt`, `.md`, `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.html`, `.htm`, `.json`, `.csv`, and `.pptx`. Extraction quality depends on the document structure and provider response; check the parsed content and citations for important answers.
+</div>
 
-## Start locally
+![ArborKB knowledge tree with expanded fictional Operations and Supply Chain topics](docs/images/product-overview.jpg)
 
-You need Node.js, npm, and credentials for either OpenAI or Google Gemini. This project uses `better-sqlite3`, which may need a compatible native build on your platform.
+*Actual local application with manually seeded fictional ACME demo nodes. This tour shows tree navigation; it does not represent AI ingestion or a generated answer.*
 
-```sh
+## Find the context behind the answer
+
+A folder full of documents can be hard to navigate. Keyword search finds mentions, while a chatbot can leave you wondering where an answer came from.
+
+ArborKB organizes extracted knowledge into a tree of topics. Browse the structure, inspect the underlying material, and ask questions with citations to the stored sources. It combines a visual knowledge workspace with AI-assisted document processing and retrieval.
+
+## Product tour
+
+### 1. Create a home for the material
+
+Open **Datasets** to create or select a knowledge base. Each dataset has its own local SQLite database. Import a guided schema if you want a consistent starting taxonomy.
+
+### 2. Bring in documents
+
+Use **Ingest** to upload material and watch the background job progress. The parser accepts common text, office, spreadsheet, PDF, and HTML formats. AI extraction turns the material into knowledge points and maps them to the topic tree.
+
+An accepted upload starts a job; wait for it to finish before expecting the new knowledge in answers.
+
+![ArborKB document intake interface before an upload](docs/images/document-intake.jpg)
+
+*The intake screen is shown before uploading a document; no ingestion or provider call was run for this capture.*
+
+### 3. Explore and refine the tree
+
+Open **Tree**, move through related topics, and inspect the stored chunks behind a node. Edit or reparent a topic when the structure needs work. **Decisions** lets you review potential conflicts and replacements rather than silently treating them as settled knowledge.
+
+![Procurement topic with its summary and child nodes in the fictional demo tree](docs/images/node-detail.jpg)
+
+### 4. Ask, inspect, and improve
+
+Ask a question in **Ask**. Retrieval combines the hierarchy, full-text search, and optional vector embeddings to assemble supporting material. Review the citations and confidence signals alongside the answer.
+
+Save representative questions in **Tests** and compare local runs after changing documents, prompts, or retrieval settings.
+
+## A workspace for the whole knowledge lifecycle
+
+- **Bring context together:** ingest multiple file types into a navigable topic structure.
+- **See the organization:** inspect and adjust the hierarchy instead of treating retrieval as a black box.
+- **Keep sources close:** follow stored material behind a node or answer.
+- **Review change:** inspect conflicts, source chunks, and proposed replacements.
+- **Keep projects separate:** switch among local datasets and their schemas.
+
+## Try it locally
+
+Requires Node.js, npm, a compatible `better-sqlite3` native build, and OpenAI or Gemini credentials for AI ingestion and answers.
+
+```powershell
 npm ci
-cp .env.example .env
-# Edit .env: choose LLM_PROVIDER and set the matching provider key.
+Copy-Item .env.example .env
+# Choose LLM_PROVIDER and set its provider key in .env.
 npm start
 ```
 
-Open <http://localhost:3000>. The `.env.example` template selects Gemini; set `GEMINI_API_KEY`, or switch `LLM_PROVIDER=openai` and set `OPENAI_API_KEY`. Gemini can also use Vertex AI service-account authentication (see the template). `npm run dev` restarts the server as source files change.
+Open [the local workspace](http://localhost:3000/). Create a dataset, ingest a small document, wait for completion, and ask a question. The tree interface can also display manually seeded demo nodes without an AI provider.
 
-For a first run, create a dataset in **Datasets**, upload a small document in **Ingest**, wait for the job to finish, then ask a question in **Ask**. The server exposes `GET /health` for a basic process check. Documents, databases, credentials, and logs should remain local and are excluded by `.gitignore`.
+See the [development guide](docs/development.md) for configuration, supported inputs, API examples, and operational details.
 
-If ingestion fails, inspect the job in **Ingest** or `GET /ingest/jobs/:id` and the local server log. First check the file extension, provider credentials, and any rate or upload limit in `.env`. An upload is queued by default; an accepted HTTP response means the job was created, not that extraction has finished.
+## Where the project is today
 
-## Configuration
+ArborKB is a local application for a trusted single operator. It has no user login or per-user dataset authorization. Provider-backed processing may send document text outside the machine. Answers need source review; local benchmark reports do not establish general accuracy.
 
-Copy `.env.example` and change only the settings you need. Do not commit `.env` or service-account files.
+The screenshots were captured from the local `arborkb-v4` development working tree. Some uncommitted implementation changes are excluded from this documentation publication, so a GitHub checkout may differ from the captured interface. The pictured topics are manually seeded fictional demo nodes.
 
-| Setting | Purpose |
-| --- | --- |
-| `LLM_PROVIDER` | `gemini` or `openai`; initial provider for LLM calls. |
-| `GEMINI_API_KEY`, `OPENAI_API_KEY` | Credential for the selected provider. |
-| `GEMINI_MODEL`, `OPENAI_MODEL` | Provider model names for extraction and answers. |
-| `GEMINI_EMBEDDING_MODEL`, `OPENAI_EMBEDDING_MODEL` | Embedding models used by vector retrieval. |
-| `VERTEX_AI`, `VERTEX_PROJECT`, `VERTEX_LOCATION`, `GOOGLE_SERVICE_ACCOUNT_KEY` | Optional Vertex AI authentication for Gemini. |
-| `PORT` | HTTP port, default `3000`. |
-| `INGEST_QUEUE_CONCURRENCY`, `INGEST_QUEUE_MAX_ATTEMPTS` | Background ingestion throughput and retries. |
-| `INGEST_AUTO_EMBED`, `DISABLE_EMBEDDINGS` | Embedding generation and vector-retrieval availability. |
-| `INGEST_MAX_FILE_MB`, `INGEST_MAX_BATCH_FILES` | Upload limits. |
-| `RETRIEVAL_MAX_HIERARCHICAL`, `RETRIEVAL_MAX_DIRECT`, `RETRIEVAL_RERANKER_POOL`, `VECTOR_RECALL_THRESHOLD` | Retrieval candidate limits and vector threshold. |
-
-The **Settings** tab can switch provider and model at runtime and customize prompts per dataset. Other ingestion options, timeouts, and defaults are documented in `.env.example`; guided schema settings are described in [the schema manual](docs/GUIDED_SCHEMA_MANUAL.md).
-
-## Main interfaces
-
-The UI is served from `public/`. API requests can select a dataset with the `X-Dataset-ID` header; without it, the server uses its default dataset. This header selects a database, not an access-control boundary.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/upload`, `/upload/batch` | Queue one or more files for ingestion. |
-| `GET` | `/ingest/jobs/:id` | Read a queued job's status. |
-| `POST` | `/ask` | Ask a question (`{"query":"..."}`); returns an answer and supporting material. |
-| `GET`, `POST` | `/datasets` | List or create datasets. |
-| `GET` | `/nodes` | Inspect the topic tree. |
-| `GET` | `/decisions` | Review pending knowledge-point decisions. |
-| `POST` | `/reprocess` | Refresh node metadata, search index, or embeddings. |
-| `GET` | `/health` | Basic server status. |
-
-For the broader route inventory and request schemas, see [the OpenAPI file](docs/openapi.yaml) and `src/routes/`. Check the route implementation if a specification detail differs from the running code.
-
-For example, after starting the server and selecting a default dataset, these requests upload one file and ask a question:
-
-```sh
-curl -F "file=@./example.md" http://localhost:3000/upload
-curl -X POST http://localhost:3000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"query":"What does the uploaded document say?"}'
-```
-
-Wait for the ingestion job to complete before asking. To use a particular dataset from the API, add `-H "X-Dataset-ID: <dataset-id>"` to each dataset-scoped request. The browser UI sets this context as you switch datasets.
-
-## Code map
-
-```text
-src/server.js          Express, WebSocket, middleware, and route registration
-src/routes/            REST handlers for uploads, queries, datasets, tree, settings
-src/ingest/            File parsing, queue, extraction, node mapping, decisions
-src/kg/                Question answering and tree-based retrieval
-src/query/             Ranking, citations, confidence, and query helpers
-src/embedding/         Provider embeddings and vector support
-src/db/                Dataset registry and SQLite repositories
-src/utils/llm.js       OpenAI/Gemini provider configuration and calls
-public/               Browser UI
-```
-
-The v3.3.0 default retrieval path starts with node-first recall, expands nearby nodes, and can use direct search when that result is weak. Guided schemas can constrain or extend the topic tree. The ingestion queue reports progress through WebSocket events. See [document processing](docs/DOCUMENT_PROCESSING_FLOW.md) and [retrieval flow](docs/RETRIEVAL_FLOW.md) for deeper implementation notes; those older TreeKB-named documents may describe earlier defaults, so use the source for exact current behavior.
-
-### Working with a dataset
-
-- **Tree:** inspect topic nodes and their source chunks; edit or reparent a node when the taxonomy is wrong.
-- **Decisions:** review knowledge-point conflicts or replacements before treating the result as settled knowledge.
-- **Schema:** import a predefined tree when consistent names matter. Soft mode permits new child nodes; hard mode keeps mapping inside the defined tree.
-- **Embeddings:** use the UI or `/embeddings/sync` after changing embedding settings. Without embeddings, full-text and tree retrieval still operate, but vector recall is unavailable.
-- **Tests:** save representative Q&A pairs in the UI and compare run history after changing prompts, documents, or retrieval settings.
-
-Dataset databases and the registry are local SQLite files in `data/`; uploads are staged under `uploads/`. Back up the database files before significant changes to the tree or ingestion settings. By default the ingestion pipeline removes an uploaded source file after successful processing, while extracted knowledge remains in the database.
-
-## Operational limits and evidence
-
-The server has no user login or per-user dataset authorization. It is intended for a trusted local environment. Its rate limits and security headers do not make it ready for internet exposure; the current server disables Content Security Policy for the UI. Provider calls can send document text and query context outside the machine. Confirm data rights and the selected provider's handling before uploading sensitive material. Review answers against their citations, especially for consequential use.
-
-The v3.3.0 release notes report **100% “effective accuracy”** on two small local query sets (14 and 16 queries), with average confidence of 0.63 and 0.64. These are project-reported, dataset-specific runs; they were not rerun for this documentation update and are not held-out or independent validation. The named datasets and full qualifications remain in [version history](docs/version-history.md). The benchmark harness is `tests/benchmark.mjs`; saved test cases and their data determine what it actually measures.
-
-For local development, `npm test` runs the project's test runner, `npm run lint` checks `src/`, and `npm run benchmark` executes the configured query set against a running server. A benchmark result depends on the selected dataset, provider, prompts, query set, and configuration; keep those inputs with any reported score. These commands were not run for this README update.
-
-## Further reading
-
-- [Version history](docs/version-history.md) — release details and qualified local benchmark report.
-- [Guided schema manual](docs/GUIDED_SCHEMA_MANUAL.md) — schema design, import, and strictness modes.
-- [Document processing flow](docs/DOCUMENT_PROCESSING_FLOW.md) — queue and ingestion stages.
-- [Retrieval flow](docs/RETRIEVAL_FLOW.md) — recall, ranking, and answer generation.
-- [OpenAPI specification](docs/openapi.yaml) — API reference; verify details against `src/routes/`.
+Learn more in the [guided schema manual](docs/GUIDED_SCHEMA_MANUAL.md), [document processing flow](docs/DOCUMENT_PROCESSING_FLOW.md), and [API reference](docs/openapi.yaml).
